@@ -89,6 +89,12 @@ export function registryServer(deps) {
           const isBuiltin = available.includes(a.server);
           const isInstalled = !!(m.installed ?? {})[a.server];
           if (!isBuiltin && !isInstalled) throw new Error(`unknown server: ${a.server}`);
+          // Marketplace server enabled but not yet hosted in this Kernel (e.g. after a
+          // fresh boot where its describe failed) → load it out-of-process now so the
+          // synchronous rebuild() below can register the proxy from cached descriptors.
+          if (isInstalled && !kernel._marketplaceServers.has(a.server)) {
+            await kernel.loadMarketplaceServer(a.server, m.installed[a.server]);
+          }
           m.servers[a.server] = a.config ?? m.servers[a.server] ?? {};
           saveManifest(sandbox, m);
           kernel.rebuild();
@@ -165,10 +171,10 @@ export function registryServer(deps) {
           } else {
             url = a.source.startsWith("file://") ? a.source : pathToFileURL(a.source).href;
           }
-          const mod = await import(url);
-          const factory = mod.default ?? mod.createServer;
-          if (!factory) throw new Error(`${a.source} has no default or createServer export`);
-          kernel._marketplaceFactories.set(a.name, factory);
+          // Backlog #12: load the server OUT OF PROCESS. The control plane never
+          // imports the third-party module; the isolated child does, and the
+          // describe handshake validates the export (throws here if it's invalid).
+          await kernel.loadMarketplaceServer(a.name, url);
           const m = loadManifest(sandbox);
           if (!m.installed) m.installed = {};
           // Store the resolved file URL so the kernel can re-import on restart without npm.
@@ -203,7 +209,7 @@ export function registryServer(deps) {
           if (m.installedMeta) delete m.installedMeta[a.name]; // item #12: drop provenance too
           delete m.servers[a.name];
           saveManifest(sandbox, m);
-          kernel._marketplaceFactories.delete(a.name);
+          kernel.unloadMarketplaceServer(a.name); // drops descriptors + kills the child
           kernel.rebuild();
           return { uninstalled: a.name, enabled: Object.keys(m.servers) };
         },

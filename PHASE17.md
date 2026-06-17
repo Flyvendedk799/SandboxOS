@@ -78,12 +78,12 @@ isolation, and credential/secret material was under-protected at rest.
   `SANDBOXOS_MASTER_KEY_PATH`. **Deferred:** per-tenant key derivation (HKDF) +
   rotation (needs a cross-file re-encryption migration).
 
-### #12 — Marketplace install hardening (MEDIUM, interim)
+### #12 — Marketplace install hardening (MEDIUM, interim — completed in Phase 18)
 - `mcp-registry.install` enforces a source allowlist (`SANDBOXOS_MCP_ALLOWLIST`,
   default `npm:`/`file:` incl. bare local paths) and records provenance
   (`source`, `resolvedPath`, sha256 `hash`, `installedAt`) in the manifest.
-  **Deferred:** out-of-process hosting of untrusted servers (the proper Phase-1 fix;
-  install still does an in-process `import()` of third-party code).
+- **Now complete (Phase 18):** untrusted marketplace servers run **out of process**
+  with no host handle — see PHASE18.md. The interim in-process `import()` is gone.
 
 ### #13 — Resource enforcement (LOW, partial)
 - Plain `DockerBackend` now honors the tenant quota (`memMb`/`cpuShares` in the run
@@ -108,7 +108,7 @@ isolation, and credential/secret material was under-protected at rest.
 
 ## Deferred to a future phase (genuinely larger / cross-cutting)
 - Per-tenant secret key derivation + rotation (#11).
-- Out-of-process hosting of untrusted marketplace servers (#12) — the real isolation fix.
+- ~~Out-of-process hosting of untrusted marketplace servers (#12)~~ — **done in Phase 18.**
 - Host-global agent concurrency ceiling (#13).
 - better-sqlite3 v11 driver swap (#14) — only if the zero-dep tradeoff is revisited.
 - Multi-host scheduler, federation, billing/metering — require external infrastructure.

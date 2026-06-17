@@ -11,12 +11,12 @@
 // moves it inside the Cell.
 
 import { EventEmitter } from "node:events";
-import { pathToFileURL } from "node:url";
 import { authorize } from "./capabilities.js";
 import { appendAudit } from "../../control-db/src/registry.js";
 import { getCell } from "../../cell/src/cell.js";
 import { CATALOG, availableServers } from "./catalog.js";
 import { loadManifest, enabledServers } from "../../manifest/src/manifest.js";
+import { hostedServer, killHosted, killAllHosted } from "./marketplace-pool.js";
 
 export class DeniedError extends Error {
   constructor(target) { super(`denied: ${target}`); this.name = "DeniedError"; this.code = "denied"; }
@@ -30,8 +30,11 @@ export class Kernel {
     this.sandbox = sandbox;
     this.cell = cell;
     this.servers = new Map();
-    /** Marketplace server factories loaded at runtime via mcp-registry.install. */
-    this._marketplaceFactories = new Map();
+    /** Marketplace servers loaded via mcp-registry.install, keyed by name →
+     *  { source, descriptors }. Backlog #12: their code runs OUT OF PROCESS
+     *  (marketplace-pool.js); we cache only the tool descriptors here so the
+     *  synchronous rebuild() can register a proxy without re-spawning anything. */
+    this._marketplaceServers = new Map();
     /** Live event bus: emits 'audit' for every call so the console can tail it. */
     this.events = new EventEmitter();
     this.events.setMaxListeners(0);
@@ -42,8 +45,39 @@ export class Kernel {
     return this;
   }
 
+  /** Spawn (or reuse) the out-of-process host for a marketplace server, fetch its
+   *  tool descriptors, and cache them so rebuild() can register the proxy. Async
+   *  because the describe handshake crosses the process boundary. */
+  async loadMarketplaceServer(name, source) {
+    const desc = await hostedServer(this.sandbox.id, name, source).describe();
+    this._marketplaceServers.set(name, { source, descriptors: desc.tools ?? [] });
+    return desc;
+  }
+
+  /** Forget a marketplace server and kill its child process. */
+  unloadMarketplaceServer(name) {
+    this._marketplaceServers.delete(name);
+    killHosted(this.sandbox.id, name);
+  }
+
+  /** Build an in-process PROXY server for a marketplace entry. Each tool handler
+   *  forwards (args only) to the isolated child; the Kernel's authorize+audit path
+   *  around it is unchanged, so out-of-process servers are governed identically. */
+  _marketplaceProxy(name, { source, descriptors }) {
+    const sandboxId = this.sandbox.id;
+    const tools = {};
+    for (const d of descriptors) {
+      tools[d.name] = {
+        description: d.description, inputSchema: d.inputSchema,
+        handler: (_ctx, args) => hostedServer(sandboxId, name, source).call(d.name, args),
+      };
+    }
+    return { name, tools, _marketplace: true };
+  }
+
   /** (Re)build the enabled server set from the Sandbox manifest. Called on boot and
-   *  whenever mcp-registry / kernel.manifestSet changes the composition. */
+   *  whenever mcp-registry / kernel.manifestSet changes the composition. Synchronous:
+   *  core servers are in-process factories; marketplace servers use cached descriptors. */
   rebuild() {
     this.servers.clear();
     const manifest = loadManifest(this.sandbox);
@@ -52,12 +86,20 @@ export class Kernel {
       availableServers: availableServers(),
     };
     for (const name of enabledServers(manifest)) {
-      const factory = CATALOG[name] ?? this._marketplaceFactories.get(name);
+      const factory = CATALOG[name];
+      if (factory) { this.servers.set(name, factory(deps)); continue; }
       // Use the manifest key as the server name so marketplace servers installed
       // under an alias (e.g. "hello2") are routed correctly.
-      if (factory) this.servers.set(name, factory(deps));
+      const mk = this._marketplaceServers.get(name);
+      if (mk) this.servers.set(name, this._marketplaceProxy(name, mk));
     }
     return this;
+  }
+
+  /** Tear down: kill every out-of-process marketplace child for this Sandbox. */
+  dispose() {
+    killAllHosted(this.sandbox.id);
+    this._marketplaceServers.clear();
   }
 
   /** The unified tool catalog — the union of every enabled server, namespaced. */
@@ -133,15 +175,13 @@ export async function getKernel(sandbox) {
   const p = (async () => {
     const cell = getCell(sandbox);
     const kernel = new Kernel(sandbox, cell);
-    // Pre-load any marketplace factories persisted in manifest.installed.
+    // Pre-load marketplace servers persisted in manifest.installed — out of process
+    // (backlog #12), so their code never imports into the control plane. A failed
+    // load (bad source) is skipped so one broken install can't block boot.
     const manifest = loadManifest(sandbox);
     for (const [name, source] of Object.entries(manifest.installed ?? {})) {
-      try {
-        const url = source.startsWith("file://") ? source : pathToFileURL(source).href;
-        const mod = await import(url);
-        const factory = mod.default ?? mod.createServer;
-        if (factory) kernel._marketplaceFactories.set(name, factory);
-      } catch { /* skip unresolvable sources on boot */ }
+      try { await kernel.loadMarketplaceServer(name, source); }
+      catch { /* skip unresolvable sources on boot */ }
     }
     return kernel.rebuild();
   })();
@@ -149,12 +189,16 @@ export async function getKernel(sandbox) {
   return p;
 }
 
-/** For tests: drop cached kernels. */
+/** For tests: drop cached kernels and kill all out-of-process marketplace children. */
 export function _resetKernels() {
+  for (const p of _kernels.values()) Promise.resolve(p).then((k) => k.dispose()).catch(() => {});
   _kernels.clear();
+  killAllHosted(); // belt-and-suspenders: reap any orphaned children
 }
 
 /** Drop the cached Kernel for a specific Sandbox (call before deleting it). */
 export function _dropKernel(sandboxId) {
+  const p = _kernels.get(sandboxId);
+  if (p) Promise.resolve(p).then((k) => k.dispose()).catch(() => {});
   _kernels.delete(sandboxId);
 }
