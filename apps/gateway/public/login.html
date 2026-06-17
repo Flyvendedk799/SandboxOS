@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SandboxOS</title>
+  <link rel="icon" href="/favicon.ico" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body class="center">
+  <main class="card login">
+    <div class="brand">
+      <span class="glyph">⇌</span>
+      <h1>SandboxOS</h1>
+    </div>
+    <p class="tagline">Open a URL, you're inside your machine.</p>
+
+    <div class="auth-tabs">
+      <button class="auth-tab active" data-panel="login-panel">Sign in</button>
+      <button class="auth-tab" data-panel="signup-panel">Sign up</button>
+    </div>
+
+    <!-- Sign-in panel (legacy password or username+password) -->
+    <div class="auth-panel active" id="login-panel">
+      <label for="login-user">Username <span style="color:var(--muted)">(optional — omit for admin)</span></label>
+      <input id="login-user" type="text" autocomplete="username" placeholder="alice" />
+      <label for="login-pw">Password</label>
+      <input id="login-pw" type="password" autocomplete="current-password" autofocus placeholder="••••" />
+      <button id="login-btn">Sign in</button>
+      <p id="login-err" class="err" hidden></p>
+    </div>
+
+    <!-- Sign-up panel -->
+    <div class="auth-panel" id="signup-panel">
+      <label for="signup-user">Username</label>
+      <input id="signup-user" type="text" autocomplete="username" placeholder="alice" />
+      <label for="signup-pw">Password <span style="color:var(--muted)">(min 8 chars)</span></label>
+      <input id="signup-pw" type="password" autocomplete="new-password" placeholder="••••••••" />
+      <button id="signup-btn">Create account</button>
+      <p id="signup-err" class="err" hidden></p>
+    </div>
+
+    <footer class="phase">Phase 5 · the desktop</footer>
+  </main>
+
+  <script>
+    // Tab switching
+    document.querySelectorAll(".auth-tab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".auth-tab, .auth-panel").forEach((el) => el.classList.remove("active"));
+        btn.classList.add("active");
+        document.getElementById(btn.dataset.panel).classList.add("active");
+      });
+    });
+
+    // Sign in
+    document.getElementById("login-btn").addEventListener("click", async () => {
+      const err  = document.getElementById("login-err");
+      const user = document.getElementById("login-user").value.trim();
+      const pw   = document.getElementById("login-pw").value;
+      err.hidden = true;
+      const body = user ? { username: user, password: pw } : { password: pw };
+      const r = await fetch("/login", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (data.ok) location.href = "/" + data.slug;
+      else { err.textContent = data.error || "login failed"; err.hidden = false; }
+    });
+
+    // Sign up
+    document.getElementById("signup-btn").addEventListener("click", async () => {
+      const err  = document.getElementById("signup-err");
+      const user = document.getElementById("signup-user").value.trim();
+      const pw   = document.getElementById("signup-pw").value;
+      err.hidden = true;
+      const r = await fetch("/signup", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: user, password: pw }),
+      });
+      const data = await r.json();
+      if (data.ok) location.href = "/" + data.slug;
+      else { err.textContent = data.error || "signup failed"; err.hidden = false; }
+    });
+
+    // Allow Enter key in all inputs
+    document.querySelectorAll("input").forEach((inp) => {
+      inp.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter") return;
+        const panel = inp.closest(".auth-panel");
+        panel?.querySelector("button:not(.ghost)")?.click();
+      });
+    });
+  </script>
+</body>
+</html>

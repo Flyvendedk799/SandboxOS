@@ -1,0 +1,20 @@
+{
+  "name": "sandboxos",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "SandboxOS — slug Gateway → Cell → MCP Kernel → Command Central",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "sbx": "packages/sbx-cli/src/sbx.js",
+    "tide": "packages/tide/src/cli.js"
+  },
+  "scripts": {
+    "start": "node apps/gateway/src/index.js",
+    "dev": "node --watch apps/gateway/src/index.js",
+    "test": "node --test --no-warnings",
+    "tunnel": "echo 'Expose the spine publicly:' && echo '  cloudflared tunnel --url http://localhost:'${SANDBOXOS_PORT:-3939}"
+  }
+}

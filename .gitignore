@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+npm-debug.log*
+
+# SandboxOS runtime state (control DB + Cell volumes live here by default)
+.sandboxos-home/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Local env overrides
+.env
+.env.local

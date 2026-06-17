@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SandboxOS · Command Central</title>
+  <link rel="icon" href="/favicon.ico" />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+</head>
+<body class="desktop">
+  <header class="topbar">
+    <div class="brand sm">
+      <span class="glyph">⇌</span>
+      <span class="slug" id="slug">…</span>
+    </div>
+    <select id="sandbox-select" class="sandbox-switcher" title="Switch sandbox" aria-label="Switch sandbox"></select>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="terminal" role="tab">Terminal</button>
+      <button class="tab" data-tab="agents" role="tab">Agents</button>
+      <button class="tab" data-tab="apps" role="tab">Apps</button>
+      <button class="tab" data-tab="shell" role="tab">Shell</button>
+      <button class="tab" data-tab="secrets" role="tab">Secrets</button>
+    </nav>
+    <div class="status">
+      <span class="dot" id="dot"></span>
+      <span id="cell-state">connecting</span>
+      <button id="logout" class="ghost">logout</button>
+    </div>
+  </header>
+
+  <main class="workspace">
+
+    <!-- ── Terminal ─────────────────────────────────────────────── -->
+    <section class="tab-panel active" id="panel-terminal" role="tabpanel">
+      <div class="terminal-layout">
+        <div class="terminal-pane" id="terminal">
+          <div class="out" id="out"></div>
+          <div class="prompt">
+            <span class="ps" id="ps">▸</span>
+            <input id="line" autocomplete="off" autocapitalize="off" spellcheck="false" autofocus
+                   placeholder="command · ? natural language · :call server.tool {}" />
+          </div>
+        </div>
+        <aside class="audit-pane">
+          <div class="audit-header">
+            <h2 class="panel-head">Audit <span class="hint" id="audit-mode">live</span></h2>
+            <div class="audit-filters">
+              <select id="audit-filter-server" title="Filter by server">
+                <option value="">all servers</option>
+                <option value="fs">fs</option>
+                <option value="proc">proc</option>
+                <option value="secrets">secrets</option>
+                <option value="agents">agents</option>
+                <option value="cron">cron</option>
+                <option value="net">net</option>
+                <option value="pkg">pkg</option>
+                <option value="kernel">kernel</option>
+                <option value="mcp-registry">mcp-registry</option>
+              </select>
+              <select id="audit-filter-kind" title="Filter by result">
+                <option value="">all</option>
+                <option value="ok">ok</option>
+                <option value="error">error</option>
+                <option value="denied">denied</option>
+              </select>
+              <button id="audit-query-btn" class="ghost sm-btn" title="Query with filters">↺</button>
+            </div>
+          </div>
+          <ul id="audit-list"></ul>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ── Agents ────────────────────────────────────────────────── -->
+    <section class="tab-panel" id="panel-agents" role="tabpanel">
+      <div class="panel-body">
+        <div class="panel-toolbar">
+          <h2 class="panel-head">Agents</h2>
+          <div class="spawn-form">
+            <input id="spawn-name" placeholder="name" class="sm-input" />
+            <input id="spawn-prompt" placeholder="command or AI prompt" class="sm-input wide" />
+            <select id="spawn-kind" class="sm-select">
+              <option value="shell">shell</option>
+              <option value="ai">AI</option>
+            </select>
+            <button id="spawn-btn">Spawn</button>
+          </div>
+        </div>
+        <div id="agents-list" class="agents-list"></div>
+      </div>
+    </section>
+
+    <!-- ── Apps ──────────────────────────────────────────────────── -->
+    <section class="tab-panel" id="panel-apps" role="tabpanel">
+      <div class="panel-body">
+        <div class="panel-toolbar">
+          <h2 class="panel-head">Apps</h2>
+          <button id="install-toggle" class="ghost">+ Install</button>
+        </div>
+        <div id="install-form" class="install-form hidden">
+          <input id="app-name"     placeholder="name"                        class="sm-input" />
+          <input id="app-url"      placeholder="url (e.g. /static/apps/x.html)" class="sm-input wide" />
+          <input id="app-patterns" placeholder="patterns: fs.*, proc.exec"   class="sm-input" />
+          <input id="app-desc"     placeholder="description"                 class="sm-input" />
+          <button id="app-submit">Install</button>
+          <button id="app-cancel" class="ghost">Cancel</button>
+        </div>
+        <div id="apps-grid" class="apps-grid"></div>
+      </div>
+    </section>
+
+    <!-- ── Secrets ───────────────────────────────────────────────────── -->
+    <section class="tab-panel" id="panel-secrets" role="tabpanel">
+      <div class="panel-body">
+        <div class="panel-toolbar">
+          <h2 class="panel-head">Secrets</h2>
+          <button id="secret-add-toggle" class="ghost">+ Add</button>
+        </div>
+        <div id="secret-add-form" class="secret-add-form hidden">
+          <input id="secret-name"  placeholder="name"  class="sm-input" autocomplete="off" />
+          <input id="secret-value" placeholder="value" class="sm-input wide" type="password" autocomplete="new-password" />
+          <button id="secret-submit">Store</button>
+          <button id="secret-cancel" class="ghost">Cancel</button>
+        </div>
+        <div id="secrets-list" class="secrets-list"></div>
+      </div>
+    </section>
+
+    <!-- ── Shell (PTY) ─────────────────────────────────────────────── -->
+    <section class="tab-panel" id="panel-shell" role="tabpanel">
+      <div class="shell-pane">
+        <div class="shell-toolbar">
+          <span class="muted-p">WebSocket PTY — interactive shell</span>
+          <button id="pty-connect" class="ghost sm-btn">Connect</button>
+          <button id="pty-disconnect" class="ghost sm-btn" disabled>Disconnect</button>
+        </div>
+        <div id="pty-container" class="pty-container"></div>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
