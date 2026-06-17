@@ -52,6 +52,20 @@ function assertSourceAllowed(source) {
   }
 }
 
+// Phase 18 follow-up: even though the SERVER now runs out-of-process, `npm install`
+// itself executes the package's lifecycle scripts (preinstall/install/postinstall)
+// HOST-SIDE — arbitrary code execution before the server is ever sandboxed. We pass
+// --ignore-scripts by default so installing a marketplace package never runs its
+// scripts on the host. An operator can opt back in (e.g. for a package with a genuine
+// native build step) with SANDBOXOS_MCP_ALLOW_SCRIPTS=1. --no-audit/--no-fund also
+// trim needless registry chatter.
+function npmInstallArgs(installDir, pkg) {
+  const args = ["install", "--prefix", installDir, "--no-audit", "--no-fund"];
+  if (process.env.SANDBOXOS_MCP_ALLOW_SCRIPTS !== "1") args.push("--ignore-scripts");
+  args.push(pkg);
+  return args;
+}
+
 /** sha256 of the resolved entry file referenced by a file:// URL; null if unreadable. */
 function hashEntryFile(fileUrl) {
   try {
@@ -142,7 +156,7 @@ export function registryServer(deps) {
             const installDir = path.join(sandbox.volume_path, ".mcp-packages");
             fs.mkdirSync(installDir, { recursive: true });
             await new Promise((res, rej) => {
-              const proc = spawn("npm", ["install", "--prefix", installDir, pkg], { stdio: "pipe" });
+              const proc = spawn("npm", npmInstallArgs(installDir, pkg), { stdio: "pipe" });
               let errOut = "";
               proc.stderr.on("data", (d) => (errOut += d));
               proc.on("close", (code) => code === 0 ? res() : rej(new Error(`npm install failed: ${errOut.slice(0, 300)}`)));

@@ -48,8 +48,23 @@ the call is audited; provenance recorded; uninstall removes the tool + kills the
 Full suite after Phase 18: **337 tests, 0 failures** (and the runner exits cleanly with
 no orphaned `marketplace-host` processes).
 
+## Follow-up: npm install-step sandboxing (done)
+The npm-sourced install path ran `npm install`, which executes a package's lifecycle
+scripts (`preinstall`/`install`/`postinstall`) **host-side** — arbitrary code execution
+before the server is ever isolated. `mcp-registry.install` now invokes npm with
+**`--ignore-scripts`** by default (plus `--no-audit --no-fund`); an operator can opt back
+in with `SANDBOXOS_MCP_ALLOW_SCRIPTS=1` for a package with a genuine native build step.
+
+Tests — `test/marketplace-install-scripts.test.js` (2) + `test/fixtures/evil-install/`
+(a package whose postinstall writes a marker file): the default install blocks the
+postinstall (marker absent) while the package still installs and its server is callable;
+with the opt-out the postinstall runs (confirming the flag is what blocks it).
+
+Full suite after the follow-up: **339 tests, 0 failures.**
+
 ## Still deferred
-The npm-sourced install path still runs `npm install` (which can execute package
-install scripts) before the server is hosted out-of-process. Sandboxing the *install
-step* itself (e.g. `--ignore-scripts` or running npm inside the Cell) is a follow-up.
-The execution of the server is now fully isolated; the build step is not yet.
+Running `npm install` *itself* inside the Cell (full network/process isolation of the
+build, not just script suppression) remains a larger, infrastructure-dependent change.
+With `--ignore-scripts` the highest-risk vector (lifecycle-script RCE) is closed; a
+package could still ship a malicious *module* that only runs once the server is invoked —
+but that now executes out-of-process with no host handle (the Phase 18 boundary above).
