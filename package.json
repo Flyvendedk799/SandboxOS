@@ -15,6 +15,10 @@
     "start": "node apps/gateway/src/index.js",
     "dev": "node --watch apps/gateway/src/index.js",
     "test": "node --test --no-warnings",
+    "test:better-sqlite3": "SANDBOXOS_DB_DRIVER=better-sqlite3 node --test --no-warnings",
     "tunnel": "echo 'Expose the spine publicly:' && echo '  cloudflared tunnel --url http://localhost:'${SANDBOXOS_PORT:-3939}"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.0.0"
   }
 }

@@ -495,6 +495,12 @@ export function runningAgentCount(sandboxId) {
   return openDb().prepare("SELECT COUNT(*) as n FROM agents WHERE sandbox_id=? AND state IN ('queued','running')").get(sandboxId)?.n ?? 0;
 }
 
+/** Backlog #13: count queued+running agents across ALL sandboxes on this host, for the
+ *  host-global concurrency ceiling that protects co-tenants on the single Mac Mini. */
+export function runningAgentCountGlobal() {
+  return openDb().prepare("SELECT COUNT(*) as n FROM agents WHERE state IN ('queued','running')").get()?.n ?? 0;
+}
+
 export function totalSandboxCount() {
   return openDb().prepare("SELECT COUNT(*) as n FROM sandboxes").get()?.n ?? 0;
 }

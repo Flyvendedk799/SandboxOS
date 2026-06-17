@@ -39,7 +39,7 @@ server.listen(config.port, config.host, () => {
     tunnelLine = "  │  tunnel     Cloudflare Tunnel starting (SANDBOXOS_TUNNEL_TOKEN set)";
   }
   console.log(`
-  ┌─ SandboxOS ── Phase 18 · out-of-process marketplace ─────────
+  ┌─ SandboxOS ── Phase 19 · per-tenant keys · agent cap · db ───
   │  gateway   ${base}
   │  slug      ${base}/${sandbox.slug}   (tenant: ${tenant.name})
   │  cell      ${backend} backend${backend === "local" ? "  (no isolation — install/run Docker for real Cells)" : ""}

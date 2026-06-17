@@ -107,8 +107,8 @@ isolation, and credential/secret material was under-protected at rest.
 - **Wave 3:** `test/phase17.test.js` security regression suite + doc.
 
 ## Deferred to a future phase (genuinely larger / cross-cutting)
-- Per-tenant secret key derivation + rotation (#11).
+- ~~Per-tenant secret key derivation + rotation (#11)~~ — **done in Phase 19.**
 - ~~Out-of-process hosting of untrusted marketplace servers (#12)~~ — **done in Phase 18.**
-- Host-global agent concurrency ceiling (#13).
-- better-sqlite3 v11 driver swap (#14) — only if the zero-dep tradeoff is revisited.
+- ~~Host-global agent concurrency ceiling (#13)~~ — **done in Phase 19.**
+- ~~better-sqlite3 v11 driver swap (#14)~~ — **done in Phase 19** (selectable driver; zero-dep default kept).
 - Multi-host scheduler, federation, billing/metering — require external infrastructure.

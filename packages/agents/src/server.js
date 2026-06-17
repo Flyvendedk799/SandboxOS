@@ -13,11 +13,15 @@
 // operator.
 
 import {
-  createAgent, getAgent, listAgents, updateAgentState, mintMachineToken, runningAgentCount,
+  createAgent, getAgent, listAgents, updateAgentState, mintMachineToken,
+  runningAgentCount, runningAgentCountGlobal,
 } from "../../control-db/src/registry.js";
 import { runAI } from "./ai-runner.js";
 
 const maxConcurrentAgents = () => Number(process.env.SANDBOXOS_MAX_AGENTS ?? 10);
+// Backlog #13: a host-wide ceiling on concurrent agents, independent of the per-sandbox
+// cap, so no single tenant's agent fleet can starve co-tenants on the shared host.
+const maxConcurrentAgentsGlobal = () => Number(process.env.SANDBOXOS_MAX_AGENTS_GLOBAL ?? 100);
 
 export function agentsServer(deps) {
   const { sandbox, cell } = deps;
@@ -69,6 +73,9 @@ export function agentsServer(deps) {
           // Quota: cap concurrent agents per Sandbox.
           const running = runningAgentCount(sandbox.id);
           if (running >= maxConcurrentAgents()) throw new Error(`agent quota exceeded (max ${maxConcurrentAgents()} concurrent)`);
+          // Quota: host-global ceiling (backlog #13) — protects co-tenants on the shared host.
+          if (runningAgentCountGlobal() >= maxConcurrentAgentsGlobal())
+            throw new Error(`host agent capacity reached (max ${maxConcurrentAgentsGlobal()} concurrent host-wide)`);
 
           const minted = mintMachineToken(ctx.principalId, sandbox.id, a.patterns, { label: a.name });
           const agent = createAgent(sandbox.id, {

@@ -6,9 +6,32 @@
 // swap is mechanical. See docs/11-tech-stack.md.
 
 import { DatabaseSync } from "node:sqlite";
+import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
 import config from "../../config/src/config.js";
+
+const require = createRequire(import.meta.url);
+
+// Driver selection (backlog #14). The control plane defaults to Node's built-in
+// node:sqlite (DatabaseSync) — zero runtime dependency, the Phase-0 choice. The
+// documented production target is better-sqlite3 v11 (docs/11); its API is a strict
+// superset of the subset we use (exec / prepare → run·get·all / close), so the swap
+// is a config flip behind this single seam, not a code change. Select with
+// SANDBOXOS_DB_DRIVER = "node" (default) | "better-sqlite3" | "auto" (use it if present).
+function openConnection(dbPath) {
+  const pref = (process.env.SANDBOXOS_DB_DRIVER ?? "node").toLowerCase();
+  if (pref === "better-sqlite3" || pref === "better" || pref === "auto") {
+    try {
+      const Database = require("better-sqlite3");
+      return new Database(dbPath);
+    } catch (e) {
+      if (pref === "auto") return new DatabaseSync(dbPath); // graceful fallback
+      throw new Error(`SANDBOXOS_DB_DRIVER=${pref} but better-sqlite3 could not be loaded: ${e.message}`);
+    }
+  }
+  return new DatabaseSync(dbPath);
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS tenants (
@@ -165,7 +188,7 @@ let _db = null;
 export function openDb() {
   if (_db) return _db;
   fs.mkdirSync(path.dirname(config.dbPath), { recursive: true });
-  const db = new DatabaseSync(config.dbPath);
+  const db = openConnection(config.dbPath);
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec(SCHEMA);
@@ -190,6 +213,10 @@ const MIGRATIONS = [
   // Backlog #1: operator authority tier. Additive flag on principals; default 0 so
   // self-service signups are never operators unless explicitly elevated.
   "ALTER TABLE principals ADD COLUMN is_operator INTEGER NOT NULL DEFAULT 0",
+  // Backlog #11: per-tenant secret key derivation + rotation. key_version records the
+  // key scheme a secret's ciphertext was sealed under: 0 = legacy single master key,
+  // 1 = per-tenant HKDF-derived key. Default 0 so pre-existing rows decrypt correctly.
+  "ALTER TABLE secrets ADD COLUMN key_version INTEGER NOT NULL DEFAULT 0",
 ];
 
 // Backlog #14 (migration hardening): only swallow the benign "column/table already
