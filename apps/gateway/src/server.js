@@ -19,9 +19,12 @@ import {
   createTenant, totalSandboxCount, tenantAgentStats, getAgent,
   listSandboxesForTenant, deleteSandbox,
   getQuota, setQuota, runningAgentCount, isOperator,
+  getTenant, getTenantProfile, updateTenantProfile, LLM_PROVIDERS,
 } from "../../../packages/control-db/src/registry.js";
 import { authorize } from "../../../packages/kernel/src/capabilities.js";
 import { loadManifest } from "../../../packages/manifest/src/manifest.js";
+import { putTenantSecret, removeTenantSecret } from "../../../packages/secrets/src/store.js";
+import { providerConfig, providerOptions } from "../../../packages/llm/src/providers.js";
 
 const maxSandboxes = () => Number(process.env.SANDBOXOS_MAX_SANDBOXES ?? 10);
 import { getKernel, _dropKernel } from "../../../packages/kernel/src/kernel.js";
@@ -99,6 +102,33 @@ function authenticate(req) {
  *  a plain logged-in tenant (every self-service signup) is NOT one. */
 function requireOperator(principal) {
   return !!principal && isOperator(principal.id);
+}
+
+function profileResponse(principal) {
+  const tenant = getTenant(principal.tenant_id);
+  const profile = getTenantProfile(principal.tenant_id);
+  const providers = providerOptions(principal.tenant_id);
+  const active = providers.find((p) => p.id === profile.llm_provider) ?? providers[0];
+  return {
+    ok: true,
+    user: {
+      id: principal.id,
+      name: principal.name,
+      kind: principal.kind,
+      isOperator: !!principal.is_operator,
+    },
+    tenant: {
+      id: principal.tenant_id,
+      name: tenant?.name ?? principal.tenant_id,
+    },
+    profile: {
+      llmProvider: profile.llm_provider,
+      onboardingCompleted: !!profile.onboarding_completed,
+      keyConfigured: !!active?.configured,
+      updatedAt: profile.updated_at,
+      providers,
+    },
+  };
 }
 
 // ---- auth rate limiting (backlog #10) -------------------------------------
@@ -231,6 +261,35 @@ async function handle(req, res) {
     });
   }
 
+  // API: profile / onboarding state. API keys are stored encrypted as tenant
+  // secrets; responses only report configured/not-configured state.
+  if (top === "api" && segments[2] === "profile") {
+    const principal = authenticate(req);
+    if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
+    if (req.method === "GET") return sendJson(res, 200, profileResponse(principal));
+    if (req.method === "POST") {
+      const { llmProvider, apiKey, clearApiKey, completeOnboarding, onboardingCompleted } = await readBody(req);
+      const current = getTenantProfile(principal.tenant_id);
+      const provider = llmProvider == null ? current.llm_provider : String(llmProvider).trim().toLowerCase();
+      if (!LLM_PROVIDERS.includes(provider)) {
+        return sendJson(res, 400, { ok: false, error: "provider must be claude or openai" });
+      }
+
+      const cfg = providerConfig(provider);
+      if (apiKey != null && String(apiKey).trim()) {
+        putTenantSecret(principal.tenant_id, cfg.secretName, String(apiKey).trim());
+      } else if (clearApiKey) {
+        removeTenantSecret(principal.tenant_id, cfg.secretName);
+      }
+
+      updateTenantProfile(principal.tenant_id, {
+        llmProvider: provider,
+        onboardingCompleted: completeOnboarding ?? onboardingCompleted,
+      });
+      return sendJson(res, 200, profileResponse(principal));
+    }
+  }
+
   // API: per-tenant quota — read current limits or update them.
   if (top === "api" && segments[2] === "quota") {
     const principal = authenticate(req);
@@ -275,8 +334,8 @@ async function handle(req, res) {
   // API: who am I?
   if (top === "api" && segments[2] === "me") {
     const principal = authenticate(req);
-    const { sandbox } = ensureSeed(cellBackend());
-    return sendJson(res, 200, { authenticated: !!principal, slug: principal ? sandbox.slug : null });
+    const sandbox = principal ? getPrimarySandboxForTenant(principal.tenant_id) : null;
+    return sendJson(res, 200, { authenticated: !!principal, slug: sandbox?.slug ?? null });
   }
 
   // API: list all Sandboxes for the authenticated tenant.
@@ -386,7 +445,8 @@ async function handle(req, res) {
   if (top === "") {
     const principal = authenticate(req);
     if (principal) {
-      const { sandbox } = ensureSeed(config.cellBackend === "local" ? "local" : config.cellBackend);
+      const sandbox = getPrimarySandboxForTenant(principal.tenant_id);
+      if (!sandbox) return sendJson(res, 500, { ok: false, error: "no sandbox for account" });
       res.writeHead(302, { Location: `/${sandbox.slug}` });
       return res.end();
     }
@@ -649,7 +709,7 @@ async function handle(req, res) {
     if (!line) return sendJson(res, 400, { ok: false, error: "line required" });
     const nlLine = line.startsWith("?") ? line : `? ${line}`;
     const result = await runCommand({ kernel, principalId: principal.id, heldPatterns: held, line: nlLine });
-    if (!result.proposed) return sendJson(res, 503, { ok: false, error: "NL unavailable — enable llm server and set ANTHROPIC_API_KEY" });
+    if (!result.proposed) return sendJson(res, 503, { ok: false, error: "NL unavailable — enable llm server and set a provider API key in Profile" });
     return sendJson(res, 200, { ok: true, proposed: result.proposed });
   }
 

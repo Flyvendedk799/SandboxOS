@@ -452,7 +452,166 @@ tabs.forEach((btn) => {
   if (btn.dataset.tab === "secrets") {
     btn.addEventListener("click", refreshSecrets);
   }
+  if (btn.dataset.tab === "profile") {
+    btn.addEventListener("click", refreshProfile);
+  }
 });
+
+// ── Profile / onboarding ────────────────────────────────────────────────────
+let _profileData = null;
+
+function selectedProvider(groupName) {
+  return document.querySelector(`input[name="${groupName}"]:checked`)?.value ?? "claude";
+}
+
+function checkProvider(groupName, provider) {
+  const el = document.querySelector(`input[name="${groupName}"][value="${provider || "claude"}"]`);
+  if (el) el.checked = true;
+}
+
+function providerInfo(data, id) {
+  return data?.profile?.providers?.find((p) => p.id === id) ?? { configured: false, secretName: "" };
+}
+
+function setInlineError(id, message) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = message;
+  el.hidden = !message;
+}
+
+function renderProfile(data) {
+  _profileData = data;
+  document.getElementById("profile-user").textContent = data.user?.name ?? "unknown";
+  document.getElementById("profile-tenant").textContent = data.tenant?.name ?? "unknown";
+  checkProvider("profile-provider", data.profile?.llmProvider);
+  checkProvider("onboarding-provider", data.profile?.llmProvider);
+
+  for (const id of ["claude", "openai"]) {
+    const info = providerInfo(data, id);
+    const el = document.getElementById(`profile-${id}-state`);
+    if (el) el.textContent = info.configured ? "key set" : "not set";
+  }
+
+  const active = providerInfo(data, data.profile?.llmProvider);
+  const status = document.getElementById("profile-status");
+  if (status) {
+    status.textContent = active.configured
+      ? `${data.profile.llmProvider} ready`
+      : `${data.profile.llmProvider} key missing`;
+  }
+}
+
+async function refreshProfile() {
+  try {
+    const r = await fetch("/api/profile");
+    const data = await r.json();
+    if (!data.ok) throw new Error(data.error || "profile unavailable");
+    renderProfile(data);
+    return data;
+  } catch (e) {
+    setInlineError("profile-message", e.message);
+    return null;
+  }
+}
+
+async function postProfile(body) {
+  const r = await fetch("/api/profile", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json();
+  if (!data.ok) throw new Error(data.error || "profile update failed");
+  renderProfile(data);
+  return data;
+}
+
+document.getElementById("profile-save")?.addEventListener("click", async () => {
+  setInlineError("profile-message", "");
+  const apiKey = document.getElementById("profile-api-key").value;
+  try {
+    await postProfile({
+      llmProvider: selectedProvider("profile-provider"),
+      ...(apiKey.trim() ? { apiKey } : {}),
+      completeOnboarding: true,
+    });
+    document.getElementById("profile-api-key").value = "";
+    document.getElementById("profile-status").textContent = "saved";
+  } catch (e) {
+    setInlineError("profile-message", e.message);
+  }
+});
+
+document.getElementById("profile-clear-key")?.addEventListener("click", async () => {
+  setInlineError("profile-message", "");
+  try {
+    await postProfile({
+      llmProvider: selectedProvider("profile-provider"),
+      clearApiKey: true,
+      completeOnboarding: true,
+    });
+    document.getElementById("profile-api-key").value = "";
+    document.getElementById("profile-status").textContent = "key cleared";
+  } catch (e) {
+    setInlineError("profile-message", e.message);
+  }
+});
+
+function showOnboarding() {
+  const backdrop = document.getElementById("onboarding-backdrop");
+  if (!backdrop) return;
+  checkProvider("onboarding-provider", _profileData?.profile?.llmProvider ?? "claude");
+  backdrop.classList.remove("hidden");
+  document.getElementById("onboarding-api-key")?.focus();
+}
+
+function hideOnboarding() {
+  document.getElementById("onboarding-backdrop")?.classList.add("hidden");
+  setInlineError("onboarding-message", "");
+  if (new URLSearchParams(location.search).has("onboarding")) {
+    history.replaceState(null, "", location.pathname);
+  }
+}
+
+document.getElementById("onboarding-save")?.addEventListener("click", async () => {
+  const apiKey = document.getElementById("onboarding-api-key").value;
+  setInlineError("onboarding-message", "");
+  if (!apiKey.trim()) {
+    setInlineError("onboarding-message", "API key required");
+    return;
+  }
+  try {
+    await postProfile({
+      llmProvider: selectedProvider("onboarding-provider"),
+      apiKey,
+      completeOnboarding: true,
+    });
+    document.getElementById("onboarding-api-key").value = "";
+    hideOnboarding();
+  } catch (e) {
+    setInlineError("onboarding-message", e.message);
+  }
+});
+
+document.getElementById("onboarding-later")?.addEventListener("click", async () => {
+  setInlineError("onboarding-message", "");
+  try {
+    await postProfile({
+      llmProvider: selectedProvider("onboarding-provider"),
+      completeOnboarding: true,
+    });
+    hideOnboarding();
+  } catch (e) {
+    setInlineError("onboarding-message", e.message);
+  }
+});
+
+(async () => {
+  const data = await refreshProfile();
+  const force = new URLSearchParams(location.search).get("onboarding") === "1";
+  if (data && (force || !data.profile?.onboardingCompleted)) showOnboarding();
+})();
 
 // ── Sandbox switcher ─────────────────────────────────────────────────────────
 (async () => {

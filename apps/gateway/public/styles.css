@@ -269,6 +269,103 @@ button.ghost:hover { color: var(--ink); }
 .secret-ref  { font-family: var(--mono); font-size: .78rem; color: var(--muted); flex: 1; }
 .secret-row button { margin-left: auto; flex-shrink: 0; padding: .25rem .6rem; font-size: .78rem; }
 
+/* ── Profile / onboarding ───────────────────────────────────────────────── */
+.profile-status {
+  color: var(--muted); font-family: var(--mono); font-size: .78rem;
+}
+.profile-pane {
+  width: min(760px, calc(100% - 2.4rem));
+  margin: 1rem 1.2rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.profile-summary {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem;
+}
+.profile-summary > div {
+  display: flex; flex-direction: column; gap: .18rem;
+  min-width: 0;
+}
+.profile-summary strong {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: .95rem;
+}
+.profile-label {
+  color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em;
+}
+.provider-picker {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem;
+}
+.provider-option {
+  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: .55rem;
+  padding: .65rem .75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  min-width: 0;
+}
+.provider-option:hover { border-color: color-mix(in oklab, var(--tide) 45%, var(--line)); }
+.provider-option:has(input:checked) {
+  border-color: var(--tide);
+  background: color-mix(in oklab, var(--tide) 10%, transparent);
+}
+.provider-option input { width: auto; accent-color: var(--tide); }
+.provider-option span { font-weight: 650; }
+.provider-option small {
+  color: var(--muted); font-family: var(--mono); font-size: .72rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.profile-key-row {
+  display: grid; grid-template-columns: 80px minmax(180px, 1fr) auto auto;
+  align-items: center; gap: .55rem;
+}
+.profile-key-row input { min-width: 0; }
+.profile-key-row button { margin-top: 0; padding: .55rem .85rem; }
+.profile-key-row .ghost { padding: .52rem .85rem; }
+
+.onboarding-backdrop {
+  position: fixed; inset: 0; z-index: 20;
+  display: grid; place-items: center;
+  background: rgba(4, 7, 11, .72);
+  padding: 1rem;
+}
+.onboarding-backdrop.hidden { display: none; }
+.onboarding-modal {
+  width: min(440px, 100%);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  padding: 1.2rem;
+  box-shadow: 0 30px 80px -40px rgba(0,0,0,.9);
+  display: flex;
+  flex-direction: column;
+  gap: .85rem;
+}
+.onboarding-modal h2 {
+  margin: 0; font-size: 1.15rem; letter-spacing: 0;
+}
+.onboarding-provider { grid-template-columns: 1fr 1fr; }
+.onboarding-actions { display: flex; gap: .5rem; justify-content: flex-end; }
+.onboarding-actions button { margin-top: 0; padding: .55rem .9rem; }
+
+@media (max-width: 720px) {
+  .profile-summary,
+  .provider-picker,
+  .onboarding-provider {
+    grid-template-columns: 1fr;
+  }
+  .profile-key-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+  .profile-key-row button { width: 100%; }
+}
+
 /* ── Audit filter controls ───────────────────────────────────────────────── */
 .audit-header { display: flex; flex-direction: column; gap: .3rem; padding: .5rem 0 .4rem; }
 .audit-filters { display: flex; gap: .35rem; align-items: center; flex-wrap: wrap; }
