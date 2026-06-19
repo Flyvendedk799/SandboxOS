@@ -21,7 +21,7 @@ const HELP = `SandboxOS · Command Central (Phase 3)
   ai             llm "<prompt>" [model]
   self           whoami · :capabilities · :audit [n]
   raw MCP        :tools · :call <server.tool> {json}
-  natural lang   ? <what you want to do>              (needs llm server + API key)
+  natural lang   ? <what you want to do>              (needs llm server + provider key)
   meta           help · clear`;
 
 function fmtAudit(a) {
@@ -197,7 +197,7 @@ export async function runCommand({ kernel, principalId, heldPatterns, line }) {
     const utterance = text.startsWith("?") ? text.slice(1).trim() : text.slice(3).trim();
     const system = `You are Command Central, the shell for SandboxOS. Translate the user's intent into a single Command Central line. Available verbs: ls [path], cat <path>, write <path> <content>, stat <path>, ps, whoami, servers, enable <name>, disable <name>, fetch <url>, secret put <name> <value>, secrets, pkg install/remove/list <name>, agent spawn <name> "<cmd>", agents, agent get <id>, agent kill <id>, llm "<prompt>". Reply with ONLY the command line, nothing else.`;
     const res = await kernel.call({ principalId, heldPatterns, server: "llm", tool: "complete", args: { prompt: utterance, system } });
-    if (!res.ok) return { lines: [`✗ NL mode needs the llm server enabled and ANTHROPIC_API_KEY set. (${res.error})`] };
+    if (!res.ok) return { lines: [`✗ NL mode needs the llm server enabled and a provider API key set in Profile. (${res.error})`] };
     const proposed = res.result.content.trim();
     return { lines: [`  ↳ ${proposed}`], proposed };
   }

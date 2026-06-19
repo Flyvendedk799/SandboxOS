@@ -13,6 +13,13 @@ import { canDelegate } from "../../kernel/src/capabilities.js";
 
 const now = () => Date.now();
 const id = (prefix) => `${prefix}_${crypto.randomUUID().slice(0, 8)}`;
+export const LLM_PROVIDERS = ["claude", "openai"];
+
+function normalizeLlmProvider(provider) {
+  const value = String(provider ?? "").trim().toLowerCase();
+  if (!LLM_PROVIDERS.includes(value)) throw new Error(`unsupported provider: ${provider}`);
+  return value;
+}
 
 // ---- Tenants & principals -------------------------------------------------
 
@@ -25,6 +32,39 @@ export function createTenant(name) {
 
 export function getTenantByName(name) {
   return openDb().prepare("SELECT * FROM tenants WHERE name=?").get(name) ?? null;
+}
+
+export function getTenant(tenantId) {
+  return openDb().prepare("SELECT * FROM tenants WHERE id=?").get(tenantId) ?? null;
+}
+
+export function getTenantProfile(tenantId) {
+  const db = openDb();
+  db.prepare(`INSERT OR IGNORE INTO tenant_profiles
+      (tenant_id, llm_provider, onboarding_completed, updated_at)
+      VALUES (?, 'claude', 0, ?)`)
+    .run(tenantId, now());
+  return db.prepare("SELECT * FROM tenant_profiles WHERE tenant_id=?").get(tenantId) ?? null;
+}
+
+export function updateTenantProfile(tenantId, { llmProvider, onboardingCompleted } = {}) {
+  const current = getTenantProfile(tenantId);
+  const next = {
+    llm_provider: llmProvider == null ? current.llm_provider : normalizeLlmProvider(llmProvider),
+    onboarding_completed: onboardingCompleted == null
+      ? current.onboarding_completed
+      : (onboardingCompleted ? 1 : 0),
+    updated_at: now(),
+  };
+  openDb().prepare(`INSERT INTO tenant_profiles
+      (tenant_id, llm_provider, onboarding_completed, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(tenant_id) DO UPDATE SET
+        llm_provider=excluded.llm_provider,
+        onboarding_completed=excluded.onboarding_completed,
+        updated_at=excluded.updated_at`)
+    .run(tenantId, next.llm_provider, next.onboarding_completed, next.updated_at);
+  return getTenantProfile(tenantId);
 }
 
 export function createPrincipal(tenantId, kind, name) {

@@ -113,6 +113,39 @@ export function putSecret(sandboxId, name, value) {
   return { name, ref: `secret://${name}` };
 }
 
+export function putTenantSecret(tenantId, name, value) {
+  const db = openDb();
+  const enc = encrypt(value, tenantId);
+  const existing = db.prepare("SELECT id FROM tenant_secrets WHERE tenant_id=? AND name=?").get(tenantId, name);
+  if (existing) {
+    db.prepare("UPDATE tenant_secrets SET ct=?, iv=?, tag=?, key_version=?, created_at=? WHERE id=?")
+      .run(enc.ct, enc.iv, enc.tag, enc.version, now(), existing.id);
+  } else {
+    db.prepare("INSERT INTO tenant_secrets (id,tenant_id,name,ct,iv,tag,key_version,created_at) VALUES (?,?,?,?,?,?,?,?)")
+      .run(id(), tenantId, name, enc.ct, enc.iv, enc.tag, enc.version, now());
+  }
+  return { name, ref: `tenant-secret://${name}` };
+}
+
+export function getTenantSecretValue(tenantId, name) {
+  const row = openDb().prepare("SELECT * FROM tenant_secrets WHERE tenant_id=? AND name=?").get(tenantId, name);
+  return row ? decrypt(row, tenantId) : null;
+}
+
+export function tenantSecretExists(tenantId, name) {
+  return !!openDb().prepare("SELECT 1 FROM tenant_secrets WHERE tenant_id=? AND name=?").get(tenantId, name);
+}
+
+export function removeTenantSecret(tenantId, name) {
+  const r = openDb().prepare("DELETE FROM tenant_secrets WHERE tenant_id=? AND name=?").run(tenantId, name);
+  return { removed: r.changes > 0 };
+}
+
+export function listTenantSecrets(tenantId) {
+  return openDb().prepare("SELECT name, created_at FROM tenant_secrets WHERE tenant_id=? ORDER BY name").all(tenantId)
+    .map((r) => ({ name: r.name, ref: `tenant-secret://${r.name}`, created_at: r.created_at }));
+}
+
 /** Names + refs only — never values. */
 export function listSecrets(sandboxId) {
   return openDb().prepare("SELECT name, created_at FROM secrets WHERE sandbox_id=? ORDER BY name").all(sandboxId)

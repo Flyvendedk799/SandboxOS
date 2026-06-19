@@ -80,7 +80,7 @@
         body: JSON.stringify({ username: user, password: pw }),
       });
       const data = await r.json();
-      if (data.ok) location.href = "/" + data.slug;
+      if (data.ok) location.href = "/" + data.slug + "?onboarding=1";
       else { err.textContent = data.error || "signup failed"; err.hidden = false; }
     });
 

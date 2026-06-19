@@ -168,6 +168,15 @@ CREATE TABLE IF NOT EXISTS tenant_quotas (
   cpu_shares    REAL    NOT NULL DEFAULT 1.0
 );
 
+-- Tenant profile/onboarding state. Credentials live in encrypted tenant_secrets;
+-- this row only stores preferences and setup completion state.
+CREATE TABLE IF NOT EXISTS tenant_profiles (
+  tenant_id              TEXT PRIMARY KEY REFERENCES tenants(id),
+  llm_provider           TEXT NOT NULL DEFAULT 'claude',
+  onboarding_completed   INTEGER NOT NULL DEFAULT 0,
+  updated_at             INTEGER NOT NULL
+);
+
 -- Secrets (the secrets server). Values are encrypted at rest; callers receive
 -- references, never raw values (docs/09).
 CREATE TABLE IF NOT EXISTS secrets (
@@ -179,6 +188,21 @@ CREATE TABLE IF NOT EXISTS secrets (
   tag         TEXT NOT NULL,
   created_at  INTEGER NOT NULL,
   UNIQUE(sandbox_id, name)
+);
+
+-- Tenant-scoped encrypted secrets for account/profile configuration such as
+-- provider API keys. Same crypto custody as Sandbox secrets, but not tied to a
+-- deletable Sandbox.
+CREATE TABLE IF NOT EXISTS tenant_secrets (
+  id          TEXT PRIMARY KEY,
+  tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+  name        TEXT NOT NULL,
+  ct          TEXT NOT NULL,
+  iv          TEXT NOT NULL,
+  tag         TEXT NOT NULL,
+  key_version INTEGER NOT NULL DEFAULT 1,
+  created_at  INTEGER NOT NULL,
+  UNIQUE(tenant_id, name)
 );
 `;
 
