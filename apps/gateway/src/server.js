@@ -32,6 +32,10 @@ import { safeResolve, canonicalContained, canonicalLeafContained } from "../../.
 import { loadManifest } from "../../../packages/manifest/src/manifest.js";
 import { putTenantSecret, removeTenantSecret } from "../../../packages/secrets/src/store.js";
 import { providerConfig, providerOptions } from "../../../packages/llm/src/providers.js";
+import { claudeAccounts } from "../../../packages/ai-auth/src/tenant.js";
+import {
+  ClaudeLoginError, exchangeClaudeCode, parsePastedCode, sameState, startClaudeLogin,
+} from "../../../packages/ai-auth/src/oauth.js";
 
 const maxSandboxes = () => Number(process.env.SANDBOXOS_MAX_SANDBOXES ?? 10);
 import { getKernel, _dropKernel } from "../../../packages/kernel/src/kernel.js";
@@ -129,10 +133,10 @@ function requireOperator(principal) {
   return !!principal && isOperator(principal.id);
 }
 
-function profileResponse(principal) {
+async function profileResponse(principal) {
   const tenant = getTenant(principal.tenant_id);
   const profile = getTenantProfile(principal.tenant_id);
-  const providers = providerOptions(principal.tenant_id);
+  const providers = await providerOptions(principal.tenant_id);
   const active = providers.find((p) => p.id === profile.llm_provider) ?? providers[0];
   return {
     ok: true,
@@ -154,6 +158,24 @@ function profileResponse(principal) {
       providers,
     },
   };
+}
+
+// ---- pending Claude subscription logins ------------------------------------
+// The PKCE verifier and state of a login in flight, keyed by tenant. In memory and
+// short-lived on purpose, not in the DB: the verifier is worthless after the exchange
+// and dangerous before it, so the shortest possible life is the right one. A restart
+// mid-login costs one click, which is a better trade than persisting the one secret
+// that makes a stolen authorization code useful.
+const PENDING_LOGIN_TTL_MS = 10 * 60 * 1000;
+/** A pasted code is short. Generous enough for a whole URL and nothing more. */
+const MAX_PASTED_CODE = 2048;
+const DISCONNECTED_CLAUDE = { connected: false, plan: null, expiresAt: null, expired: false, scopes: [] };
+const pendingLogins = new Map();
+
+/** Drop anything past its window. Called on each use, so no timer has to exist. */
+function sweepPendingLogins() {
+  const at = Date.now();
+  for (const [key, entry] of pendingLogins) if (entry.expiresAt <= at) pendingLogins.delete(key);
 }
 
 // ---- auth rate limiting (backlog #10) -------------------------------------
@@ -292,28 +314,129 @@ async function handle(req, res) {
   if (top === "api" && segments[2] === "profile") {
     const principal = authenticate(req);
     if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
-    if (req.method === "GET") return sendJson(res, 200, profileResponse(principal));
+    if (req.method === "GET") return sendJson(res, 200, await profileResponse(principal));
     if (req.method === "POST") {
       const { llmProvider, apiKey, clearApiKey, completeOnboarding, onboardingCompleted } = await readBody(req);
       const current = getTenantProfile(principal.tenant_id);
       const provider = llmProvider == null ? current.llm_provider : String(llmProvider).trim().toLowerCase();
       if (!LLM_PROVIDERS.includes(provider)) {
-        return sendJson(res, 400, { ok: false, error: "provider must be claude or openai" });
+        return sendJson(res, 400, { ok: false, error: `provider must be one of: ${LLM_PROVIDERS.join(", ")}` });
       }
 
+      // A subscription provider has no key to store: its credential is an OAuth login
+      // held under /api/claude-code (or the host's own CLI). Quietly ignoring a key sent
+      // for one is better than inventing a secret name nothing will ever read.
       const cfg = providerConfig(provider);
-      if (apiKey != null && String(apiKey).trim()) {
-        putTenantSecret(principal.tenant_id, cfg.secretName, String(apiKey).trim());
-      } else if (clearApiKey) {
-        removeTenantSecret(principal.tenant_id, cfg.secretName);
+      if (cfg.secretName) {
+        if (apiKey != null && String(apiKey).trim()) {
+          putTenantSecret(principal.tenant_id, cfg.secretName, String(apiKey).trim());
+        } else if (clearApiKey) {
+          removeTenantSecret(principal.tenant_id, cfg.secretName);
+        }
       }
 
       updateTenantProfile(principal.tenant_id, {
         llmProvider: provider,
         onboardingCompleted: completeOnboarding ?? onboardingCompleted,
       });
-      return sendJson(res, 200, profileResponse(principal));
+      return sendJson(res, 200, await profileResponse(principal));
     }
+  }
+
+  // ── Claude subscription login ──────────────────────────────────────────────
+  //
+  //   POST   /api/claude-code/login            begin — returns the URL to approve at
+  //   POST   /api/claude-code/login/complete   finish — takes the pasted code
+  //   GET    /api/claude-code                  is this tenant connected, and to what
+  //   DELETE /api/claude-code                  disconnect
+  //
+  // Anyone signed in may call these, not just an operator, and that distinction is the
+  // whole point of the flow. Which provider a deployment offers is an operator decision;
+  // *whose plan pays* is the user's own, and a per-tenant credential only an operator
+  // could install would be neither.
+  if (top === "api" && segments[2] === "claude-code") {
+    const principal = authenticate(req);
+    if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
+    const accountId = principal.tenant_id;
+    const accounts = claudeAccounts(accountId);
+
+    if (req.method === "GET" && !segments[3]) {
+      return sendJson(res, 200, { ok: true, ...(await accounts.status(accountId)) });
+    }
+
+    if (req.method === "DELETE" && !segments[3]) {
+      pendingLogins.delete(accountId);
+      await accounts.forget(accountId);
+      appendAudit({
+        sandboxId: null, principalId: principal.id, onBehalfOf: null,
+        server: "claude-code", tool: "disconnect", resultKind: "ok",
+      });
+      return sendJson(res, 200, { ok: true, ...DISCONNECTED_CLAUDE });
+    }
+
+    if (req.method === "POST" && segments[3] === "login" && !segments[4]) {
+      sweepPendingLogins();
+      const started = startClaudeLogin();
+      // The verifier stays here. Only the URL crosses to the browser — it is the one
+      // secret that makes a stolen authorization code useful.
+      pendingLogins.set(accountId, {
+        verifier: started.verifier, state: started.state, expiresAt: Date.now() + PENDING_LOGIN_TTL_MS,
+      });
+      return sendJson(res, 200, {
+        ok: true, url: started.url, expiresInSeconds: Math.round(PENDING_LOGIN_TTL_MS / 1000),
+      });
+    }
+
+    if (req.method === "POST" && segments[3] === "login" && segments[4] === "complete") {
+      sweepPendingLogins();
+      const entry = pendingLogins.get(accountId);
+      if (!entry) {
+        return sendJson(res, 400, {
+          ok: false, error: "That login has expired or was never started. Begin it again.",
+        });
+      }
+
+      const { code } = await readBody(req);
+      if (typeof code !== "string" || code.length > MAX_PASTED_CODE) {
+        return sendJson(res, 400, { ok: false, error: "Paste the code from the approval page." });
+      }
+      const parsed = parsePastedCode(code);
+      if (!parsed) {
+        return sendJson(res, 400, { ok: false, error: "That does not look like an authorization code." });
+      }
+      // The state binds this code to the login *this* tenant started. A code obtained in
+      // somebody else's approval, pasted here, has to be refused — that is the entire job
+      // of the parameter, and skipping the check because the code "looks right" loses it.
+      if (parsed.state !== null && !sameState(entry.state, parsed.state)) {
+        return sendJson(res, 400, {
+          ok: false, error: "That code came from a different login. Start again and use the newest link.",
+        });
+      }
+
+      // Single use either way: a code that failed to exchange cannot be retried, and one
+      // that succeeded must not be replayed.
+      pendingLogins.delete(accountId);
+
+      try {
+        const identity = await exchangeClaudeCode({
+          code: parsed.code, state: entry.state, verifier: entry.verifier,
+        });
+        await accounts.save(accountId, identity);
+        appendAudit({
+          sandboxId: null, principalId: principal.id, onBehalfOf: null,
+          server: "claude-code", tool: "connect", args: { plan: identity.subscriptionType },
+          resultKind: "ok",
+        });
+        return sendJson(res, 200, { ok: true, ...(await accounts.status(accountId)) });
+      } catch (e) {
+        if (e instanceof ClaudeLoginError) {
+          return sendJson(res, 400, { ok: false, error: e.message, restart: e.restart });
+        }
+        return sendJson(res, 502, { ok: false, error: e.message });
+      }
+    }
+
+    return sendJson(res, 405, { ok: false, error: "unsupported method for /api/claude-code" });
   }
 
   // API: per-tenant quota — read current limits or update them.

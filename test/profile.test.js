@@ -54,7 +54,14 @@ test("GET /api/profile returns default provider state without secrets", async ()
   assert.equal(data.profile.llmProvider, "claude");
   assert.equal(data.profile.onboardingCompleted, false);
   assert.equal(data.profile.keyConfigured, false);
-  assert.deepEqual(data.profile.providers.map((p) => p.id), ["claude", "openai"]);
+  assert.deepEqual(data.profile.providers.map((p) => p.id), ["claude", "claude-code", "openai", "codex"]);
+  // The two subscription providers are keyless: they carry no secret name, because their
+  // credential is an OAuth login rather than anything anyone pastes into a settings box.
+  const byId = Object.fromEntries(data.profile.providers.map((p) => [p.id, p]));
+  assert.equal(byId["claude"].billing, "key");
+  assert.equal(byId["claude-code"].billing, "subscription");
+  assert.equal(byId["claude-code"].secretName, null);
+  assert.equal(byId["claude-code"].configured, false, "nothing is connected on a fresh tenant");
   assert.ok(!JSON.stringify(data).includes("sk-test"), "profile response must not leak key material");
 });
 

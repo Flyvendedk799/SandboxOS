@@ -193,3 +193,20 @@ export function upgradeSecretsToPerTenant() {
   }
   return upgraded;
 }
+
+/**
+ * A stable host secret for subsystems that need one of their own.
+ *
+ * The `ai-auth` credential stores key their SecretBox from "a secret the host already
+ * has". SandboxOS already has exactly one such thing — the master key — and adding a
+ * second would mean a second thing to back up, rotate and lose. So this hands out a
+ * derived value instead: HKDF-SHA256 of the master key under a purpose label, hex.
+ *
+ * The master key itself never leaves this module. Two different purposes get two
+ * unrelated secrets, and neither can be walked back to the key they came from.
+ */
+export function hostSecret(purpose) {
+  if (!purpose) throw new Error("hostSecret needs a purpose label");
+  const info = Buffer.from(`host-secret:${purpose}`);
+  return Buffer.from(crypto.hkdfSync("sha256", masterKey(), HKDF_SALT, info, 32)).toString("hex");
+}

@@ -10,8 +10,9 @@
 
 ## Run it
 
-Requires only **Node ≥ 24** (uses built-in `node:sqlite`). Docker is optional but gives
-you real container isolation.
+Requires only **Node ≥ 22.13** (uses built-in `node:sqlite`, which stops needing
+`--experimental-sqlite` at that version). Docker is optional but gives you real
+container isolation.
 
 ```bash
 cd ~/Desktop/SandboxOS
@@ -71,7 +72,7 @@ path to the documented target. They are scoped, not shortcuts that have to be un
 | Now (Phase 0) | Documented target | Why now / how we upgrade |
 |---------------|-------------------|--------------------------|
 | **JavaScript (ESM)** | TypeScript ([11](docs/11-tech-stack.md)) | Zero build step; matches your `node:test` idiom. Adopt TS incrementally per package. |
-| **`node:sqlite`** (built-in) | `better-sqlite3` v11 | No native dep → runs on Node 25 out of the box. Near-identical API; mechanical swap. |
+| **`node:sqlite`** (built-in) | `better-sqlite3` v11 | No native dep → runs on Node 22.13 through 25 out of the box. Near-identical API; mechanical swap. |
 | **SSE + POST** console channel | WebSocket + PTY (xterm.js) | True interactive PTY is Phase 1; the verb→MCP console is the right Phase-0 shape (and keeps every command audited rather than a raw PTY bypass). |
 | **Kernel hosted host-side** in the Gateway | Kernel runs *inside* the Cell | Phase 1 moves it in; the Cell interface already isolates this. |
 | **Implicit wake** on slug access | Scheduler with warm pool + hibernation budget | `cell.ensureRunning()` is the seam the Scheduler will own in Phase 1. |

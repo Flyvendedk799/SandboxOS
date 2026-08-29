@@ -30,6 +30,9 @@ channel.
 |---|---|---|
 | `GET` | `/api/me` | authenticated? which slug? |
 | `GET/POST` | `/api/profile` | account, AI provider, onboarding state |
+| `GET/DELETE` | `/api/claude-code` | is a Claude subscription connected for this tenant; disconnect |
+| `POST` | `/api/claude-code/login` | begin the PKCE login — returns the URL to approve at |
+| `POST` | `/api/claude-code/login/complete` | finish it with the pasted `code#state` |
 | `GET/POST` | `/api/quota` | resource limits (cross-tenant writes need operator authority) |
 | `GET` | `/api/stats` | tenant-wide Sandbox and agent counts |
 | `GET/POST` | `/api/sandboxes` | list, create (optionally from a distro) |
@@ -208,3 +211,5 @@ Errors are `SandboxError` and carry the Kernel's reason — `denied: proc.exec`,
 | `SANDBOXOS_AGENT_MAX_MS` · `_MAX_TOKENS` | AI agent budgets |
 | `SANDBOXOS_DB_DRIVER` | `node:sqlite` (default) or `better-sqlite3` |
 | `ANTHROPIC_API_KEY` · `OPENAI_API_KEY` | fallback when no tenant key is stored |
+| `SANDBOXOS_HOST_SUBSCRIPTION` | `1` lets the host's own `claude`/`codex` login pay for tenant calls (off by default: on a shared host it bills everyone's work to one plan) |
+| `CLAUDE_CREDENTIALS_FILE` · `CODEX_AUTH_FILE` | where those CLI logins live, when not the default paths |

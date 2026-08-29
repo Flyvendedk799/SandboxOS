@@ -5,7 +5,7 @@
   "type": "module",
   "description": "SandboxOS \u2014 an MCP-native OS: slug Gateway \u2192 Cell \u2192 MCP Kernel \u2192 Command Central",
   "engines": {
-    "node": ">=24"
+    "node": ">=22.13.0"
   },
   "bin": {
     "sbx": "packages/sbx-cli/src/sbx.js",

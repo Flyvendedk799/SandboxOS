@@ -14,11 +14,15 @@
 
 import { authorize } from "../../kernel/src/capabilities.js";
 import { updateAgentState, grantsFor } from "../../control-db/src/registry.js";
-import { resolveLlmCredential } from "../../llm/src/providers.js";
+import {
+  baseUrlFor, credentialHeaders, resolveLlmCredential, systemFor,
+} from "../../llm/src/providers.js";
+import { CODEX_BASE_URL } from "../../ai-auth/src/clients.js";
+import { describeProviderError } from "../../ai-auth/src/errors.js";
 
-const CLAUDE_API_URL = "https://api.anthropic.com/v1/messages";
-const CLAUDE_API_VER = "2023-06-01";
-const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
+const CLAUDE_API_URL = () => process.env.SANDBOXOS_ANTHROPIC_URL || "https://api.anthropic.com/v1/messages";
+const OPENAI_API_URL = () => process.env.SANDBOXOS_OPENAI_URL || "https://api.openai.com/v1/chat/completions";
+const CODEX_URL = () => process.env.SANDBOXOS_CODEX_URL || `${CODEX_BASE_URL}/chat/completions`;
 const MAX_ITER = 20;
 
 // Per-agent budget bounds (backlog #13 — AI agent budget bound).
@@ -87,46 +91,60 @@ async function readJson(res) {
   try { return text ? JSON.parse(text) : {}; } catch { return { error: { message: text || `HTTP ${res.status}` } }; }
 }
 
-async function callAnthropic(apiKey, { model, system, tools, messages }) {
+/**
+ * The most useful sentence available for a failed provider response — the same mapping
+ * the Assistant and the `llm` server use, so an agent's failure reads like theirs.
+ */
+function providerFailure(res, data, credential, model) {
+  const raw = data?.error?.message ?? `${credential.label} error (${res.status})`;
+  const shaped = { status: res.status, message: JSON.stringify({ message: raw }), headers: res.headers };
+  return new Error(
+    describeProviderError(shaped, credential.provider, model, { configureAt: "Settings" }) ?? raw,
+  );
+}
+
+async function callAnthropic(credential, { model, system, tools, messages }) {
   const body = {
     model,
     max_tokens: 4096,
     tools,
     messages,
-    ...(system ? { system } : {}),
+    // A subscription token must carry the Claude Code identity as its first system
+    // block; systemFor is a no-op on a metered key.
+    ...(system || credential.provider === "claude-code" ? { system: systemFor(credential, system) } : {}),
   };
-  const res = await fetch(CLAUDE_API_URL, {
+  const res = await fetch(baseUrlFor(credential, CLAUDE_API_URL(), OPENAI_API_URL(), CODEX_URL()), {
     method: "POST",
-    headers: { "x-api-key": apiKey, "anthropic-version": CLAUDE_API_VER, "content-type": "application/json" },
+    headers: credentialHeaders(credential),
     body: JSON.stringify(body),
   });
   const data = await readJson(res);
-  if (!res.ok || data.error) throw new Error(data.error?.message ?? `Claude API error (${res.status})`);
+  if (!res.ok || data.error) throw providerFailure(res, data, credential, model);
   return data;
 }
 
-async function callOpenAI(apiKey, { model, tools, messages }) {
+async function callOpenAI(credential, { model, tools, messages }) {
   const body = { model, messages, max_tokens: 4096, ...(tools.length ? { tools, tool_choice: "auto" } : {}) };
-  const res = await fetch(OPENAI_API_URL, {
+  const res = await fetch(baseUrlFor(credential, CLAUDE_API_URL(), OPENAI_API_URL(), CODEX_URL()), {
     method: "POST",
-    headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+    headers: credentialHeaders(credential),
     body: JSON.stringify(body),
   });
   const data = await readJson(res);
-  if (!res.ok || data.error) throw new Error(data.error?.message ?? `OpenAI API error (${res.status})`);
+  if (!res.ok || data.error) throw providerFailure(res, data, credential, model);
   return data;
 }
 
 // ---- main runner -------------------------------------------------------------
 
 export async function runAI(agentId, { agentPrincipalId, spawnedBy, patterns, prompt, systemPrompt, kernel, sandbox }) {
-  const credential = resolveLlmCredential(sandbox.tenant_id);
+  const credential = await resolveLlmCredential(sandbox.tenant_id);
 
   updateAgentState(agentId, "running", { startedAt: Date.now() });
 
-  if (!credential.apiKey) {
+  if (!credential.configured) {
     updateAgentState(agentId, "done", {
-      result: `(AI agent: ${credential.secretName} not set for ${credential.label} — add it in Profile to enable the AI tool loop)`,
+      result: `(AI agent: ${credential.error})`,
       finishedAt: Date.now(),
     });
     return;
@@ -148,7 +166,7 @@ export async function runAI(agentId, { agentPrincipalId, spawnedBy, patterns, pr
   };
 
   try {
-    if (credential.provider === "openai") {
+    if (credential.wire === "openai") {
       await runOpenAIToolLoop(agentId, { agentPrincipalId, spawnedBy, patterns, prompt, systemPrompt, kernel, held, credential, budget });
     } else {
       await runClaudeToolLoop(agentId, { agentPrincipalId, spawnedBy, patterns, prompt, systemPrompt, kernel, held, credential, budget });
@@ -167,7 +185,7 @@ async function runClaudeToolLoop(agentId, { agentPrincipalId, spawnedBy, pattern
       return finalizeBudgetExhausted(agentId, `wall-clock budget exhausted (${budget.maxMs}ms)`, budget.lastText, budget.tokensUsed);
     }
 
-    const resp = await callAnthropic(credential.apiKey, {
+    const resp = await callAnthropic(credential, {
       model: credential.modelDefault,
       system: systemPrompt,
       tools,
@@ -223,7 +241,7 @@ async function runOpenAIToolLoop(agentId, { agentPrincipalId, spawnedBy, pattern
       return finalizeBudgetExhausted(agentId, `wall-clock budget exhausted (${budget.maxMs}ms)`, budget.lastText, budget.tokensUsed);
     }
 
-    const resp = await callOpenAI(credential.apiKey, { model: credential.modelDefault, tools, messages });
+    const resp = await callOpenAI(credential, { model: credential.modelDefault, tools, messages });
     const choice = resp.choices?.[0]?.message ?? {};
     const usage = resp.usage ?? {};
     budget.tokensUsed += usage.total_tokens ?? ((usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0));
