@@ -28,6 +28,13 @@ export function kernelServer(deps) {
           return { capabilities: grantsFor(ctx.principalId, sandbox.id) };
         },
       },
+      tools: {
+        description: "The unified tool catalog of this Sandbox — every tool of every enabled server.",
+        inputSchema: { type: "object", properties: {} },
+        async handler() {
+          return { tools: kernel.listTools(), servers: [...kernel.servers.keys()] };
+        },
+      },
       auditQuery: {
         description: "Recent audit events for this Sandbox.",
         inputSchema: {

@@ -313,6 +313,55 @@ export function queryAudit(sandboxId, { server, tool, principalId, resultKind, a
 }
 
 /**
+ * Roll the audit log up into counts, for the metrics server and the dashboard.
+ * Three cuts of the same window: by result kind, by server, and by tool — plus
+ * a per-minute (or per-hour, for long windows) histogram so a burst of activity
+ * is visible as a shape rather than a single total.
+ *
+ * @param {string} sandboxId
+ * @param {number} since  epoch-ms lower bound (exclusive)
+ */
+export function auditRollup(sandboxId, since) {
+  const db = openDb();
+  const total = db.prepare("SELECT COUNT(*) AS n FROM audit WHERE sandbox_id=? AND ts>?")
+    .get(sandboxId, since)?.n ?? 0;
+
+  const byKind = db.prepare(
+    "SELECT result_kind AS kind, COUNT(*) AS n FROM audit WHERE sandbox_id=? AND ts>? GROUP BY result_kind",
+  ).all(sandboxId, since);
+
+  const byServer = db.prepare(
+    "SELECT server, COUNT(*) AS n FROM audit WHERE sandbox_id=? AND ts>? GROUP BY server ORDER BY n DESC LIMIT 20",
+  ).all(sandboxId, since);
+
+  const byTool = db.prepare(
+    "SELECT server, tool, COUNT(*) AS n FROM audit WHERE sandbox_id=? AND ts>? GROUP BY server, tool ORDER BY n DESC LIMIT 20",
+  ).all(sandboxId, since);
+
+  // Bucket width: keep the histogram at a readable ~60 buckets whatever the window.
+  const span = Math.max(1, Date.now() - since);
+  const bucketMs = Math.max(60_000, Math.ceil(span / 60 / 60_000) * 60_000);
+  const rows = db.prepare("SELECT ts FROM audit WHERE sandbox_id=? AND ts>? ORDER BY ts ASC").all(sandboxId, since);
+  const buckets = new Map();
+  const first = Math.floor(since / bucketMs) * bucketMs;
+  const last = Math.floor(Date.now() / bucketMs) * bucketMs;
+  for (let b = first; b <= last; b += bucketMs) buckets.set(b, 0);
+  for (const r of rows) {
+    const b = Math.floor(r.ts / bucketMs) * bucketMs;
+    buckets.set(b, (buckets.get(b) ?? 0) + 1);
+  }
+
+  return {
+    total,
+    byKind: Object.fromEntries(byKind.map((r) => [r.kind, r.n])),
+    byServer,
+    byTool,
+    bucketMs,
+    histogram: [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([ts, n]) => ({ ts, n })),
+  };
+}
+
+/**
  * Backlog #4: verify the audit hash chain end-to-end. Walks every row in
  * ascending id order, recomputing the hash exactly as appendAudit does
  * (sha256 over the same JSON payload prefixed with prev_hash) and checking both

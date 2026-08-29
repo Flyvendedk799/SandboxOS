@@ -18,6 +18,7 @@ import { agentsServer } from "../../agents/src/server.js";
 import { llmServer } from "../../llm/src/server.js";
 import { appsServer } from "./servers/apps.js";
 import { portsServer } from "./servers/ports.js";
+import { metricsServer } from "./servers/metrics.js";
 
 export const CATALOG = {
   fs: (d) => fsServer(d.cell),
@@ -31,6 +32,7 @@ export const CATALOG = {
   llm: (d) => llmServer(d),
   apps: (d) => appsServer(d),
   ports: (d) => portsServer(d),
+  metrics: (d) => metricsServer(d),
   "mcp-registry": (d) => registryServer(d),
   kernel: (d) => kernelServer(d),
 };

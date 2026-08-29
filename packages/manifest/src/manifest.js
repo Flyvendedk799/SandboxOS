@@ -23,6 +23,7 @@ export function defaultManifest(name = "primary") {
       agents: {},
       apps: {},
       ports: {},
+      metrics: {},
       "mcp-registry": {},
       kernel: {},
     },

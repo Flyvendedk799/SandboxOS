@@ -20,9 +20,11 @@ import {
   listSandboxesForTenant, deleteSandbox,
   getQuota, setQuota, runningAgentCount, isOperator,
   getTenant, getTenantProfile, updateTenantProfile, LLM_PROVIDERS,
+  appendAudit,
 } from "../../../packages/control-db/src/registry.js";
 import { authorize } from "../../../packages/kernel/src/capabilities.js";
 import { exposedPorts } from "../../../packages/kernel/src/servers/ports.js";
+import { safeResolve, canonicalContained, canonicalLeafContained } from "../../../packages/kernel/src/servers/fs.js";
 import { loadManifest } from "../../../packages/manifest/src/manifest.js";
 import { putTenantSecret, removeTenantSecret } from "../../../packages/secrets/src/store.js";
 import { providerConfig, providerOptions } from "../../../packages/llm/src/providers.js";
@@ -62,6 +64,22 @@ const sendJson = (res, code, obj) => {
 };
 
 const TYPES = { ".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml" };
+
+/** Content types for files streamed out of a Cell. Anything unknown downloads as
+ *  a binary blob rather than being guessed at. */
+const MIME = {
+  ".txt": "text/plain", ".md": "text/markdown", ".log": "text/plain",
+  ".json": "application/json", ".xml": "application/xml", ".csv": "text/csv",
+  ".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".mjs": "text/javascript",
+  ".ts": "text/plain", ".tsx": "text/plain", ".jsx": "text/plain", ".py": "text/plain",
+  ".sh": "text/plain", ".yml": "text/yaml", ".yaml": "text/yaml", ".toml": "text/plain",
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+  ".webp": "image/webp", ".svg": "image/svg+xml", ".ico": "image/x-icon", ".avif": "image/avif",
+  ".pdf": "application/pdf", ".zip": "application/zip", ".gz": "application/gzip",
+  ".mp3": "audio/mpeg", ".wav": "audio/wav", ".mp4": "video/mp4", ".webm": "video/webm",
+  ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf",
+};
+const mimeFor = (name) => MIME[path.extname(name).toLowerCase()] ?? "application/octet-stream";
 function sendFile(res, file) {
   try {
     const body = fs.readFileSync(file);
@@ -501,6 +519,80 @@ async function handle(req, res) {
       return sendJson(res, 200, { ok: true, state: "stopped", evicted: null });
     const result = await scheduler.hibernate(sandbox);
     return sendJson(res, 200, { ok: true, ...result });
+  }
+
+  // ── Raw file transfer ──────────────────────────────────────────────────────
+  // The MCP surface moves file *content* as JSON (fs.read / fs.readBytes), which is
+  // right for agents and wrong for a browser: a 40 MB video should not become a
+  // base64 string in a JSON envelope. These two endpoints stream bytes instead, and
+  // are authorized against exactly the same capabilities as their MCP twins.
+
+  // GET /:slug/file?path=…[&download=1] — stream a file out of the Cell.
+  if (action === "file" && req.method === "GET") {
+    if (!authorize(held, "fs", "read")) return sendJson(res, 403, { ok: false, error: "denied: fs.read" });
+    const target = url.searchParams.get("path");
+    if (!target) return sendJson(res, 400, { ok: false, error: "path required" });
+    const cell = getCell(sandbox);
+    await cell.ensureRunning();
+    let file;
+    try {
+      file = await canonicalContained(cell.root, target);
+    } catch (e) {
+      // A path that does not exist is a 404; one that tries to leave the volume
+      // is a 400. Collapsing the two would make a typo look like an attack.
+      const missing = e.code === "ENOENT" || /ENOENT/.test(e.message);
+      return sendJson(res, missing ? 404 : 400, { ok: false, error: missing ? "not found" : e.message });
+    }
+    let st;
+    try { st = fs.statSync(file); } catch { return sendJson(res, 404, { ok: false, error: "not found" }); }
+    if (st.isDirectory()) return sendJson(res, 400, { ok: false, error: "path is a directory" });
+    scheduler.touch(sandbox.id);
+    const name = path.basename(target);
+    res.writeHead(200, {
+      "Content-Type": mimeFor(name),
+      "Content-Length": String(st.size),
+      "Cache-Control": "no-store",
+      ...(url.searchParams.get("download")
+        ? { "Content-Disposition": `attachment; filename="${name.replace(/"/g, "")}"` }
+        : {}),
+    });
+    fs.createReadStream(file).pipe(res);
+    return;
+  }
+
+  // PUT /:slug/file?path=… — stream an upload into the Cell (raw request body).
+  if (action === "file" && req.method === "PUT") {
+    if (!authorize(held, "fs", "write")) return sendJson(res, 403, { ok: false, error: "denied: fs.write" });
+    const target = url.searchParams.get("path");
+    if (!target) return sendJson(res, 400, { ok: false, error: "path required" });
+    const cell = getCell(sandbox);
+    await cell.ensureRunning();
+    let dest;
+    try {
+      const lexical = safeResolve(cell.root, target);
+      fs.mkdirSync(path.dirname(lexical), { recursive: true });
+      dest = (await canonicalLeafContained(cell.root, target)).target;
+    } catch (e) {
+      return sendJson(res, 400, { ok: false, error: e.message });
+    }
+    scheduler.touch(sandbox.id);
+    const bytes = await new Promise((resolve, reject) => {
+      let written = 0;
+      const out = fs.createWriteStream(dest, { flags: "w", mode: 0o644 });
+      req.on("data", (c) => { written += c.length; });
+      req.pipe(out);
+      out.on("finish", () => resolve(written));
+      out.on("error", reject);
+    }).catch((e) => ({ error: e.message }));
+    if (typeof bytes === "object") return sendJson(res, 500, { ok: false, error: bytes.error });
+    // Mirror the audit trail of an equivalent fs.write so a streamed upload is not
+    // invisible next to the MCP path.
+    appendAudit({
+      sandboxId: sandbox.id, principalId: principal.id, onBehalfOf: null,
+      server: "fs", tool: "write", args: { path: target, streamed: true },
+      resultKind: "ok", capability: authorize(held, "fs", "write"),
+    });
+    return sendJson(res, 200, { ok: true, path: target, bytes });
   }
 
   // ── Port preview ───────────────────────────────────────────────────────────
