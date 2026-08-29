@@ -5,7 +5,10 @@
 // SVG: a sparkline and a bar histogram are not worth a charting library, and a
 // dependency-free page loads instantly on a phone over a tunnel.
 
-import { $, h, fill, api, bus, state, fmtBytes, fmtAgo, fmtDuration, emptyState, toastError } from "./core.js";
+import {
+  $, $$, h, fill, api, bus, state, slug, fmtBytes, fmtAgo, fmtTime, fmtDuration,
+  emptyState, toastError, toast, dialog, debounce,
+} from "./core.js";
 
 const WINDOWS = [
   { label: "15m", ms: 15 * 60_000 },
@@ -73,8 +76,117 @@ export function initMetrics() {
   let windowMs = 3_600_000;
   let timer = null;
   let lastAt = 0;
+  let view = "overview";
+
+  // ── Audit explorer ─────────────────────────────────────────────────────────
+  // The audit log is the load-bearing artefact of this whole design — every
+  // Kernel call writes exactly one hash-chained row. The dock tails it; this is
+  // where you go through it.
+
+  const filters = { server: "", tool: "", kind: "", limit: 100 };
+  let events = [];
+  let cursor = null;
+  let chain = null;
+
+  const exportUrl = (format) => {
+    const p = new URLSearchParams({ format });
+    if (filters.server) p.set("server", filters.server);
+    if (filters.tool) p.set("tool", filters.tool);
+    if (filters.kind) p.set("kind", filters.kind);
+    return `/${slug}/audit/export?${p}`;
+  };
+
+  async function loadAudit({ more = false } = {}) {
+    const p = new URLSearchParams({ limit: String(filters.limit) });
+    if (filters.server) p.set("server", filters.server);
+    if (filters.tool) p.set("tool", filters.tool);
+    if (filters.kind) p.set("kind", filters.kind);
+    if (more && cursor) p.set("cursor", String(cursor));
+    try {
+      const r = await api.get(`audit?${p}`);
+      events = more ? [...events, ...(r.events ?? [])] : (r.events ?? []);
+      cursor = r.nextCursor ?? null;
+      lastAt = Date.now();
+      renderAudit();
+    } catch (e) {
+      fill(body, emptyState("!", "Could not read the audit log", e.message));
+    }
+  }
+
+  function renderAudit() {
+    const filterBar = h("div.card", { style: { marginBottom: "var(--s-4)" } },
+      h("div.row", { style: { flexWrap: "wrap" } },
+        h("select", {
+          onchange: (e) => { filters.server = e.target.value; cursor = null; loadAudit(); },
+        },
+          h("option", { value: "" }, "all servers"),
+          ...(state.servers ?? []).map((sv) => h("option", { value: sv, selected: sv === filters.server }, sv))),
+        h("input", {
+          type: "search", placeholder: "tool", value: filters.tool,
+          oninput: debounce((e) => { filters.tool = e.target.value.trim(); cursor = null; loadAudit(); }, 250),
+        }),
+        h("select", {
+          onchange: (e) => { filters.kind = e.target.value; cursor = null; loadAudit(); },
+        },
+          h("option", { value: "" }, "all results"),
+          ...["ok", "error", "denied"].map((k) => h("option", { value: k, selected: k === filters.kind }, k))),
+        h("span.spacer"),
+        chain
+          ? h("span.chip", { class: chain.ok ? "ok" : "err", title: chain.ok ? "every row hashes to its predecessor" : `chain breaks at event ${chain.brokenAtId}` },
+              chain.ok ? `chain verified · ${chain.count} events` : `chain broken at ${chain.brokenAtId}`)
+          : (state.user?.isOperator
+              ? h("button.ghost.sm", { onclick: verifyChain }, "Verify hash chain")
+              : null),
+        h("button.ghost.sm", { onclick: () => { window.location.href = exportUrl("json"); } }, "Export JSON"),
+        h("button.ghost.sm", { onclick: () => { window.location.href = exportUrl("csv"); } }, "Export CSV"),
+      ),
+    );
+
+    if (!events.length) {
+      fill(body, filterBar, emptyState("◇", "No matching events",
+        "Every Kernel call writes exactly one audit row. Widen the filters, or go and do something."));
+      return;
+    }
+
+    const table = h("table.data", null,
+      h("thead", null, h("tr", null,
+        h("th", "Time"), h("th", "Tool"), h("th", "Result"), h("th", "Capability"), h("th", "Detail"))),
+      h("tbody", null, ...events.slice().reverse().map((e) => h("tr", null,
+        h("td.dim.mono", { title: new Date(e.ts).toLocaleString() }, fmtTime(e.ts)),
+        h("td.mono", `${e.server}.${e.tool}`),
+        h("td", h("span.chip", { class: e.result_kind === "ok" ? "ok" : e.result_kind === "denied" ? "warn" : "err" }, e.result_kind)),
+        h("td.mono.dim", e.capability ?? "—"),
+        h("td.dim.truncate", { style: { maxWidth: "320px" }, title: e.error ?? e.args_json ?? "" },
+          e.error ?? e.args_json ?? ""),
+      ))),
+    );
+
+    fill(body, filterBar, h("div.card", null, table,
+      h("div.row", { style: { marginTop: "var(--s-3)" } },
+        h("span.dim", { style: { fontSize: "var(--fs-xs)" } }, `${events.length} event${events.length === 1 ? "" : "s"} loaded`),
+        h("span.spacer"),
+        cursor
+          ? h("button.ghost.sm", { onclick: () => loadAudit({ more: true }) }, "Load more")
+          : h("span.dim", { style: { fontSize: "var(--fs-xs)" } }, "end of log"),
+      )));
+  }
+
+  async function verifyChain() {
+    try {
+      chain = await api.get("/api/admin/audit/verify");
+      toast(chain.ok ? "Audit chain verified" : "Audit chain broken",
+        { body: chain.ok ? `${chain.count} events hash cleanly` : `first break at event ${chain.brokenAtId}`,
+          kind: chain.ok ? "ok" : "err" });
+      renderAudit();
+    } catch (e) { toastError("Could not verify the chain", e); }
+  }
 
   async function refresh() {
+    if (view === "audit") return loadAudit();
+    return refreshOverview();
+  }
+
+  async function refreshOverview() {
     try {
       const [snap, hist, act] = await Promise.all([
         api.mcp("metrics", "snapshot", {}),
@@ -148,6 +260,14 @@ export function initMetrics() {
 
   function tickAge() {
     ageEl.textContent = lastAt ? fmtAgo(lastAt) : "—";
+  }
+
+  for (const btn of $$("#metrics-view button")) {
+    btn.addEventListener("click", () => {
+      view = btn.dataset.view;
+      for (const b of $$("#metrics-view button")) b.classList.toggle("on", b === btn);
+      refresh();
+    });
   }
 
   $("#metrics-refresh").addEventListener("click", refresh);

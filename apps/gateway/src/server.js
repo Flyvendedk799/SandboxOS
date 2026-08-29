@@ -21,6 +21,8 @@ import {
   getQuota, setQuota, runningAgentCount, isOperator,
   getTenant, getTenantProfile, updateTenantProfile, LLM_PROVIDERS,
   appendAudit,
+  listSandboxAccess, revokeSandboxAccess, shareSandbox, listMachineTokens,
+  verifyAuditChain,
   createConversation, getConversation, listConversations, renameConversation,
   deleteConversation, appendConversationMessages, conversationMessages,
 } from "../../../packages/control-db/src/registry.js";
@@ -351,6 +353,15 @@ async function handle(req, res) {
     });
     fs.createReadStream(dbPath).pipe(res);
     return;
+  }
+
+  // API: verify the audit hash chain. The chain links every Sandbox's events in
+  // one sequence, so it can only be verified host-wide — an operator action.
+  if (top === "api" && segments[2] === "admin" && segments[3] === "audit" && segments[4] === "verify" && req.method === "GET") {
+    const principal = authenticate(req);
+    if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
+    if (!requireOperator(principal)) return sendJson(res, 403, { ok: false, error: "operator authority required" });
+    return sendJson(res, 200, { ok: true, ...verifyAuditChain() });
   }
 
   // API: who am I?
@@ -698,6 +709,77 @@ async function handle(req, res) {
     send({ type: "done", code: 0 });
     res.end();
     return;
+  }
+
+  // ── Access ─────────────────────────────────────────────────────────────────
+  // Who can reach this machine, and to do what. The capability model has always
+  // been able to answer that; these routes make it something you can look at.
+
+  // GET /:slug/access — every principal holding a grant here.
+  if (action === "access" && req.method === "GET" && !segments[3]) {
+    return sendJson(res, 200, { ok: true, access: listSandboxAccess(sandbox.id), you: principal.id });
+  }
+
+  // POST /:slug/access — share with another account, attenuated against your grants.
+  if (action === "access" && req.method === "POST" && !segments[3]) {
+    const { username, patterns } = await readBody(req);
+    if (!username) return sendJson(res, 400, { ok: false, error: "username required" });
+    try {
+      const shared = shareSandbox(principal.id, sandbox.id, String(username).trim(), patterns);
+      return sendJson(res, 200, { ok: true, ...shared });
+    } catch (e) {
+      return sendJson(res, 400, { ok: false, error: e.message });
+    }
+  }
+
+  // DELETE /:slug/access/:principalId — revoke, taking any machine token with it.
+  if (action === "access" && segments[3] && req.method === "DELETE") {
+    if (segments[3] === principal.id) {
+      return sendJson(res, 400, { ok: false, error: "you cannot revoke your own access" });
+    }
+    const result = revokeSandboxAccess(sandbox.id, segments[3]);
+    if (!result.removed) return sendJson(res, 404, { ok: false, error: "no grants to revoke" });
+    return sendJson(res, 200, { ok: true, ...result });
+  }
+
+  // GET /:slug/tokens — the machine tokens minted against this Sandbox.
+  if (action === "tokens" && req.method === "GET") {
+    return sendJson(res, 200, { ok: true, tokens: listMachineTokens(sandbox.id) });
+  }
+
+  // DELETE /:slug/tokens/:principalId — revoke one.
+  if (action === "tokens" && segments[3] && req.method === "DELETE") {
+    const result = revokeSandboxAccess(sandbox.id, segments[3]);
+    if (!result.removed && !result.tokensRevoked) return sendJson(res, 404, { ok: false, error: "no such token" });
+    return sendJson(res, 200, { ok: true, ...result });
+  }
+
+  // GET /:slug/audit/export?format=json|csv — take the log with you.
+  if (action === "audit" && segments[3] === "export" && req.method === "GET") {
+    const p = url.searchParams;
+    const events = queryAudit(sandbox.id, {
+      server: p.get("server") || undefined,
+      tool: p.get("tool") || undefined,
+      resultKind: p.get("kind") || undefined,
+      after: p.has("after") ? Number(p.get("after")) : undefined,
+      limit: 500,
+    });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    if (p.get("format") === "csv") {
+      const cols = ["id", "ts", "server", "tool", "result_kind", "capability", "error"];
+      const cell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+      const csv = [cols.join(","), ...events.map((e) => cols.map((c) => cell(e[c])).join(","))].join("\n");
+      res.writeHead(200, {
+        "Content-Type": "text/csv",
+        "Content-Disposition": `attachment; filename="audit-${sandbox.slug}-${stamp}.csv"`,
+      });
+      return res.end(csv);
+    }
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Content-Disposition": `attachment; filename="audit-${sandbox.slug}-${stamp}.json"`,
+    });
+    return res.end(JSON.stringify({ sandbox: sandbox.slug, exportedAt: Date.now(), events }, null, 2));
   }
 
   // ── Assistant ──────────────────────────────────────────────────────────────

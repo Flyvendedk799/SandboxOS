@@ -26,20 +26,28 @@ export function initSettings() {
   let servers = { enabled: [], available: [] };
   let sandboxes = [];
   let distros = [];
+  let access = [];
+  let tokens = [];
+  let me = null;
 
   async function load() {
-    const [p, q, s, sb, d] = await Promise.all([
+    const [p, q, s, sb, d, ac, tk] = await Promise.all([
       api.get("/api/profile").catch(() => null),
       api.get("/api/quota").catch(() => null),
       api.tryMcp("mcp-registry", "list", {}),
       api.get("/api/sandboxes").catch(() => ({ sandboxes: [] })),
       api.get("/api/distros").catch(() => ({ distros: [] })),
+      api.get("access").catch(() => ({ access: [] })),
+      api.get("tokens").catch(() => ({ tokens: [] })),
     ]);
     profile = p;
     quota = q?.quota ?? null;
     servers = s ?? servers;
     sandboxes = sb?.sandboxes ?? [];
     distros = d?.distros ?? [];
+    access = ac?.access ?? [];
+    me = ac?.you ?? null;
+    tokens = tk?.tokens ?? [];
     if (p) setState({ user: p.user, tenant: p.tenant, profile: p.profile });
     if (s) setState({ servers: s.enabled ?? [] });
     render();
@@ -147,21 +155,59 @@ export function initSettings() {
 
   function serversSection() {
     const enabled = new Set(servers.enabled ?? []);
-    const all = [...new Set([...(servers.available ?? []), ...enabled])].sort();
+    const installed = new Set(servers.installed ?? []);
+    const builtin = new Set(servers.available ?? []);
+    const all = [...new Set([...builtin, ...installed, ...enabled])].sort();
     return section("MCP servers",
-      "A Sandbox is composed, not fixed. Enabling a server adds its tools to this machine's kernel immediately.",
+      "A Sandbox is composed, not fixed. Enabling a server adds its tools to this machine's kernel immediately; a marketplace server runs out of process and is governed identically.",
       h("div.cards", null, ...all.map((name) => h("div.item", null,
         h("div.item-head", null,
           h("span.dot", { class: enabled.has(name) ? "running" : "stopped" }),
           h("span.item-title.grow.mono", name),
+          installed.has(name) ? h("span.chip.sand", "marketplace") : null,
         ),
         h("div.item-actions", null,
           enabled.has(name)
             ? h("button.ghost.sm", { disabled: name === "kernel" || name === "mcp-registry", onclick: () => toggleServer(name, false) }, "Disable")
             : h("button.ghost.sm", { onclick: () => toggleServer(name, true) }, "Enable"),
+          installed.has(name)
+            ? h("button.ghost.sm.danger", { onclick: () => uninstallServer(name) }, "Uninstall")
+            : null,
         ),
       ))),
+      h("button.ghost.sm", { style: { marginTop: "var(--s-3)" }, onclick: installServer }, "Install a server…"),
     );
+  }
+
+  async function installServer() {
+    const got = await dialog({
+      title: "Install an MCP server",
+      message: "A marketplace server runs in its own process with no handle to the control plane. Its tools still go through the Kernel, so they are authorized and audited like any other.",
+      fields: [
+        { name: "name", label: "Name", placeholder: "weather", hint: "How it will be addressed: name.tool" },
+        { name: "source", label: "Source", placeholder: "npm:some-mcp-server  ·  /path/to/server.js",
+          hint: "An npm package or a file path, subject to the host's install allowlist." },
+      ],
+      confirmLabel: "Install",
+    });
+    if (!got?.name || !got.source) return;
+    try {
+      await api.mcp("mcp-registry", "install", { name: got.name, source: got.source });
+      toast("Server installed", { body: `${got.name} is enabled`, kind: "ok" });
+      await load();
+      bus.emit("kernel:mutated", { line: `servers ${got.name}` });
+    } catch (e) { toastError("Install failed", e); }
+  }
+
+  async function uninstallServer(name) {
+    if (!await confirmDialog("Uninstall this server?",
+      `${name} is removed from the manifest and its process is stopped. Anything that called ${name}.* will start failing.`,
+      { confirmLabel: "Uninstall" })) return;
+    try {
+      await api.mcp("mcp-registry", "uninstall", { name });
+      await load();
+      bus.emit("kernel:mutated", { line: `servers ${name}` });
+    } catch (e) { toastError("Uninstall failed", e); }
   }
 
   async function toggleServer(name, on) {
@@ -236,10 +282,94 @@ export function initSettings() {
 
   // ── Machine tokens ─────────────────────────────────────────────────────────
 
+  // ── Access ─────────────────────────────────────────────────────────────────
+
+  function accessSection() {
+    const people = access.filter((a) => a.kind === "human");
+    const agents = access.filter((a) => a.kind === "agent");
+    return section("Who can reach this machine",
+      "Access is a set of capability patterns, not a role. You can share only what you already hold.",
+      h("table.data", null,
+        h("thead", null, h("tr", null,
+          h("th", "Principal"), h("th", "Can invoke"), h("th", "Since"), h("th.right", ""))),
+        h("tbody", null, ...[...people, ...agents].map((a) => h("tr", null,
+          h("td", null,
+            h("div.row", null,
+              h("span", a.username ?? a.name),
+              a.principalId === me ? h("span.chip.accent", "you") : null,
+              a.kind !== "human" ? h("span.chip", a.kind) : null,
+            )),
+          h("td", h("div.row", { style: { flexWrap: "wrap" } },
+            ...a.patterns.map((p) => h("span.chip.mono", p)))),
+          h("td.dim", fmtAgo(a.grantedAt)),
+          h("td.right", a.principalId === me
+            ? null
+            : h("button.ghost.sm.danger", { onclick: () => revoke(a) }, "Revoke")),
+        )))),
+      h("button.ghost.sm", { style: { marginTop: "var(--s-2)" }, onclick: share }, "Share with someone…"),
+    );
+  }
+
+  async function share() {
+    const got = await dialog({
+      title: "Share this sandbox",
+      message: "They will see it in their machine switcher, and can invoke exactly the tools you grant — nothing more.",
+      fields: [
+        { name: "username", label: "Username", placeholder: "alice" },
+        { name: "patterns", label: "Capabilities", value: "fs.read, proc.list",
+          hint: "Comma-separated patterns. Use * to give full access." },
+      ],
+      confirmLabel: "Share",
+    });
+    if (!got?.username) return;
+    try {
+      const r = await api.post("access", {
+        username: got.username.trim(),
+        patterns: got.patterns.split(",").map((p) => p.trim()).filter(Boolean),
+      });
+      toast(r.added.length ? "Shared" : "Already shared",
+        { body: `${got.username} · ${r.patterns.join(", ")}`, kind: "ok" });
+      load();
+    } catch (e) { toastError("Could not share", e); }
+  }
+
+  async function revoke(a) {
+    if (!await confirmDialog("Revoke access?",
+      `${a.username ?? a.name} loses every capability they hold on /${slug}. ${a.kind === "human" ? "Their account is untouched." : "Any token they hold is destroyed."}`,
+      { confirmLabel: "Revoke" })) return;
+    try { await api.del(`access/${a.principalId}`); load(); }
+    catch (e) { toastError("Could not revoke access", e); }
+  }
+
+  // ── Tokens ─────────────────────────────────────────────────────────────────
+
   function tokensSection() {
     return section("Machine tokens",
-      "Mint a token for the sbx CLI, a device, or CI. A token can never hold more capability than you do — the mint attenuates it.",
-      h("button.ghost.sm", { onclick: mintToken }, "Mint a token"));
+      "Mint a token for the sbx CLI, a device, or CI. A token can never hold more capability than you do — the mint attenuates it. Revoking one destroys the credential, not just its grants.",
+      tokens.length
+        ? h("table.data", null,
+            h("thead", null, h("tr", null,
+              h("th", "Label"), h("th", "Can invoke"), h("th", "Expires"), h("th.right", ""))),
+            h("tbody", null, ...tokens.map((t) => h("tr", null,
+              h("td", null, h("div.row", null,
+                h("span.mono", t.label),
+                t.active ? null : h("span.chip.warn", "expired"))),
+              h("td", h("div.row", { style: { flexWrap: "wrap" } },
+                ...t.patterns.map((p) => h("span.chip.mono", p)))),
+              h("td.dim", t.expiresAt ? new Date(t.expiresAt).toLocaleDateString() : "—"),
+              h("td.right", h("button.ghost.sm.danger", { onclick: () => revokeToken(t) }, "Revoke")),
+            ))))
+        : h("p.dim", { style: { fontSize: "var(--fs-sm)" } }, "No tokens minted for this sandbox yet."),
+      h("button.ghost.sm", { style: { marginTop: "var(--s-2)" }, onclick: mintToken }, "Mint a token"),
+    );
+  }
+
+  async function revokeToken(t) {
+    if (!await confirmDialog("Revoke this token?",
+      `${t.label} stops authenticating immediately. Anything using it — a CLI, a device, CI — will start getting 401s.`,
+      { confirmLabel: "Revoke" })) return;
+    try { await api.del(`tokens/${t.principalId}`); load(); }
+    catch (e) { toastError("Could not revoke the token", e); }
   }
 
   async function mintToken() {
@@ -267,6 +397,7 @@ export function initSettings() {
           h("button.ghost.sm", { onclick: () => navigator.clipboard?.writeText(r.token).then(() => toast("Token copied")) }, "Copy token"),
         ),
       });
+      load();
     } catch (e) { toastError("Could not mint a token", e); }
   }
 
@@ -287,9 +418,10 @@ export function initSettings() {
       providerSection(),
       cellSection(),
       serversSection(),
+      accessSection(),
+      tokensSection(),
       sandboxesSection(),
       distrosSection(),
-      tokensSection(),
     );
   }
 

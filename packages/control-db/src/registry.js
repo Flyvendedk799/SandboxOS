@@ -148,6 +148,102 @@ export function grantsFor(principalId, sandboxId) {
     .map((r) => r.pattern);
 }
 
+/** Every principal that can reach a Sandbox, with the patterns they hold.
+ *
+ *  This is the answer to "who can touch this machine, and to do what" — the
+ *  question the capability model makes answerable and nothing surfaced until
+ *  now. Machine principals (minted tokens, agent delegations) appear alongside
+ *  humans, because to the Kernel they are the same kind of thing. */
+export function listSandboxAccess(sandboxId) {
+  const rows = openDb().prepare(
+    `SELECT g.id AS grant_id, g.pattern, g.created_at,
+            p.id AS principal_id, p.kind, p.name,
+            (SELECT COUNT(*) FROM sessions s WHERE s.principal_id = p.id AND s.expires_at > ?) AS live_sessions,
+            (SELECT MAX(s.expires_at) FROM sessions s WHERE s.principal_id = p.id) AS expires_at,
+            (SELECT a.username FROM accounts a WHERE a.principal_id = p.id) AS username
+       FROM grants g JOIN principals p ON p.id = g.principal_id
+      WHERE g.sandbox_id = ?
+      ORDER BY p.kind, p.name`,
+  ).all(now(), sandboxId);
+
+  const byPrincipal = new Map();
+  for (const r of rows) {
+    let entry = byPrincipal.get(r.principal_id);
+    if (!entry) {
+      entry = {
+        principalId: r.principal_id, kind: r.kind, name: r.name, username: r.username ?? null,
+        patterns: [], grantedAt: r.created_at,
+        liveSessions: r.live_sessions, expiresAt: r.expires_at ?? null,
+      };
+      byPrincipal.set(r.principal_id, entry);
+    }
+    entry.patterns.push(r.pattern);
+    entry.grantedAt = Math.min(entry.grantedAt, r.created_at);
+  }
+  return [...byPrincipal.values()];
+}
+
+/** Drop a principal's grants on a Sandbox, and any tokens that only existed for it.
+ *
+ *  Revoking access has to take the credential with it: a machine principal is
+ *  created per token, so leaving its session alive would leave a bearer token
+ *  that authenticates to a principal with no rights — confusing at best. Human
+ *  principals keep their login; they simply lose this Sandbox. */
+export function revokeSandboxAccess(sandboxId, principalId) {
+  const db = openDb();
+  const p = getPrincipal(principalId);
+  const removed = db.prepare("DELETE FROM grants WHERE sandbox_id=? AND principal_id=?")
+    .run(sandboxId, principalId).changes ?? 0;
+  let tokensRevoked = 0;
+  if (p && p.kind !== "human") {
+    const stillHasGrants = db.prepare("SELECT COUNT(*) AS n FROM grants WHERE principal_id=?")
+      .get(principalId)?.n ?? 0;
+    if (!stillHasGrants) {
+      tokensRevoked = db.prepare("DELETE FROM sessions WHERE principal_id=?").run(principalId).changes ?? 0;
+    }
+  }
+  return { removed, tokensRevoked };
+}
+
+/** Share a Sandbox with another account, attenuating against the sharer's grants.
+ *
+ *  You cannot give away what you do not hold — the same rule that governs token
+ *  minting and agent delegation, applied to people. */
+export function shareSandbox(sharerPrincipalId, sandboxId, username, requestedPatterns) {
+  const held = grantsFor(sharerPrincipalId, sandboxId);
+  if (!held.length) throw new Error("you have no access to share");
+  const patterns = requestedPatterns?.length ? requestedPatterns : held;
+  for (const p of patterns) {
+    if (!canDelegate(held, p)) throw new Error(`attenuation: cannot share '${p}' — not held by you`);
+  }
+  const account = getAccountByUsername(username);
+  if (!account) throw new Error(`no such account: ${username}`);
+  if (account.principal_id === sharerPrincipalId) throw new Error("that account already owns this sandbox");
+
+  const existing = new Set(grantsFor(account.principal_id, sandboxId));
+  const added = [];
+  for (const p of patterns) {
+    if (existing.has(p)) continue;
+    grant(account.principal_id, sandboxId, p);
+    added.push(p);
+  }
+  return { principalId: account.principal_id, username, patterns, added };
+}
+
+/** Machine tokens with rights on a Sandbox: what was minted, and is it still live. */
+export function listMachineTokens(sandboxId) {
+  return listSandboxAccess(sandboxId)
+    .filter((a) => a.kind === "machine")
+    .map((a) => ({
+      principalId: a.principalId,
+      label: a.name,
+      patterns: a.patterns,
+      createdAt: a.grantedAt,
+      expiresAt: a.expiresAt,
+      active: a.liveSessions > 0,
+    }));
+}
+
 // ---- Sessions & machine tokens -------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;

@@ -293,7 +293,11 @@
     <!-- Metrics ------------------------------------------------------- -->
     <section class="workspace" id="ws-metrics" data-ws="metrics">
       <div class="toolbar">
-        <h2 style="font-size:var(--fs-md)">Metrics</h2>
+        <h2 style="font-size:var(--fs-md)">Observability</h2>
+        <div class="segmented" id="metrics-view" role="tablist">
+          <button class="on" data-view="overview" role="tab">Overview</button>
+          <button data-view="audit" role="tab">Audit log</button>
+        </div>
         <span class="spacer"></span>
         <span class="chip mono" id="metrics-age">—</span>
         <button class="ghost sm" id="metrics-refresh">Refresh</button>
