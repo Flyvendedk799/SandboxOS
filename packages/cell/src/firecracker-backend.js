@@ -23,6 +23,7 @@ import os from "node:os";
 import { execFile, spawn } from "node:child_process";
 import config from "../../config/src/config.js";
 import { allocateTap, releaseTap, getTapForSandbox } from "../../control-db/src/registry.js";
+import { remoteHandle, newMarker, pidFile } from "./handles.js";
 
 const WORKDIR = "/sandbox";
 const GUEST_IP = "172.20.0.2";
@@ -267,13 +268,21 @@ export class FirecrackerBackend {
   async execStream(command, callback, { timeoutMs = 30_000, env = {} } = {}) {
     await this.ensureRunning();
     const envPrefix = Object.entries(env).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(" ");
-    const fullCmd = envPrefix ? `cd ${WORKDIR} && ${envPrefix} sh -c ${JSON.stringify(command)}` : `cd ${WORKDIR} && sh -c ${JSON.stringify(command)}`;
+    const inner = envPrefix ? `${envPrefix} sh -c ${JSON.stringify(command)}` : `sh -c ${JSON.stringify(command)}`;
+    // Dropping the ssh client does not kill the process in the guest, so the
+    // guest shell records its pid before becoming the command; the handle
+    // signals that pid over a second ssh.
+    const marker = newMarker();
+    const fullCmd = `cd ${WORKDIR} && echo $$ > ${pidFile(marker)} 2>/dev/null; exec ${inner}`;
     const proc = spawn("ssh", this._sshArgs([fullCmd]));
-    const timer = setTimeout(() => proc.kill("SIGKILL"), timeoutMs);
+    const handle = remoteHandle(proc, marker, (script) =>
+      sh("ssh", [...this._sshArgs(), script], { timeoutMs: 10_000 }));
+    const timer = setTimeout(() => handle.kill("SIGKILL"), timeoutMs);
     proc.stdout.on("data", (d) => callback({ type: "stdout", chunk: d.toString() }));
     proc.stderr.on("data", (d) => callback({ type: "stderr", chunk: d.toString() }));
     proc.on("close", (code) => { clearTimeout(timer); callback({ type: "done", code: code ?? 1 }); });
-    return proc;
+    proc.on("error", () => { clearTimeout(timer); callback({ type: "done", code: 1 }); });
+    return handle;
   }
 
   async execInteractive(onData, onClose, { env = {}, cols = 80, rows = 24 } = {}) {

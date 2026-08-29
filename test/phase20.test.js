@@ -179,6 +179,58 @@ test("proc.stop terminates a long-running process", async () => {
   await ok("proc", "forget", { id: job.id });
 });
 
+test("stopping a process kills what it started, not just the wrapping shell", async () => {
+  // The regression this guards: a command runs under `/bin/sh -c`, so killing
+  // the process we spawned kills the shell and orphans the real work — a
+  // supervised dev server that reads as "stopped" while still holding its port.
+  const port = 7_000 + Math.floor(Math.random() * 900);
+  const job = await ok("proc", "start", {
+    cmd: `python3 -m http.server ${port} --bind 127.0.0.1`,
+    name: "listener",
+  });
+
+  // Wait for it to bind.
+  const reachable = async () => {
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(500) });
+      return r.status > 0;
+    } catch { return false; }
+  };
+  let up = false;
+  for (let i = 0; i < 60 && !up; i += 1) {
+    up = await reachable();
+    if (!up) await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(up, `the listener never came up on :${port}`);
+
+  await ok("proc", "stop", { id: job.id });
+
+  let down = false;
+  for (let i = 0; i < 60 && !down; i += 1) {
+    down = !(await reachable());
+    if (!down) await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(down, `:${port} is still served — the shell died but its child did not`);
+  await ok("proc", "forget", { id: job.id });
+});
+
+test("stopAllProcsEverywhere reaps supervised processes across Sandboxes", async () => {
+  // These are children of the Gateway process. An orphan keeps its port bound,
+  // so the next boot cannot rebind it — the shutdown path must reap them.
+  const { stopAllProcsEverywhere } = await import("../packages/kernel/src/servers/proc.js");
+  const a = await ok("proc", "start", { cmd: "sleep 30", name: "reap-a" });
+  const b = await ok("proc", "start", { cmd: "sleep 30", name: "reap-b" });
+  assert.equal(a.state, "running");
+  assert.equal(b.state, "running");
+
+  const killed = stopAllProcsEverywhere();
+  assert.ok(killed >= 2, `expected at least 2 processes reaped, got ${killed}`);
+  // The job table is dropped with them, so the ids are gone entirely.
+  const after = await ok("proc", "jobs");
+  assert.ok(!after.jobs.some((j) => j.id === a.id || j.id === b.id));
+  assert.equal(stopAllProcsEverywhere(), 0, "reaping twice is a no-op");
+});
+
 test("proc.logs on an unknown id is an error, not a silent empty tail", async () => {
   const r = await call("proc", "logs", { id: "nope" });
   assert.ok(!r.ok);

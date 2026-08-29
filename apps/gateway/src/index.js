@@ -8,6 +8,8 @@ import { resolveBackend } from "../../../packages/cell/src/cell.js";
 import { seedVolume } from "../../../packages/cell/src/seed.js";
 import { cronTick } from "../../../packages/scheduler/src/cron-runner.js";
 import { createServer, scheduler } from "./server.js";
+import { stopAllProcsEverywhere } from "../../../packages/kernel/src/servers/proc.js";
+import { killAllHosted } from "../../../packages/kernel/src/marketplace-pool.js";
 
 const backend = await resolveBackend();
 config.cellBackend = backend; // pin the resolved choice for the rest of the process
@@ -28,6 +30,21 @@ try {
 setInterval(() => cronTick().catch((e) => console.error("cron:", e.message)), 1000).unref();
 setInterval(() => scheduler.reapIdle().catch((e) => console.error("reaper:", e.message)), 30_000).unref();
 setInterval(() => { try { purgeExpiredSessions(); } catch (e) { console.error("session purge:", e.message); } }, 60 * 60_000).unref();
+
+/** Shut down cleanly: supervised processes and marketplace servers are children of
+ *  this process, and an orphaned one keeps whatever it holds — a port, a lock —
+ *  bound after we are gone. Idempotent, because SIGINT and exit can both fire. */
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const procs = stopAllProcsEverywhere();
+  killAllHosted();
+  if (procs) console.log(`\nstopped ${procs} supervised process${procs === 1 ? "" : "es"}`);
+  if (signal) process.exit(0);
+}
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, () => shutdown(sig));
+process.on("exit", () => shutdown(null));
 
 const server = createServer();
 server.listen(config.port, config.host, () => {

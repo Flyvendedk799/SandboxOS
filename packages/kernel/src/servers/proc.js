@@ -71,6 +71,18 @@ export function stopAllProcs(sandboxId) {
   return killed;
 }
 
+/** Terminate every supervised process on this host.
+ *
+ *  These are children of the Gateway process, so they must not outlive it: an
+ *  orphaned dev server keeps its port bound, which means the next boot cannot
+ *  rebind it and nothing in the job table records what is holding it. Called from
+ *  the Gateway's shutdown path. */
+export function stopAllProcsEverywhere() {
+  let killed = 0;
+  for (const sandboxId of [..._jobs.keys()]) killed += stopAllProcs(sandboxId);
+  return killed;
+}
+
 export function procServer(cell, sandbox) {
   // `sandbox` is optional so existing callers that pass only a cell keep working;
   // supervised processes are then keyed by the cell's volume root.
