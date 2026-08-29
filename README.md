@@ -80,13 +80,14 @@ Every call goes **authenticate → authorize (default-deny) → route → execut
 | `llm` | complete · models |
 | `metrics` | snapshot · history · activity · recent |
 | `apps` | install · list · launch · remove |
-| `tide` | push · pull · diff · checkout · log |
+| `tide` | init · status · mark · log · diff · checkout · state objects · push/pull wire primitives |
 | `mcp-registry` | list · enable · disable · configure · install · uninstall |
 | `kernel` | whoami · capabilities · tools · auditQuery · manifestGet · manifestSet |
 
 ### The desktop
 
-A dependency-free ES-module app behind the Gateway, in light and dark.
+A dependency-free ES-module app behind the Gateway, in light and dark. A brand-new
+Sandbox is seeded with a `WELCOME.md` that walks you through its first five minutes.
 
 - **Console** — Command Central, streamed. Shell verbs, `:call server.tool {}`, or
   `? plain English`. History and tab-completion over the live tool catalogue.
@@ -100,6 +101,7 @@ A dependency-free ES-module app behind the Gateway, in light and dark.
 - **Ports** — expose a service and preview it in an iframe, proxied through the
   Gateway with WebSocket upgrades for HMR.
 - **Processes** — supervised jobs with a live log tail, and the cron schedule.
+- **Sync** — Tide: workspaces, working-tree status, marks, per-mark diffs, restore.
 - **Apps**, **Secrets** — the app model and reference-only secret handling.
 - **Observability** — load/memory/disk/process charts, Kernel-call histograms, and a
   full audit explorer with filters, export and hash-chain verification.

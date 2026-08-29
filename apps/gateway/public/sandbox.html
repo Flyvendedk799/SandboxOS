@@ -76,6 +76,11 @@
     <g id="i-assistant" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
       <path d="M10 2.6l1.8 4.4 4.4 1.8-4.4 1.8L10 15l-1.8-4.4L3.8 8.8l4.4-1.8z"/><path d="M15.6 13.4l.7 1.7 1.7.7-1.7.7-.7 1.7-.7-1.7-1.7-.7 1.7-.7z"/>
     </g>
+    <g id="i-sync" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M2.6 8.4c1.6-1.7 3.1-1.7 4.7 0s3.1 1.7 4.7 0 3.1-1.7 4.7 0"/>
+      <path d="M2.6 13.4c1.6-1.7 3.1-1.7 4.7 0s3.1 1.7 4.7 0 3.1-1.7 4.7 0"/>
+      <path d="M2.6 3.4c1.6-1.7 3.1-1.7 4.7 0s3.1 1.7 4.7 0 3.1-1.7 4.7 0"/>
+    </g>
     <g id="i-send" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
       <path d="M17 3L9 11M17 3l-5.4 14-2.6-6L3 8.4z"/>
     </g>
@@ -261,6 +266,23 @@
         <div class="cards" id="procs-list"></div>
         <h3 class="dim" style="font-size:var(--fs-xs);text-transform:uppercase;letter-spacing:.06em;margin:var(--s-5) 0 var(--s-2)">Scheduled jobs</h3>
         <div id="cron-list"></div>
+      </div>
+    </section>
+
+    <!-- Sync (Tide) ----------------------------------------------------- -->
+    <section class="workspace" id="ws-sync" data-ws="sync">
+      <div class="chat-layout">
+        <aside class="chat-sidebar">
+          <div class="tree-toolbar">
+            <span class="grow dim" style="font-size:var(--fs-xs);text-transform:uppercase;letter-spacing:.06em">Workspaces</span>
+            <button class="quiet icon sm" id="tide-new" title="New workspace"><svg width="13" height="13" viewBox="0 0 20 20"><use href="#i-plus"/></svg></button>
+            <button class="quiet icon sm" id="tide-refresh" title="Refresh"><svg width="13" height="13" viewBox="0 0 20 20"><use href="#i-refresh"/></svg></button>
+          </div>
+          <div class="chat-items" id="tide-workspaces"></div>
+        </aside>
+        <div class="chat-main">
+          <div class="panel-body" id="tide-body"></div>
+        </div>
       </div>
     </section>
 

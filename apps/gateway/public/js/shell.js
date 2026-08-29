@@ -13,9 +13,10 @@ export const WORKSPACES = [
   { id: "agents",   icon: "agents",   label: "Agents",   key: "5" },
   { id: "ports",    icon: "ports",    label: "Ports",    key: "6" },
   { id: "jobs",     icon: "jobs",     label: "Processes",key: "7" },
-  { id: "apps",     icon: "apps",     label: "Apps",     key: "8" },
-  { id: "secrets",  icon: "secrets",  label: "Secrets",  key: "9" },
-  { id: "metrics",  icon: "metrics",  label: "Metrics",  key: "0" },
+  { id: "sync",     icon: "sync",     label: "Sync",     key: "8" },
+  { id: "apps",     icon: "apps",     label: "Apps",     key: "9" },
+  { id: "secrets",  icon: "secrets",  label: "Secrets",  key: "0" },
+  { id: "metrics",  icon: "metrics",  label: "Observability", key: "." },
   { id: "settings", icon: "settings", label: "Settings", key: "," },
 ];
 

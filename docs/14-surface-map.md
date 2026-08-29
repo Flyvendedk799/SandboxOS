@@ -122,7 +122,9 @@ Exposure lives in the manifest, so it survives hibernate/wake and travels with a
 **`llm`** — `complete` `models`
 **`metrics`** — `snapshot` `history` `activity` `recent`
 **`apps`** — `list` `install` `remove` `launch` (launch mints a scoped token)
-**`tide`** — `push` `pull` `diff` `checkout` `log` `link`
+**`tide`** — `init` `listWorkspaces` `status` `mark` `log` `diff` `checkout` `refs` ·
+`putState` `getState` `listStates` · `fetchObjects` `receiveObjects` (the wire
+primitives a laptop daemon drives). Paths returned to callers are Sandbox-relative.
 **`mcp-registry`** — `list` `enable` `disable` `configure` `install` `uninstall`
 **`kernel`** — `whoami` `capabilities` `tools` `auditQuery` `manifestGet` `manifestSet`
 

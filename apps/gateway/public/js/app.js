@@ -14,6 +14,7 @@ import { initPty } from "./pty.js";
 import { initAgents } from "./agents.js";
 import { initPorts } from "./ports.js";
 import { initJobs } from "./jobs.js";
+import { initSync } from "./sync.js";
 import { initApps } from "./apps.js";
 import { initSecrets } from "./secrets.js";
 import { initMetrics } from "./metrics.js";
@@ -93,6 +94,7 @@ function boot() {
   mount("Agents", initAgents);
   mount("Ports", initPorts);
   mount("Processes", initJobs);
+  mount("Sync", initSync);
   mount("Apps", initApps);
   mount("Secrets", initSecrets);
   mount("Metrics", initMetrics);

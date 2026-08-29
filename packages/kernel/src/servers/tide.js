@@ -18,6 +18,12 @@ export function tideServer(deps) {
   const repo = new Repo(store);
   const workdir = (rel) => path.join(cell.root, rel && rel !== "." ? rel : "");
 
+  /** Host paths are an implementation detail; callers get Sandbox-relative ones. */
+  const relative = (abs) => {
+    const rel = path.relative(cell.root, abs);
+    return !rel || rel.startsWith("..") ? "." : rel;
+  };
+
   return {
     name: "tide",
     tools: {
@@ -26,13 +32,15 @@ export function tideServer(deps) {
         inputSchema: { type: "object", required: ["workspace"], properties: { workspace: { type: "string" }, path: { type: "string" } } },
         async handler(_ctx, a) {
           const ws = repo.init(a.workspace, workdir(a.path ?? a.workspace));
-          return { workspace: a.workspace, path: ws.path, head: ws.head };
+          return { workspace: a.workspace, path: relative(ws.path), head: ws.head };
         },
       },
       listWorkspaces: {
         description: "List Tide workspaces in this Sandbox.",
         inputSchema: { type: "object", properties: {} },
-        async handler() { return { workspaces: repo.list() }; },
+        async handler() {
+          return { workspaces: repo.list().map((w) => ({ ...w, path: relative(w.path) })) };
+        },
       },
       status: {
         description: "Working-tree changes since the last mark.",

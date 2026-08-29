@@ -5,6 +5,7 @@ import config from "../../../packages/config/src/config.js";
 import { openDb } from "../../../packages/control-db/src/db.js";
 import { ensureSeed, purgeExpiredSessions, verifyAuditChain } from "../../../packages/control-db/src/registry.js";
 import { resolveBackend } from "../../../packages/cell/src/cell.js";
+import { seedVolume } from "../../../packages/cell/src/seed.js";
 import { cronTick } from "../../../packages/scheduler/src/cron-runner.js";
 import { createServer, scheduler } from "./server.js";
 
@@ -13,6 +14,7 @@ config.cellBackend = backend; // pin the resolved choice for the rest of the pro
 
 openDb();
 const { tenant, sandbox } = ensureSeed(backend);
+seedVolume(sandbox); // first run only — an existing volume is never touched
 
 // Backlog #4: verify the audit hash-chain on boot — tamper-evidence is only
 // assurance if it is actually checked. Log loudly if a break is found.

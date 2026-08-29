@@ -36,6 +36,7 @@ import { providerConfig, providerOptions } from "../../../packages/llm/src/provi
 const maxSandboxes = () => Number(process.env.SANDBOXOS_MAX_SANDBOXES ?? 10);
 import { getKernel, _dropKernel } from "../../../packages/kernel/src/kernel.js";
 import { getCell } from "../../../packages/cell/src/cell.js";
+import { seedVolume } from "../../../packages/cell/src/seed.js";
 import { runCommand } from "../../../packages/command-central/src/console.js";
 import { runTurn, renderTranscript } from "../../../packages/assistant/src/assistant.js";
 import { Scheduler } from "../../../packages/scheduler/src/scheduler.js";
@@ -250,6 +251,7 @@ async function handle(req, res) {
       const tenant = createTenant(username);
       const acc = createAccount(tenant.id, { username, password });
       const sandbox = createSandboxForTenant(tenant.id, acc.principalId, { slug, name: `${username}'s Sandbox`, cellBackend: cellBackend() });
+      seedVolume(sandbox); // an empty machine is an uninformative first impression
       const token = createSession(acc.principalId, "session");
       res.setHeader("Set-Cookie", `sbx_session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`);
       return sendJson(res, 200, { ok: true, slug: sandbox.slug, username });
@@ -417,6 +419,7 @@ async function handle(req, res) {
       return sendJson(res, 429, { ok: false, error: `sandbox quota exceeded (max ${effectiveMaxSb})` });
     try {
       const sb = createSandboxForTenant(principal.tenant_id, principal.id, { slug: newSlug, name, cellBackend: cellBackend() });
+      seedVolume(sb);
       if (distroName) {
         const distro = getDistroByName(principal.tenant_id, distroName);
         if (distro) {
