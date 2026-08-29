@@ -15,6 +15,7 @@
 import fs from "node:fs";
 import { execFile, spawn } from "node:child_process";
 import config from "../../config/src/config.js";
+import { remoteHandle, newMarker, recordingScript } from "./handles.js";
 
 const WORKDIR = "/sandbox";
 
@@ -124,12 +125,23 @@ export class HardenedDockerBackend {
   async execStream(command, callback, { timeoutMs = 30_000, env = {} } = {}) {
     await this.ensureRunning();
     const envFlags = Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
-    const proc = spawn("docker", ["exec", "-w", WORKDIR, ...envFlags, this.container, "/bin/sh", "-c", command]);
-    const timer = setTimeout(() => proc.kill("SIGKILL"), timeoutMs);
+    // Killing `docker exec` locally does not kill the process inside the
+    // container, so the in-container shell records its pid before becoming the
+    // command; the handle signals *that*. The command travels as $0, so no
+    // quoting is needed at any layer.
+    const marker = newMarker();
+    const proc = spawn("docker", [
+      "exec", "-w", WORKDIR, ...envFlags, this.container,
+      "/bin/sh", "-c", recordingScript(marker), command,
+    ]);
+    const handle = remoteHandle(proc, marker, (script) =>
+      docker(["exec", this.container, "/bin/sh", "-c", script], { timeoutMs: 10_000 }));
+    const timer = setTimeout(() => handle.kill("SIGKILL"), timeoutMs);
     proc.stdout.on("data", (d) => callback({ type: "stdout", chunk: d.toString() }));
     proc.stderr.on("data", (d) => callback({ type: "stderr", chunk: d.toString() }));
     proc.on("close", (code) => { clearTimeout(timer); callback({ type: "done", code: code ?? 1 }); });
-    return proc;
+    proc.on("error", () => { clearTimeout(timer); callback({ type: "done", code: 1 }); });
+    return handle;
   }
 
   async execInteractive(onData, onClose, { env = {}, cols = 80, rows = 24 } = {}) {
@@ -147,6 +159,12 @@ export class HardenedDockerBackend {
       kill()      { try { proc.kill("SIGKILL"); } catch {} },
       resize()    { /* no-op without PTY (node-pty deferred to Phase 16) */ },
     };
+  }
+
+  /** Hardened Cells run with --network=none, so nothing inside them is reachable
+   *  over the network. Port preview is deliberately unavailable at this tier. */
+  async endpoint() {
+    throw new Error("hardened Cells run with --network=none; port preview is unavailable");
   }
 
   async stop() {

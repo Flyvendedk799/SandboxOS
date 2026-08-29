@@ -362,6 +362,298 @@ async function cmdStream(args) {
   }
 }
 
+// ── fs subcommands ────────────────────────────────────────────────────────
+// The MCP surface moves file content as JSON; `get`/`put` use the streaming
+// endpoints instead so a binary of any size round-trips byte for byte.
+
+async function mcp(cfg, server, tool, args = {}) {
+  const res = await api(cfg, `/${cfg.slug}/mcp`, { method: "POST", body: { server, tool, args } });
+  const d = await res.json();
+  if (!d.ok) die(d.error ?? `${server}.${tool} failed`);
+  return d.result;
+}
+
+function requireLogin() {
+  const cfg = loadConfig();
+  if (!cfg.token) die("not logged in — run `sbx login`");
+  return cfg;
+}
+
+const human = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
+
+async function cmdFs(args) {
+  const cfg = requireLogin();
+  const sub = args[0];
+
+  if (sub === "ls" || !sub) {
+    const r = await mcp(cfg, "fs", "list", { path: args[1] ?? "." });
+    for (const e of r.entries) {
+      console.log(`${e.type === "dir" ? "d" : "-"} ${human(e.size).padStart(9)}  ${e.name}${e.type === "dir" ? "/" : ""}`);
+    }
+    return;
+  }
+  if (sub === "cat") {
+    if (!args[1]) die("usage: sbx fs cat <path>");
+    process.stdout.write((await mcp(cfg, "fs", "read", { path: args[1] })).content ?? "");
+    return;
+  }
+  if (sub === "tree") {
+    const r = await mcp(cfg, "fs", "tree", { path: args[1] ?? ".", depth: Number(flag(args, "depth", 3)) });
+    const walk = (nodes, prefix) => nodes.forEach((n, i) => {
+      const last = i === nodes.length - 1;
+      console.log(`${prefix}${last ? "└─ " : "├─ "}${n.name}${n.type === "dir" ? "/" : ""}`);
+      if (n.children?.length) walk(n.children, prefix + (last ? "   " : "│  "));
+    });
+    walk(r.tree, "");
+    if (r.truncated) console.log(`… truncated at ${r.nodes} nodes`);
+    return;
+  }
+  if (sub === "grep") {
+    if (!args[1]) die('usage: sbx fs grep <query> [path] [--include "*.js"]');
+    const r = await mcp(cfg, "fs", "search", {
+      query: args[1],
+      path: args[2] && !args[2].startsWith("--") ? args[2] : ".",
+      include: flag(args, "include"),
+      regex: args.includes("--regex"),
+    });
+    for (const m of r.matches) console.log(`${m.path}:${m.line}  ${m.text.trim()}`);
+    console.error(`— ${r.matches.length} match${r.matches.length === 1 ? "" : "es"} in ${r.scanned} file${r.scanned === 1 ? "" : "s"}`);
+    return;
+  }
+  if (sub === "mkdir") {
+    if (!args[1]) die("usage: sbx fs mkdir <path>");
+    await mcp(cfg, "fs", "mkdir", { path: args[1] });
+    console.log(`created ${args[1]}/`);
+    return;
+  }
+  if (sub === "rm") {
+    if (!args[1]) die("usage: sbx fs rm <path> [-r]");
+    const r = await mcp(cfg, "fs", "remove", { path: args[1], recursive: args.includes("-r") || args.includes("--recursive") });
+    console.log(r.removed ? `removed ${r.path}` : `not found: ${r.path}`);
+    return;
+  }
+  if (sub === "get") {
+    const remote = args[1];
+    if (!remote) die("usage: sbx fs get <remote> [local]");
+    const local = args[2] ?? path.basename(remote);
+    const res = await api(cfg, `/${cfg.slug}/file?path=${encodeURIComponent(remote)}`);
+    if (!res.ok) die((await res.json().catch(() => ({}))).error ?? `http ${res.status}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (local === "-") process.stdout.write(buf);
+    else { fs.writeFileSync(local, buf); console.log(`${remote} → ${local} (${human(buf.length)})`); }
+    return;
+  }
+  if (sub === "put") {
+    const local = args[1];
+    if (!local) die("usage: sbx fs put <local> [remote]");
+    const remote = args[2] ?? path.basename(local);
+    const body = fs.readFileSync(local);
+    const res = await fetch(`${cfg.url}/${cfg.slug}/file?path=${encodeURIComponent(remote)}`, {
+      method: "PUT", headers: { Authorization: `Bearer ${cfg.token}` }, body,
+    });
+    const d = await res.json();
+    if (!d.ok) die(d.error);
+    console.log(`${local} → ${remote} (${human(d.bytes)})`);
+    return;
+  }
+  die(`unknown fs subcommand: ${sub}`);
+}
+
+// ── proc subcommands ──────────────────────────────────────────────────────
+// Supervised background processes: the thing you want when a command must
+// outlive the request that started it.
+
+async function cmdProc(args) {
+  const cfg = requireLogin();
+  const sub = args[0];
+
+  if (sub === "list" || !sub) {
+    const r = await mcp(cfg, "proc", "jobs", {});
+    if (!r.jobs.length) { console.log("(no background processes)"); return; }
+    for (const j of r.jobs) {
+      console.log(`${j.id}  ${String(j.state).padEnd(8)} ${String(j.name).padEnd(14)} ${j.lines} lines  ${j.cmd}`);
+    }
+    return;
+  }
+  if (sub === "start") {
+    const cmd = args.slice(1).filter((a) => !a.startsWith("--")).join(" ");
+    if (!cmd) die('usage: sbx proc start "<cmd>" [--name NAME]');
+    const r = await mcp(cfg, "proc", "start", { cmd, name: flag(args, "name") });
+    console.log(`${r.id}  ${r.state}  ${r.name}  (pid ${r.pid ?? "?"})`);
+    return;
+  }
+  if (sub === "logs") {
+    const id = args[1];
+    if (!id) die("usage: sbx proc logs <id> [--follow]");
+    const follow = args.includes("--follow") || args.includes("-f");
+    let since = 0;
+    for (;;) {
+      const r = await mcp(cfg, "proc", "logs", { id, tail: 500, ...(since ? { since } : {}) });
+      for (const l of r.logs) {
+        (l.stream === "stderr" ? process.stderr : process.stdout).write(`${l.text}\n`);
+        since = Math.max(since, l.ts);
+      }
+      if (!follow || r.state !== "running") return;
+      await new Promise((res) => setTimeout(res, 1000));
+    }
+  }
+  if (sub === "stop") {
+    if (!args[1]) die("usage: sbx proc stop <id>");
+    const r = await mcp(cfg, "proc", "stop", { id: args[1] });
+    console.log(r.stopped ? `stopped ${r.id}` : `not stopped: ${r.reason}`);
+    return;
+  }
+  die(`unknown proc subcommand: ${sub}`);
+}
+
+// ── port subcommands ──────────────────────────────────────────────────────
+
+async function cmdPort(args) {
+  const cfg = requireLogin();
+  const sub = args[0];
+
+  if (sub === "list" || !sub) {
+    const r = await mcp(cfg, "ports", "list", {});
+    if (!r.ports.length) { console.log("(no exposed ports)"); return; }
+    for (const p of r.ports) {
+      console.log(`${String(p.port).padEnd(6)} ${p.up ? "up  " : "down"}  ${String(p.name).padEnd(12)} ${cfg.url}${p.path}`);
+    }
+    return;
+  }
+  if (sub === "expose" || sub === "open") {
+    const port = Number(args[1]);
+    if (!port) die("usage: sbx port expose <port> [name]");
+    const r = await mcp(cfg, "ports", "expose", { port, name: args[2] });
+    console.log(`${cfg.url}${r.path}`);
+    return;
+  }
+  if (sub === "close" || sub === "unexpose") {
+    const port = Number(args[1]);
+    if (!port) die("usage: sbx port close <port>");
+    const r = await mcp(cfg, "ports", "unexpose", { port });
+    console.log(r.removed ? `closed :${r.port}` : `:${r.port} was not exposed`);
+    return;
+  }
+  if (sub === "scan") {
+    const r = await mcp(cfg, "ports", "scan", {});
+    if (!r.listening.length) { console.log("(nothing is listening inside the Cell)"); return; }
+    for (const p of r.listening) console.log(`${String(p.port).padEnd(6)} ${p.exposed ? "exposed" : "not exposed"}`);
+    return;
+  }
+  die(`unknown port subcommand: ${sub}`);
+}
+
+// ── ask: the assistant, streamed to your terminal ─────────────────────────
+
+async function cmdAsk(args) {
+  const cfg = requireLogin();
+  const question = args.filter((a) => !a.startsWith("--")).join(" ");
+  if (!question) die('usage: sbx ask "<question>"');
+
+  const chatId = flag(args, "chat") ?? (await (async () => {
+    const res = await api(cfg, `/${cfg.slug}/chats`, { method: "POST", body: {} });
+    const d = await res.json();
+    if (!d.ok) die(d.error);
+    return d.chat.id;
+  })());
+
+  const res = await api(cfg, `/${cfg.slug}/chats/${chatId}/send`, { method: "POST", body: { input: question } });
+  if (!res.ok) die((await res.json().catch(() => ({}))).error ?? `http ${res.status}`);
+
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let sawText = false;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const frames = buf.split("\n\n");
+    buf = frames.pop();
+    for (const f of frames) {
+      const line = f.split("\n").find((l) => l.startsWith("data:"));
+      if (!line) continue;
+      let ev;
+      try { ev = JSON.parse(line.slice(5).trim()); } catch { continue; }
+      if (ev.type === "text") { process.stdout.write(ev.text); sawText = true; }
+      else if (ev.type === "tool_call") {
+        if (sawText) { process.stdout.write("\n"); sawText = false; }
+        process.stderr.write(`  → ${ev.server}.${ev.tool} ${JSON.stringify(ev.args).slice(0, 120)}\n`);
+      } else if (ev.type === "tool_result" && !ev.ok) {
+        process.stderr.write(`  ✗ ${ev.error}\n`);
+      } else if (ev.type === "error") {
+        process.stderr.write(`\nsbx: ${ev.error}\n`);
+        process.exitCode = 1;
+      } else if (ev.type === "stopped") {
+        process.stderr.write(`\n(stopped: ${ev.reason})\n`);
+      }
+    }
+  }
+  process.stdout.write("\n");
+  console.error(`chat: ${chatId}  (continue with --chat ${chatId})`);
+}
+
+// ── access subcommands ────────────────────────────────────────────────────
+
+async function cmdAccess(args) {
+  const cfg = requireLogin();
+  const sub = args[0];
+
+  if (sub === "list" || !sub) {
+    const res = await api(cfg, `/${cfg.slug}/access`);
+    const d = await res.json();
+    if (!d.ok) die(d.error);
+    for (const a of d.access) {
+      const who = a.username ?? a.name;
+      console.log(`${who.padEnd(24)} ${String(a.kind).padEnd(8)} ${a.patterns.join(", ")}`);
+    }
+    return;
+  }
+  if (sub === "share") {
+    const username = args[1];
+    if (!username) die("usage: sbx access share <username> [--patterns fs.read,proc.list]");
+    const patterns = flag(args, "patterns");
+    const res = await api(cfg, `/${cfg.slug}/access`, {
+      method: "POST",
+      body: { username, patterns: patterns ? patterns.split(",").map((p) => p.trim()) : undefined },
+    });
+    const d = await res.json();
+    if (!d.ok) die(d.error);
+    console.log(`${username}: ${d.patterns.join(", ")}${d.added.length ? "" : " (already shared)"}`);
+    return;
+  }
+  if (sub === "revoke") {
+    const who = args[1];
+    if (!who) die("usage: sbx access revoke <username|principalId>");
+    const listed = await (await api(cfg, `/${cfg.slug}/access`)).json();
+    const match = (listed.access ?? []).find((a) => a.username === who || a.principalId === who || a.name === who);
+    if (!match) die(`no access entry for: ${who}`);
+    const res = await api(cfg, `/${cfg.slug}/access/${match.principalId}`, { method: "DELETE" });
+    const d = await res.json();
+    if (!d.ok) die(d.error);
+    console.log(`revoked ${who} (${d.removed} grant${d.removed === 1 ? "" : "s"}${d.tokensRevoked ? `, ${d.tokensRevoked} token${d.tokensRevoked === 1 ? "" : "s"}` : ""})`);
+    return;
+  }
+  die(`unknown access subcommand: ${sub}`);
+}
+
+// ── metrics subcommand ────────────────────────────────────────────────────
+
+async function cmdMetrics() {
+  const cfg = requireLogin();
+  const s = await mcp(cfg, "metrics", "snapshot", {});
+  const line = (k, v) => console.log(`${k.padEnd(14)} ${v}`);
+  line("sandbox", `${s.sandbox.slug} (${s.sandbox.state})`);
+  line("cell", s.cell.backend);
+  line("load", s.load ? s.load.map((n) => n.toFixed(2)).join("  ") : "—");
+  line("memory", s.memory?.used != null ? `${human(s.memory.used)} of ${human(s.memory.total)}` : "—");
+  line("disk", s.disk.bytes != null ? `${human(s.disk.bytes)} in ${s.disk.files} files` : "—");
+  line("processes", s.processes ?? "—");
+  line("servers", s.servers.join(", "));
+  line("tools", s.tools);
+  line("ports", s.ports.length ? s.ports.join(", ") : "none");
+}
+
 // ── backup subcommand ─────────────────────────────────────────────────────
 
 async function cmdBackup(args) {
@@ -375,6 +667,33 @@ async function cmdBackup(args) {
   writeFileSync(outFile, Buffer.from(buf));
   console.log(`backup saved: ${outFile} (${(buf.byteLength / 1024).toFixed(1)} KB)`);
 }
+
+const HELP = `sbx — drive a SandboxOS machine from anywhere.
+
+  connect     login [--url URL] [--slug SLUG] [--patterns a,b]
+              token [--patterns a,b]              mint a narrower token
+              sandbox <list|create|wake|hibernate|delete>
+
+  work        run "<line>"                        one Command Central line
+              <anything else>                     shorthand for run
+              call <server.tool> '<json>'         raw MCP call
+              stream "<cmd>"                      run a command, streaming output
+              ask "<question>" [--chat ID]        the assistant, with live tool calls
+
+  files       fs ls [path] · fs cat <path> · fs tree [path] [--depth N]
+              fs grep <query> [path] [--include "*.js"] [--regex]
+              fs mkdir <path> · fs rm <path> [-r]
+              fs get <remote> [local] · fs put <local> [remote]
+
+  processes   proc list · proc start "<cmd>" [--name N] · proc logs <id> [-f] · proc stop <id>
+  ports       port list · port expose <port> [name] · port close <port> · port scan
+  agents      agent <list|spawn|get|kill> …
+
+  state       secret <list|set|rm|use> · app <list|install> · distro <list|create|delete|snapshot>
+  observe     metrics · audit [n] · watch
+  admin       access <list|share|revoke> · quota [get|set …] · backup [file.db]
+
+Config lives in ~/.sbx/config.json (override with SBX_CONFIG).`;
 
 const [cmd, ...args] = process.argv.slice(2);
 switch (cmd) {
@@ -392,12 +711,13 @@ switch (cmd) {
   case "distro": await cmdDistro(args); break;
   case "quota": await cmdQuota(args); break;
   case "backup": await cmdBackup(args); break;
+  case "fs": await cmdFs(args); break;
+  case "proc": await cmdProc(args); break;
+  case "port": await cmdPort(args); break;
+  case "ask": await cmdAsk(args); break;
+  case "access": await cmdAccess(args); break;
+  case "metrics": await cmdMetrics(); break;
   case undefined: case "help": case "-h": case "--help":
-    console.log("usage: sbx <login|run|call|audit|watch|token|agent|sandbox|app|secret|distro|quota|stream|backup> …");
-    console.log("       sbx sandbox <list|create|wake|hibernate|delete> …");
-    console.log("       sbx secret  <list|set|rm|use> …");
-    console.log("       sbx distro  <list|create|delete|snapshot> …");
-    console.log("       sbx quota   [get|set --max-sandboxes N --max-agents N --mem-mb N --cpu-shares N]");
-    console.log("       sbx backup  [output-file.db]"); break;
+    console.log(HELP); break;
   default: await cmdRun([cmd, ...args].join(" ")); // `sbx ls` == `sbx run "ls"`
 }

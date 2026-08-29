@@ -20,8 +20,15 @@ import {
   listSandboxesForTenant, deleteSandbox,
   getQuota, setQuota, runningAgentCount, isOperator,
   getTenant, getTenantProfile, updateTenantProfile, LLM_PROVIDERS,
+  appendAudit,
+  listSandboxAccess, revokeSandboxAccess, shareSandbox, listMachineTokens,
+  verifyAuditChain,
+  createConversation, getConversation, listConversations, renameConversation,
+  deleteConversation, appendConversationMessages, conversationMessages,
 } from "../../../packages/control-db/src/registry.js";
 import { authorize } from "../../../packages/kernel/src/capabilities.js";
+import { exposedPorts } from "../../../packages/kernel/src/servers/ports.js";
+import { safeResolve, canonicalContained, canonicalLeafContained } from "../../../packages/kernel/src/servers/fs.js";
 import { loadManifest } from "../../../packages/manifest/src/manifest.js";
 import { putTenantSecret, removeTenantSecret } from "../../../packages/secrets/src/store.js";
 import { providerConfig, providerOptions } from "../../../packages/llm/src/providers.js";
@@ -29,7 +36,9 @@ import { providerConfig, providerOptions } from "../../../packages/llm/src/provi
 const maxSandboxes = () => Number(process.env.SANDBOXOS_MAX_SANDBOXES ?? 10);
 import { getKernel, _dropKernel } from "../../../packages/kernel/src/kernel.js";
 import { getCell } from "../../../packages/cell/src/cell.js";
+import { seedVolume } from "../../../packages/cell/src/seed.js";
 import { runCommand } from "../../../packages/command-central/src/console.js";
+import { runTurn, renderTranscript } from "../../../packages/assistant/src/assistant.js";
 import { Scheduler } from "../../../packages/scheduler/src/scheduler.js";
 import { upgradeWebSocket } from "../../../packages/pty/src/index.js";
 
@@ -61,6 +70,22 @@ const sendJson = (res, code, obj) => {
 };
 
 const TYPES = { ".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml" };
+
+/** Content types for files streamed out of a Cell. Anything unknown downloads as
+ *  a binary blob rather than being guessed at. */
+const MIME = {
+  ".txt": "text/plain", ".md": "text/markdown", ".log": "text/plain",
+  ".json": "application/json", ".xml": "application/xml", ".csv": "text/csv",
+  ".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".mjs": "text/javascript",
+  ".ts": "text/plain", ".tsx": "text/plain", ".jsx": "text/plain", ".py": "text/plain",
+  ".sh": "text/plain", ".yml": "text/yaml", ".yaml": "text/yaml", ".toml": "text/plain",
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+  ".webp": "image/webp", ".svg": "image/svg+xml", ".ico": "image/x-icon", ".avif": "image/avif",
+  ".pdf": "application/pdf", ".zip": "application/zip", ".gz": "application/gzip",
+  ".mp3": "audio/mpeg", ".wav": "audio/wav", ".mp4": "video/mp4", ".webm": "video/webm",
+  ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf",
+};
+const mimeFor = (name) => MIME[path.extname(name).toLowerCase()] ?? "application/octet-stream";
 function sendFile(res, file) {
   try {
     const body = fs.readFileSync(file);
@@ -226,6 +251,7 @@ async function handle(req, res) {
       const tenant = createTenant(username);
       const acc = createAccount(tenant.id, { username, password });
       const sandbox = createSandboxForTenant(tenant.id, acc.principalId, { slug, name: `${username}'s Sandbox`, cellBackend: cellBackend() });
+      seedVolume(sandbox); // an empty machine is an uninformative first impression
       const token = createSession(acc.principalId, "session");
       res.setHeader("Set-Cookie", `sbx_session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`);
       return sendJson(res, 200, { ok: true, slug: sandbox.slug, username });
@@ -331,6 +357,15 @@ async function handle(req, res) {
     return;
   }
 
+  // API: verify the audit hash chain. The chain links every Sandbox's events in
+  // one sequence, so it can only be verified host-wide — an operator action.
+  if (top === "api" && segments[2] === "admin" && segments[3] === "audit" && segments[4] === "verify" && req.method === "GET") {
+    const principal = authenticate(req);
+    if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
+    if (!requireOperator(principal)) return sendJson(res, 403, { ok: false, error: "operator authority required" });
+    return sendJson(res, 200, { ok: true, ...verifyAuditChain() });
+  }
+
   // API: who am I?
   if (top === "api" && segments[2] === "me") {
     const principal = authenticate(req);
@@ -384,6 +419,7 @@ async function handle(req, res) {
       return sendJson(res, 429, { ok: false, error: `sandbox quota exceeded (max ${effectiveMaxSb})` });
     try {
       const sb = createSandboxForTenant(principal.tenant_id, principal.id, { slug: newSlug, name, cellBackend: cellBackend() });
+      seedVolume(sb);
       if (distroName) {
         const distro = getDistroByName(principal.tenant_id, distroName);
         if (distro) {
@@ -502,6 +538,117 @@ async function handle(req, res) {
     return sendJson(res, 200, { ok: true, ...result });
   }
 
+  // ── Raw file transfer ──────────────────────────────────────────────────────
+  // The MCP surface moves file *content* as JSON (fs.read / fs.readBytes), which is
+  // right for agents and wrong for a browser: a 40 MB video should not become a
+  // base64 string in a JSON envelope. These two endpoints stream bytes instead, and
+  // are authorized against exactly the same capabilities as their MCP twins.
+
+  // GET /:slug/file?path=…[&download=1] — stream a file out of the Cell.
+  if (action === "file" && req.method === "GET") {
+    if (!authorize(held, "fs", "read")) return sendJson(res, 403, { ok: false, error: "denied: fs.read" });
+    const target = url.searchParams.get("path");
+    if (!target) return sendJson(res, 400, { ok: false, error: "path required" });
+    const cell = getCell(sandbox);
+    await cell.ensureRunning();
+    let file;
+    try {
+      file = await canonicalContained(cell.root, target);
+    } catch (e) {
+      // A path that does not exist is a 404; one that tries to leave the volume
+      // is a 400. Collapsing the two would make a typo look like an attack.
+      const missing = e.code === "ENOENT" || /ENOENT/.test(e.message);
+      return sendJson(res, missing ? 404 : 400, { ok: false, error: missing ? "not found" : e.message });
+    }
+    let st;
+    try { st = fs.statSync(file); } catch { return sendJson(res, 404, { ok: false, error: "not found" }); }
+    if (st.isDirectory()) return sendJson(res, 400, { ok: false, error: "path is a directory" });
+    scheduler.touch(sandbox.id);
+    const name = path.basename(target);
+    res.writeHead(200, {
+      "Content-Type": mimeFor(name),
+      "Content-Length": String(st.size),
+      "Cache-Control": "no-store",
+      ...(url.searchParams.get("download")
+        ? { "Content-Disposition": `attachment; filename="${name.replace(/"/g, "")}"` }
+        : {}),
+    });
+    fs.createReadStream(file).pipe(res);
+    return;
+  }
+
+  // PUT /:slug/file?path=… — stream an upload into the Cell (raw request body).
+  if (action === "file" && req.method === "PUT") {
+    if (!authorize(held, "fs", "write")) return sendJson(res, 403, { ok: false, error: "denied: fs.write" });
+    const target = url.searchParams.get("path");
+    if (!target) return sendJson(res, 400, { ok: false, error: "path required" });
+    const cell = getCell(sandbox);
+    await cell.ensureRunning();
+    let dest;
+    try {
+      const lexical = safeResolve(cell.root, target);
+      fs.mkdirSync(path.dirname(lexical), { recursive: true });
+      dest = (await canonicalLeafContained(cell.root, target)).target;
+    } catch (e) {
+      return sendJson(res, 400, { ok: false, error: e.message });
+    }
+    scheduler.touch(sandbox.id);
+    const bytes = await new Promise((resolve, reject) => {
+      let written = 0;
+      const out = fs.createWriteStream(dest, { flags: "w", mode: 0o644 });
+      req.on("data", (c) => { written += c.length; });
+      req.pipe(out);
+      out.on("finish", () => resolve(written));
+      out.on("error", reject);
+    }).catch((e) => ({ error: e.message }));
+    if (typeof bytes === "object") return sendJson(res, 500, { ok: false, error: bytes.error });
+    // Mirror the audit trail of an equivalent fs.write so a streamed upload is not
+    // invisible next to the MCP path.
+    appendAudit({
+      sandboxId: sandbox.id, principalId: principal.id, onBehalfOf: null,
+      server: "fs", tool: "write", args: { path: target, streamed: true },
+      resultKind: "ok", capability: authorize(held, "fs", "write"),
+    });
+    return sendJson(res, 200, { ok: true, path: target, bytes });
+  }
+
+  // ── Port preview ───────────────────────────────────────────────────────────
+  // ANY /:slug/p/:port/... — reverse-proxy the request into a service listening
+  // inside the Cell. This is what turns "I started a dev server" into "I can see
+  // my dev server": the app you launched with proc.start is reachable from the
+  // same authenticated browser tab, with no tunnels and no published host ports.
+  if (action === "p" && segments[3]) {
+    const port = Number(segments[3]);
+    if (!Number.isInteger(port) || port < 1 || port > 65535)
+      return sendJson(res, 400, { ok: false, error: "invalid port" });
+    if (!authorize(held, "ports", "access"))
+      return sendJson(res, 403, { ok: false, error: "denied: ports.access" });
+    if (!exposedPorts(sandbox)[String(port)])
+      return sendJson(res, 404, { ok: false, error: `port ${port} is not exposed — expose it from the Ports panel first` });
+
+    scheduler.touch(sandbox.id);
+    await scheduler.wake(sandbox, getQuota(principal.tenant_id)).catch(() => {});
+
+    // The route prefix differs between path routing (/alice/p/3000/…) and
+    // subdomain routing (alice.example.com/p/3000/…); strip whichever applies so
+    // the upstream path keeps its original percent-encoding intact.
+    const prefix = subSlug ? `/p/${segments[3]}` : `/${slug}/p/${segments[3]}`;
+    const rest = url.pathname.slice(prefix.length);
+    // Without a trailing slash the browser resolves relative links against the
+    // parent path, which would drop the /p/<port> prefix. Redirect once.
+    if (rest === "") {
+      res.writeHead(302, { Location: `${prefix}/${url.search}` });
+      return res.end();
+    }
+
+    let ep;
+    try {
+      ep = await getCell(sandbox).endpoint(port);
+    } catch (e) {
+      return sendJson(res, 503, { ok: false, error: e.message });
+    }
+    return proxyToCell(req, res, ep, rest + url.search, prefix);
+  }
   const kernel = await getKernel(sandbox);
 
   // POST /:slug/exec — run one Command Central line.
@@ -524,6 +671,8 @@ async function handle(req, res) {
     const VERBS = new Set([
       "ls", "cat", "stat", "write", "ps", "whoami", "servers", "enable", "disable",
       "fetch", "secrets", "secret", "pkg", "agent", "agents", "llm", "help", "clear",
+      "mkdir", "rm", "mv", "cp", "tree", "grep",
+      "run", "jobs", "logs", "stop", "ports", "port",
     ]);
     const firstToken = line.trim().split(/\s+/)[0];
     const isShell = !VERBS.has(firstToken) && !firstToken.startsWith(":");
@@ -563,6 +712,154 @@ async function handle(req, res) {
     send({ type: "done", code: 0 });
     res.end();
     return;
+  }
+
+  // ── Access ─────────────────────────────────────────────────────────────────
+  // Who can reach this machine, and to do what. The capability model has always
+  // been able to answer that; these routes make it something you can look at.
+
+  // GET /:slug/access — every principal holding a grant here.
+  if (action === "access" && req.method === "GET" && !segments[3]) {
+    return sendJson(res, 200, { ok: true, access: listSandboxAccess(sandbox.id), you: principal.id });
+  }
+
+  // POST /:slug/access — share with another account, attenuated against your grants.
+  if (action === "access" && req.method === "POST" && !segments[3]) {
+    const { username, patterns } = await readBody(req);
+    if (!username) return sendJson(res, 400, { ok: false, error: "username required" });
+    try {
+      const shared = shareSandbox(principal.id, sandbox.id, String(username).trim(), patterns);
+      return sendJson(res, 200, { ok: true, ...shared });
+    } catch (e) {
+      return sendJson(res, 400, { ok: false, error: e.message });
+    }
+  }
+
+  // DELETE /:slug/access/:principalId — revoke, taking any machine token with it.
+  if (action === "access" && segments[3] && req.method === "DELETE") {
+    if (segments[3] === principal.id) {
+      return sendJson(res, 400, { ok: false, error: "you cannot revoke your own access" });
+    }
+    const result = revokeSandboxAccess(sandbox.id, segments[3]);
+    if (!result.removed) return sendJson(res, 404, { ok: false, error: "no grants to revoke" });
+    return sendJson(res, 200, { ok: true, ...result });
+  }
+
+  // GET /:slug/tokens — the machine tokens minted against this Sandbox.
+  if (action === "tokens" && req.method === "GET") {
+    return sendJson(res, 200, { ok: true, tokens: listMachineTokens(sandbox.id) });
+  }
+
+  // DELETE /:slug/tokens/:principalId — revoke one.
+  if (action === "tokens" && segments[3] && req.method === "DELETE") {
+    const result = revokeSandboxAccess(sandbox.id, segments[3]);
+    if (!result.removed && !result.tokensRevoked) return sendJson(res, 404, { ok: false, error: "no such token" });
+    return sendJson(res, 200, { ok: true, ...result });
+  }
+
+  // GET /:slug/audit/export?format=json|csv — take the log with you.
+  if (action === "audit" && segments[3] === "export" && req.method === "GET") {
+    const p = url.searchParams;
+    const events = queryAudit(sandbox.id, {
+      server: p.get("server") || undefined,
+      tool: p.get("tool") || undefined,
+      resultKind: p.get("kind") || undefined,
+      after: p.has("after") ? Number(p.get("after")) : undefined,
+      limit: 500,
+    });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    if (p.get("format") === "csv") {
+      const cols = ["id", "ts", "server", "tool", "result_kind", "capability", "error"];
+      const cell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+      const csv = [cols.join(","), ...events.map((e) => cols.map((c) => cell(e[c])).join(","))].join("\n");
+      res.writeHead(200, {
+        "Content-Type": "text/csv",
+        "Content-Disposition": `attachment; filename="audit-${sandbox.slug}-${stamp}.csv"`,
+      });
+      return res.end(csv);
+    }
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Content-Disposition": `attachment; filename="audit-${sandbox.slug}-${stamp}.json"`,
+    });
+    return res.end(JSON.stringify({ sandbox: sandbox.slug, exportedAt: Date.now(), events }, null, 2));
+  }
+
+  // ── Assistant ──────────────────────────────────────────────────────────────
+  // A conversation that drives this machine. It runs as the *calling principal*
+  // with the caller's own capability patterns — not as a delegated agent — so it
+  // can never exceed you, and its tool calls land in the audit log beside yours.
+
+  // GET /:slug/chats — the caller's conversations in this Sandbox.
+  if (action === "chats" && req.method === "GET" && !segments[3]) {
+    return sendJson(res, 200, { ok: true, chats: listConversations(sandbox.id, principal.id) });
+  }
+
+  // POST /:slug/chats — start one.
+  if (action === "chats" && req.method === "POST" && !segments[3]) {
+    const { title } = await readBody(req);
+    return sendJson(res, 200, { ok: true, chat: createConversation(sandbox.id, principal.id, title ?? null) });
+  }
+
+  if (action === "chats" && segments[3]) {
+    const chat = getConversation(segments[3]);
+    if (!chat || chat.sandbox_id !== sandbox.id || chat.principal_id !== principal.id) {
+      return sendJson(res, 404, { ok: false, error: "no such conversation" });
+    }
+
+    // GET /:slug/chats/:id — the transcript, flattened for rendering.
+    if (req.method === "GET" && !segments[4]) {
+      const messages = conversationMessages(chat.id);
+      return sendJson(res, 200, { ok: true, chat, transcript: renderTranscript(messages) });
+    }
+
+    // PATCH /:slug/chats/:id — rename.
+    if (req.method === "PATCH" && !segments[4]) {
+      const { title } = await readBody(req);
+      return sendJson(res, 200, { ok: true, chat: renameConversation(chat.id, title ?? null) });
+    }
+
+    // DELETE /:slug/chats/:id
+    if (req.method === "DELETE" && !segments[4]) {
+      return sendJson(res, 200, { ok: true, ...deleteConversation(chat.id) });
+    }
+
+    // POST /:slug/chats/:id/send — run one turn, streaming events over SSE.
+    if (req.method === "POST" && segments[4] === "send") {
+      const { input, model } = await readBody(req);
+      if (!input || !String(input).trim()) return sendJson(res, 400, { ok: false, error: "input required" });
+      scheduler.touch(sandbox.id);
+
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      const send = (obj) => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch { /* client gone */ } };
+
+      // Closing the tab must stop the turn, not leave a tool loop running.
+      const controller = new AbortController();
+      req.on("close", () => controller.abort());
+
+      const history = conversationMessages(chat.id);
+      // Name the conversation after its first message, so the list is readable.
+      if (!chat.title) {
+        renameConversation(chat.id, String(input).trim().slice(0, 60));
+      }
+
+      try {
+        const { messages, stopped } = await runTurn({
+          kernel, sandbox, principalId: principal.id, heldPatterns: held,
+          history, input: String(input), model, emit: send, signal: controller.signal,
+        });
+        if (messages.length) appendConversationMessages(chat.id, messages);
+        send({ type: "end", stopped });
+      } catch (e) {
+        send({ type: "error", error: e?.message ?? "assistant failed" });
+        send({ type: "end", stopped: "error" });
+      }
+      res.end();
+      return;
+    }
   }
 
   // POST /:slug/mcp — one raw MCP call (authorized + audited). The programmatic
@@ -716,6 +1013,122 @@ async function handle(req, res) {
   return sendJson(res, 404, { ok: false, error: "not found" });
 }
 
+
+// ── Cell port proxy ──────────────────────────────────────────────────────────
+
+/** Headers that describe a single hop and must not be forwarded verbatim. */
+const HOP_BY_HOP = new Set([
+  "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+  "te", "trailer", "transfer-encoding", "upgrade",
+]);
+
+function forwardableHeaders(headers, hostHeader) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (HOP_BY_HOP.has(k.toLowerCase())) continue;
+    if (k.toLowerCase() === "host") continue;
+    out[k] = v;
+  }
+  out.host = hostHeader;
+  // The service inside the Cell is behind a path prefix; tell frameworks that
+  // understand these hints where they really live.
+  out["x-forwarded-proto"] = "http";
+  return out;
+}
+
+/**
+ * Reverse-proxy one HTTP request into a Cell endpoint.
+ *
+ * HTML responses are buffered so a `<base href="…">` can be injected: the app is
+ * served under /<slug>/p/<port>/, and without a base tag every root-relative asset
+ * URL it emits would resolve outside the proxy prefix. Everything else streams.
+ */
+function proxyToCell(req, res, ep, upstreamPath, prefix) {
+  return new Promise((resolve) => {
+    const upstream = http.request({
+      host: ep.host,
+      port: ep.port,
+      method: req.method,
+      path: upstreamPath || "/",
+      headers: forwardableHeaders(req.headers, `${ep.host}:${ep.port}`),
+    }, (up) => {
+      const type = String(up.headers["content-type"] ?? "");
+      const isHtml = type.includes("text/html");
+      const headers = {};
+      for (const [k, v] of Object.entries(up.headers)) {
+        if (HOP_BY_HOP.has(k.toLowerCase())) continue;
+        headers[k] = v;
+      }
+      // Rewrite redirects that point at the Cell's own root back through the proxy.
+      if (headers.location && String(headers.location).startsWith("/")) {
+        headers.location = `${prefix}${headers.location}`;
+      }
+
+      if (!isHtml) {
+        res.writeHead(up.statusCode ?? 502, headers);
+        up.pipe(res);
+        up.on("end", resolve);
+        return;
+      }
+
+      const chunks = [];
+      up.on("data", (c) => chunks.push(c));
+      up.on("end", () => {
+        let body = Buffer.concat(chunks).toString("utf8");
+        if (!/<base\s/i.test(body)) {
+          const baseTag = `<base href="${prefix}/">`;
+          if (/<head[^>]*>/i.test(body)) body = body.replace(/<head[^>]*>/i, (m) => `${m}${baseTag}`);
+          else body = `${baseTag}${body}`;
+        }
+        const buf = Buffer.from(body, "utf8");
+        delete headers["content-length"];
+        headers["content-length"] = String(buf.length);
+        res.writeHead(up.statusCode ?? 502, headers);
+        res.end(buf);
+        resolve();
+      });
+    });
+
+    upstream.on("error", (err) => {
+      if (!res.headersSent) {
+        sendJson(res, 502, { ok: false, error: `nothing is listening on port ${ep.port} (${err.code ?? err.message})` });
+      } else {
+        res.end();
+      }
+      resolve();
+    });
+
+    req.pipe(upstream);
+    req.on("aborted", () => upstream.destroy());
+  });
+}
+
+/** Proxy a WebSocket upgrade into a Cell endpoint (dev-server HMR, live reload). */
+function proxyUpgradeToCell(req, socket, head, ep, upstreamPath) {
+  const upstream = http.request({
+    host: ep.host,
+    port: ep.port,
+    method: req.method,
+    path: upstreamPath || "/",
+    headers: { ...req.headers, host: `${ep.host}:${ep.port}` },
+  });
+  upstream.on("upgrade", (upRes, upSocket, upHead) => {
+    const lines = [`HTTP/1.1 ${upRes.statusCode} ${upRes.statusMessage}`];
+    for (const [k, v] of Object.entries(upRes.headers)) {
+      for (const one of Array.isArray(v) ? v : [v]) lines.push(`${k}: ${one}`);
+    }
+    socket.write(lines.join("\r\n") + "\r\n\r\n");
+    if (upHead?.length) socket.write(upHead);
+    upSocket.pipe(socket);
+    socket.pipe(upSocket);
+    upSocket.on("error", () => socket.destroy());
+    socket.on("error", () => upSocket.destroy());
+  });
+  upstream.on("error", () => socket.destroy());
+  if (head?.length) upstream.write(head);
+  upstream.end();
+}
+
 // ── WebSocket PTY handler ────────────────────────────────────────────────────
 
 async function handleUpgrade(req, socket, head) {
@@ -724,7 +1137,7 @@ async function handleUpgrade(req, socket, head) {
   const slug   = segments[1] ?? "";
   const action = segments[2] ?? "";
 
-  if (action !== "pty") { socket.destroy(); return; }
+  if (action !== "pty" && action !== "p") { socket.destroy(); return; }
 
   const sandbox = getSandboxBySlug(slug);
   if (!sandbox) { socket.destroy(); return; }
@@ -733,7 +1146,22 @@ async function handleUpgrade(req, socket, head) {
   if (!principal) { socket.destroy(); return; }
 
   const held = grantsFor(principal.id, sandbox.id);
-  if (!held.length || !authorize(held, "proc", "exec")) { socket.destroy(); return; }
+  if (!held.length) { socket.destroy(); return; }
+
+  // Port-preview upgrades (dev-server HMR / live reload) tunnel straight into the
+  // Cell rather than through the PTY bridge.
+  if (action === "p") {
+    const port = Number(segments[3]);
+    if (!Number.isInteger(port) || !authorize(held, "ports", "access")) { socket.destroy(); return; }
+    if (!exposedPorts(sandbox)[String(port)]) { socket.destroy(); return; }
+    let ep;
+    try { ep = await getCell(sandbox).endpoint(port); } catch { socket.destroy(); return; }
+    const prefix = `/${slug}/p/${segments[3]}`;
+    const rest = url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : `/p/${segments[3]}`;
+    return proxyUpgradeToCell(req, socket, head, ep, (rest || "/") + url.search);
+  }
+
+  if (!authorize(held, "proc", "exec")) { socket.destroy(); return; }
 
   const ws = upgradeWebSocket(req, socket, head);
   if (!ws) return;

@@ -190,6 +190,28 @@ CREATE TABLE IF NOT EXISTS secrets (
   UNIQUE(sandbox_id, name)
 );
 
+-- Assistant conversations. The Assistant runs as the calling principal (not as a
+-- delegated agent), so a conversation belongs to a principal within a Sandbox.
+-- Messages are stored in provider shape so a turn can be replayed verbatim.
+CREATE TABLE IF NOT EXISTS conversations (
+  id           TEXT PRIMARY KEY,
+  sandbox_id   TEXT NOT NULL REFERENCES sandboxes(id),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  title        TEXT,
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conversations_sandbox ON conversations(sandbox_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS conversation_messages (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id),
+  role            TEXT NOT NULL,
+  content         TEXT NOT NULL,   -- JSON, provider-shaped
+  ts              INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_messages ON conversation_messages(conversation_id, id);
+
 -- Tenant-scoped encrypted secrets for account/profile configuration such as
 -- provider API keys. Same crypto custody as Sandbox secrets, but not tied to a
 -- deletable Sandbox.

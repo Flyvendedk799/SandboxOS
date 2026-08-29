@@ -5,6 +5,14 @@
 > a fleet of agents. Every phase ships a **load-bearing spine** the next phase extends.
 > We never build a demo we throw away.
 
+> **Status, as of the current build.** Phases 0–3 are implemented, and most of Phase 4
+> with them: the Kernel and its fourteen core servers, capabilities and attenuating
+> delegation, hibernate/wake, the manifest, Tide's versioned core and live daemon,
+> agents, the marketplace, signup/quotas/distros, four Cell backends, the desktop, the
+> assistant, and the `sbx` CLI + client SDK. What is *not* built: multi-host scheduling
+> (Phase 5) and the open ecosystem (Phase 6). [`14-surface-map.md`](14-surface-map.md)
+> is the authoritative list of what exists; the `PHASE*.md` notes are the build log.
+
 ## Phase 0 · The Spine — *prove it runs* (months 0–3)
 
 **Goal:** a slug resolves to a real isolated machine you can type into, controlled

@@ -148,6 +148,102 @@ export function grantsFor(principalId, sandboxId) {
     .map((r) => r.pattern);
 }
 
+/** Every principal that can reach a Sandbox, with the patterns they hold.
+ *
+ *  This is the answer to "who can touch this machine, and to do what" — the
+ *  question the capability model makes answerable and nothing surfaced until
+ *  now. Machine principals (minted tokens, agent delegations) appear alongside
+ *  humans, because to the Kernel they are the same kind of thing. */
+export function listSandboxAccess(sandboxId) {
+  const rows = openDb().prepare(
+    `SELECT g.id AS grant_id, g.pattern, g.created_at,
+            p.id AS principal_id, p.kind, p.name,
+            (SELECT COUNT(*) FROM sessions s WHERE s.principal_id = p.id AND s.expires_at > ?) AS live_sessions,
+            (SELECT MAX(s.expires_at) FROM sessions s WHERE s.principal_id = p.id) AS expires_at,
+            (SELECT a.username FROM accounts a WHERE a.principal_id = p.id) AS username
+       FROM grants g JOIN principals p ON p.id = g.principal_id
+      WHERE g.sandbox_id = ?
+      ORDER BY p.kind, p.name`,
+  ).all(now(), sandboxId);
+
+  const byPrincipal = new Map();
+  for (const r of rows) {
+    let entry = byPrincipal.get(r.principal_id);
+    if (!entry) {
+      entry = {
+        principalId: r.principal_id, kind: r.kind, name: r.name, username: r.username ?? null,
+        patterns: [], grantedAt: r.created_at,
+        liveSessions: r.live_sessions, expiresAt: r.expires_at ?? null,
+      };
+      byPrincipal.set(r.principal_id, entry);
+    }
+    entry.patterns.push(r.pattern);
+    entry.grantedAt = Math.min(entry.grantedAt, r.created_at);
+  }
+  return [...byPrincipal.values()];
+}
+
+/** Drop a principal's grants on a Sandbox, and any tokens that only existed for it.
+ *
+ *  Revoking access has to take the credential with it: a machine principal is
+ *  created per token, so leaving its session alive would leave a bearer token
+ *  that authenticates to a principal with no rights — confusing at best. Human
+ *  principals keep their login; they simply lose this Sandbox. */
+export function revokeSandboxAccess(sandboxId, principalId) {
+  const db = openDb();
+  const p = getPrincipal(principalId);
+  const removed = db.prepare("DELETE FROM grants WHERE sandbox_id=? AND principal_id=?")
+    .run(sandboxId, principalId).changes ?? 0;
+  let tokensRevoked = 0;
+  if (p && p.kind !== "human") {
+    const stillHasGrants = db.prepare("SELECT COUNT(*) AS n FROM grants WHERE principal_id=?")
+      .get(principalId)?.n ?? 0;
+    if (!stillHasGrants) {
+      tokensRevoked = db.prepare("DELETE FROM sessions WHERE principal_id=?").run(principalId).changes ?? 0;
+    }
+  }
+  return { removed, tokensRevoked };
+}
+
+/** Share a Sandbox with another account, attenuating against the sharer's grants.
+ *
+ *  You cannot give away what you do not hold — the same rule that governs token
+ *  minting and agent delegation, applied to people. */
+export function shareSandbox(sharerPrincipalId, sandboxId, username, requestedPatterns) {
+  const held = grantsFor(sharerPrincipalId, sandboxId);
+  if (!held.length) throw new Error("you have no access to share");
+  const patterns = requestedPatterns?.length ? requestedPatterns : held;
+  for (const p of patterns) {
+    if (!canDelegate(held, p)) throw new Error(`attenuation: cannot share '${p}' — not held by you`);
+  }
+  const account = getAccountByUsername(username);
+  if (!account) throw new Error(`no such account: ${username}`);
+  if (account.principal_id === sharerPrincipalId) throw new Error("that account already owns this sandbox");
+
+  const existing = new Set(grantsFor(account.principal_id, sandboxId));
+  const added = [];
+  for (const p of patterns) {
+    if (existing.has(p)) continue;
+    grant(account.principal_id, sandboxId, p);
+    added.push(p);
+  }
+  return { principalId: account.principal_id, username, patterns, added };
+}
+
+/** Machine tokens with rights on a Sandbox: what was minted, and is it still live. */
+export function listMachineTokens(sandboxId) {
+  return listSandboxAccess(sandboxId)
+    .filter((a) => a.kind === "machine")
+    .map((a) => ({
+      principalId: a.principalId,
+      label: a.name,
+      patterns: a.patterns,
+      createdAt: a.grantedAt,
+      expiresAt: a.expiresAt,
+      active: a.liveSessions > 0,
+    }));
+}
+
 // ---- Sessions & machine tokens -------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -310,6 +406,112 @@ export function queryAudit(sandboxId, { server, tool, principalId, resultKind, a
   sql += " ORDER BY id DESC LIMIT ?";
   params.push(capped);
   return openDb().prepare(sql).all(...params).reverse();
+}
+
+// ---- Assistant conversations ---------------------------------------------
+
+/** Start a conversation. The title is filled in from the first message later. */
+export function createConversation(sandboxId, principalId, title = null) {
+  const id = `cnv_${crypto.randomUUID().slice(0, 8)}`;
+  const now = Date.now();
+  openDb().prepare(
+    "INSERT INTO conversations (id,sandbox_id,principal_id,title,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+  ).run(id, sandboxId, principalId, title, now, now);
+  return { id, sandbox_id: sandboxId, principal_id: principalId, title, created_at: now, updated_at: now };
+}
+
+export function getConversation(id) {
+  return openDb().prepare("SELECT * FROM conversations WHERE id=?").get(id) ?? null;
+}
+
+/** A principal's conversations in this Sandbox, most recently touched first. */
+export function listConversations(sandboxId, principalId, limit = 50) {
+  return openDb().prepare(
+    `SELECT c.*, (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id=c.id) AS messages
+     FROM conversations c
+     WHERE c.sandbox_id=? AND c.principal_id=?
+     ORDER BY c.updated_at DESC LIMIT ?`,
+  ).all(sandboxId, principalId, Math.min(Number(limit) || 50, 200));
+}
+
+export function renameConversation(id, title) {
+  openDb().prepare("UPDATE conversations SET title=?, updated_at=? WHERE id=?").run(title, Date.now(), id);
+  return getConversation(id);
+}
+
+export function deleteConversation(id) {
+  const db = openDb();
+  db.prepare("DELETE FROM conversation_messages WHERE conversation_id=?").run(id);
+  const r = db.prepare("DELETE FROM conversations WHERE id=?").run(id);
+  return { deleted: r.changes > 0 };
+}
+
+/** Append provider-shaped messages and bump the conversation's timestamp. */
+export function appendConversationMessages(conversationId, messages) {
+  const db = openDb();
+  const now = Date.now();
+  const insert = db.prepare("INSERT INTO conversation_messages (conversation_id,role,content,ts) VALUES (?,?,?,?)");
+  for (const m of messages) insert.run(conversationId, m.role ?? "user", JSON.stringify(m), now);
+  db.prepare("UPDATE conversations SET updated_at=? WHERE id=?").run(now, conversationId);
+  return messages.length;
+}
+
+/** The stored transcript, oldest first, parsed back into provider shape. */
+export function conversationMessages(conversationId, limit = 500) {
+  return openDb().prepare(
+    "SELECT content, ts FROM conversation_messages WHERE conversation_id=? ORDER BY id ASC LIMIT ?",
+  ).all(conversationId, Math.min(Number(limit) || 500, 2000))
+    .map((r) => { try { return JSON.parse(r.content); } catch { return null; } })
+    .filter(Boolean);
+}
+
+/**
+ * Roll the audit log up into counts, for the metrics server and the dashboard.
+ * Three cuts of the same window: by result kind, by server, and by tool — plus
+ * a per-minute (or per-hour, for long windows) histogram so a burst of activity
+ * is visible as a shape rather than a single total.
+ *
+ * @param {string} sandboxId
+ * @param {number} since  epoch-ms lower bound (exclusive)
+ */
+export function auditRollup(sandboxId, since) {
+  const db = openDb();
+  const total = db.prepare("SELECT COUNT(*) AS n FROM audit WHERE sandbox_id=? AND ts>?")
+    .get(sandboxId, since)?.n ?? 0;
+
+  const byKind = db.prepare(
+    "SELECT result_kind AS kind, COUNT(*) AS n FROM audit WHERE sandbox_id=? AND ts>? GROUP BY result_kind",
+  ).all(sandboxId, since);
+
+  const byServer = db.prepare(
+    "SELECT server, COUNT(*) AS n FROM audit WHERE sandbox_id=? AND ts>? GROUP BY server ORDER BY n DESC LIMIT 20",
+  ).all(sandboxId, since);
+
+  const byTool = db.prepare(
+    "SELECT server, tool, COUNT(*) AS n FROM audit WHERE sandbox_id=? AND ts>? GROUP BY server, tool ORDER BY n DESC LIMIT 20",
+  ).all(sandboxId, since);
+
+  // Bucket width: keep the histogram at a readable ~60 buckets whatever the window.
+  const span = Math.max(1, Date.now() - since);
+  const bucketMs = Math.max(60_000, Math.ceil(span / 60 / 60_000) * 60_000);
+  const rows = db.prepare("SELECT ts FROM audit WHERE sandbox_id=? AND ts>? ORDER BY ts ASC").all(sandboxId, since);
+  const buckets = new Map();
+  const first = Math.floor(since / bucketMs) * bucketMs;
+  const last = Math.floor(Date.now() / bucketMs) * bucketMs;
+  for (let b = first; b <= last; b += bucketMs) buckets.set(b, 0);
+  for (const r of rows) {
+    const b = Math.floor(r.ts / bucketMs) * bucketMs;
+    buckets.set(b, (buckets.get(b) ?? 0) + 1);
+  }
+
+  return {
+    total,
+    byKind: Object.fromEntries(byKind.map((r) => [r.kind, r.n])),
+    byServer,
+    byTool,
+    bucketMs,
+    histogram: [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([ts, n]) => ({ ts, n })),
+  };
 }
 
 /**

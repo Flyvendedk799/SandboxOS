@@ -8,6 +8,7 @@
 import fs from "node:fs";
 import { execFile, spawn } from "node:child_process";
 import config from "../../config/src/config.js";
+import { remoteHandle, newMarker, recordingScript } from "./handles.js";
 
 const WORKDIR = "/sandbox";
 
@@ -100,12 +101,23 @@ export class DockerBackend {
   async execStream(command, callback, { timeoutMs = 30_000, env = {} } = {}) {
     await this.ensureRunning();
     const envFlags = Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
-    const proc = spawn("docker", ["exec", "-w", WORKDIR, ...envFlags, this.container, "/bin/sh", "-c", command]);
-    const timer = setTimeout(() => proc.kill("SIGKILL"), timeoutMs);
+    // Killing `docker exec` locally does not kill the process inside the
+    // container, so the in-container shell records its pid before becoming the
+    // command; the handle signals *that*. The command travels as $0, so no
+    // quoting is needed at any layer.
+    const marker = newMarker();
+    const proc = spawn("docker", [
+      "exec", "-w", WORKDIR, ...envFlags, this.container,
+      "/bin/sh", "-c", recordingScript(marker), command,
+    ]);
+    const handle = remoteHandle(proc, marker, (script) =>
+      docker(["exec", this.container, "/bin/sh", "-c", script], { timeoutMs: 10_000 }));
+    const timer = setTimeout(() => handle.kill("SIGKILL"), timeoutMs);
     proc.stdout.on("data", (d) => callback({ type: "stdout", chunk: d.toString() }));
     proc.stderr.on("data", (d) => callback({ type: "stderr", chunk: d.toString() }));
     proc.on("close", (code) => { clearTimeout(timer); callback({ type: "done", code: code ?? 1 }); });
-    return proc;
+    proc.on("error", () => { clearTimeout(timer); callback({ type: "done", code: 1 }); });
+    return handle;
   }
 
   /** Spawn an interactive shell in the container and bridge stdio via callbacks. */
@@ -124,6 +136,18 @@ export class DockerBackend {
       kill()      { try { proc.kill("SIGKILL"); } catch {} },
       resize()    { /* no-op without a real PTY */ },
     };
+  }
+
+  /** Reach a service listening inside the container: resolve its network IP.
+   *  The container port is used as-is — no host port publishing is needed because
+   *  the Gateway dials the container network directly. */
+  async endpoint(port) {
+    await this.ensureRunning();
+    const r = await docker(["inspect", "-f",
+      "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", this.container]);
+    const ip = (r.stdout ?? "").trim().split(/\s+/).filter(Boolean)[0];
+    if (!ip) throw new Error("container has no reachable IP address");
+    return { host: ip, port: Number(port) };
   }
 
   async stop() {

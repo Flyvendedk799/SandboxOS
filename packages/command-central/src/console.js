@@ -10,9 +10,13 @@
 
 import { recentAudit } from "../../control-db/src/registry.js";
 
-const HELP = `SandboxOS · Command Central (Phase 3)
+const HELP = `SandboxOS · Command Central
   files          ls [path] · cat <path> · stat <path> · write <path> <text>
+                 mkdir <path> · rm <path> [-r] · mv <a> <b> · cp <a> <b>
+                 tree [path] [depth] · grep <query> [path]
   processes      ps · <anything else> runs in the Sandbox shell (proc.exec)
+  background     run "<cmd>" [name] · jobs · logs <id> [n] · stop <id>
+  ports          ports · port expose <n> [name] · port close <n> · port scan
   secrets        secret put <name> <value> · secrets · secret rm <name>
   network        fetch <url>                          (egress-policy gated)
   packages       pkg install <name> · pkg list · pkg remove <name>
@@ -39,6 +43,50 @@ function formatResult(server, tool, res) {
     case "fs.read": return (r.content ?? "").split("\n");
     case "fs.write": return [`wrote ${r.bytes} bytes → ${r.path}`];
     case "fs.stat": return [`${r.type} ${r.size}B ${r.path}`];
+    case "fs.mkdir": return [`created ${r.path}/`];
+    case "fs.remove": return [r.removed ? `removed ${r.path}` : `(not found) ${r.path}`];
+    case "fs.move": return [`${r.from} → ${r.to}`];
+    case "fs.copy": return [`${r.from} ⇒ ${r.to}`];
+    case "fs.append": return [`appended ${r.bytes} bytes → ${r.path}`];
+    case "fs.tree": {
+      const out = [];
+      const walk = (nodes, prefix) => {
+        nodes.forEach((n, i) => {
+          const last = i === nodes.length - 1;
+          out.push(`${prefix}${last ? "└─ " : "├─ "}${n.name}${n.type === "dir" ? "/" : ""}`);
+          if (n.children?.length) walk(n.children, prefix + (last ? "   " : "│  "));
+        });
+      };
+      walk(r.tree, "");
+      if (r.truncated) out.push(`… truncated at ${r.nodes} nodes`);
+      return out.length ? out : [`(empty) ${r.path}`];
+    }
+    case "fs.search":
+      return r.matches.length
+        ? [...r.matches.map((m) => `${m.path}:${m.line}  ${m.text.trim()}`),
+           `— ${r.matches.length} match${r.matches.length === 1 ? "" : "es"} in ${r.scanned} file${r.scanned === 1 ? "" : "s"}${r.truncated ? " (truncated)" : ""}`]
+        : [`(no matches for "${r.query}")`];
+    case "fs.readBytes": return [`${r.bytes} bytes (base64, ${r.base64.length} chars)`];
+    case "fs.writeBytes": return [`wrote ${r.bytes} bytes → ${r.path}`];
+    case "proc.start": return [`${r.id}  ${r.state}  ${r.name}  (pid ${r.pid ?? "?"})`, `  tail it with: logs ${r.id}`];
+    case "proc.jobs": return r.jobs.length
+      ? r.jobs.map((j) => `${j.id}  ${j.state.padEnd(8)}  ${j.name.padEnd(14)}  ${j.lines} lines  ${j.cmd}`)
+      : ["(no background processes)"];
+    case "proc.logs": return r.logs.length
+      ? r.logs.map((l) => (l.stream === "stderr" ? `stderr: ${l.text}` : l.text))
+      : [`(no output yet — ${r.state})`];
+    case "proc.stop": return [r.stopped ? `stopped ${r.id}` : `not stopped: ${r.reason}`];
+    case "proc.forget": return [r.forgotten ? `forgot ${r.id}` : "(not found)"];
+    case "proc.signal": return [`sent SIG${r.signal} to ${r.pid}${r.code === 0 ? "" : ` (exit ${r.code})`}`];
+    case "ports.expose": return [`exposed :${r.port} → ${r.path}`];
+    case "ports.unexpose": return [r.removed ? `closed :${r.port}` : `(:${r.port} was not exposed)`];
+    case "ports.list": return r.ports.length
+      ? r.ports.map((p) => `${String(p.port).padEnd(6)} ${p.up === null ? "?" : p.up ? "●" : "○"}  ${p.name.padEnd(12)} ${p.path}`)
+      : ["(no exposed ports — try: port expose 3000 web)"];
+    case "ports.check": return [`:${r.port} is ${r.up ? "up" : "down"}${r.error ? ` (${r.error})` : ""}`];
+    case "ports.scan": return r.listening.length
+      ? r.listening.map((p) => `${String(p.port).padEnd(6)} ${p.exposed ? "exposed" : "not exposed"}`)
+      : ["(nothing is listening inside the Cell)"];
     case "proc.list": return (r.processes ?? "").split("\n");
     case "proc.exec": {
       const out = [];
@@ -119,6 +167,27 @@ function mapVerb(text, head, rest) {
     case "stat": return ["fs", "stat", { path: rest[0] }];
     case "write": return ["fs", "write", { path: rest[0], content: rest.slice(1).join(" ") }];
     case "ps": return ["proc", "list", {}];
+    case "mkdir": return ["fs", "mkdir", { path: rest[0] }];
+    case "rm": {
+      const recursive = rest.some((t) => t === "-r" || t === "-rf" || t === "-fr" || t === "--recursive");
+      const target = rest.find((t) => !t.startsWith("-"));
+      return ["fs", "remove", { path: target, recursive }];
+    }
+    case "mv": return ["fs", "move", { from: rest[0], to: rest[1] }];
+    case "cp": return ["fs", "copy", { from: rest[0], to: rest[1] }];
+    case "tree": return ["fs", "tree", { path: rest[0] ?? ".", depth: Number(rest[1]) || 3 }];
+    case "grep": return ["fs", "search", { query: rest[0], path: rest[1] ?? "." }];
+    case "run": return ["proc", "start", { cmd: rest[0], name: rest[1] }];
+    case "jobs": return ["proc", "jobs", {}];
+    case "logs": return ["proc", "logs", { id: rest[0], tail: Number(rest[1]) || 200 }];
+    case "stop": return ["proc", "stop", { id: rest[0] }];
+    case "ports": return ["ports", "list", {}];
+    case "port":
+      if (rest[0] === "expose" || rest[0] === "open") return ["ports", "expose", { port: Number(rest[1]), name: rest[2] }];
+      if (rest[0] === "close" || rest[0] === "unexpose") return ["ports", "unexpose", { port: Number(rest[1]) }];
+      if (rest[0] === "scan") return ["ports", "scan", {}];
+      if (rest[0] === "check") return ["ports", "check", { port: Number(rest[1]) }];
+      return ["ports", "list", {}];
     case "whoami": return ["kernel", "whoami", {}];
     case "servers": return ["mcp-registry", "list", {}];
     case "enable": return ["mcp-registry", "enable", { server: rest[0] }];

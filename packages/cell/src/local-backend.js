@@ -6,6 +6,7 @@
 
 import fs from "node:fs";
 import { execFile, spawn } from "node:child_process";
+import { groupHandle } from "./handles.js";
 
 export class LocalBackend {
   constructor(sandbox) {
@@ -55,18 +56,26 @@ export class LocalBackend {
   }
 
   /** Stream a command's output: callback receives {type,chunk|code} objects.
-   *  Returns the child process so the caller can kill it (e.g. on client disconnect). */
+   *  Returns a handle the caller can kill (on client disconnect, or proc.stop).
+   *
+   *  `detached` matters: it makes the shell a process-group leader, so killing
+   *  the group takes down the command it started. Without it, stopping a
+   *  supervised dev server kills only the wrapping shell and leaves the server
+   *  running — holding its port until the host reboots. */
   execStream(command, callback, { timeoutMs = 30_000, env = {} } = {}) {
     fs.mkdirSync(this.root, { recursive: true });
     const proc = spawn("/bin/sh", ["-c", command], {
       cwd: this.root,
       env: this._minimalEnv(env), // Backlog #7: minimal env, no host secret leak
+      detached: true,
     });
-    const timer = setTimeout(() => proc.kill("SIGKILL"), timeoutMs);
+    const handle = groupHandle(proc);
+    const timer = setTimeout(() => handle.kill("SIGKILL"), timeoutMs);
     proc.stdout.on("data", (d) => callback({ type: "stdout", chunk: d.toString() }));
     proc.stderr.on("data", (d) => callback({ type: "stderr", chunk: d.toString() }));
     proc.on("close", (code) => { clearTimeout(timer); callback({ type: "done", code: code ?? 1 }); });
-    return proc;
+    proc.on("error", () => { clearTimeout(timer); callback({ type: "done", code: 1 }); });
+    return handle;
   }
 
   /** Spawn an interactive shell and bridge stdio via callbacks.
@@ -90,6 +99,12 @@ export class LocalBackend {
       kill()      { try { proc.kill("SIGKILL"); } catch {} },
       resize()    { /* no-op without a real PTY */ },
     };
+  }
+
+  /** Reach a service listening inside the Cell. A local Cell shares the host's
+   *  loopback, so an in-Cell listener is simply a localhost port. */
+  async endpoint(port) {
+    return { host: "127.0.0.1", port: Number(port) };
   }
 
   async stop() { return { state: "stopped" }; }

@@ -1,4 +1,15 @@
-// SandboxOS Marketplace Server SDK.
+// SandboxOS SDK.
+//
+// Two halves, for the two ways people extend this system:
+//
+//   • createMcpServer — write a server the Kernel can host, so your tools become
+//     part of somebody's machine.
+//   • SandboxClient   — drive a machine from outside, so a script, a CI job or an
+//     agent can use one.
+
+export { SandboxClient, SandboxError, sseEvents } from "./client.js";
+
+// ── Server authoring ─────────────────────────────────────────────────────────
 //
 // The only contract a third-party server must fulfill:
 //   1. Export a factory (the return value of createMcpServer) as the default export.

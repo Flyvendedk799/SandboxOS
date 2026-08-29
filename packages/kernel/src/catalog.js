@@ -17,10 +17,12 @@ import { tideServer } from "./servers/tide.js";
 import { agentsServer } from "../../agents/src/server.js";
 import { llmServer } from "../../llm/src/server.js";
 import { appsServer } from "./servers/apps.js";
+import { portsServer } from "./servers/ports.js";
+import { metricsServer } from "./servers/metrics.js";
 
 export const CATALOG = {
   fs: (d) => fsServer(d.cell),
-  proc: (d) => procServer(d.cell),
+  proc: (d) => procServer(d.cell, d.sandbox),
   cron: (d) => cronServer(d),
   net: (d) => netServer(d),
   secrets: (d) => secretsServer(d),
@@ -29,6 +31,8 @@ export const CATALOG = {
   agents: (d) => agentsServer(d),
   llm: (d) => llmServer(d),
   apps: (d) => appsServer(d),
+  ports: (d) => portsServer(d),
+  metrics: (d) => metricsServer(d),
   "mcp-registry": (d) => registryServer(d),
   kernel: (d) => kernelServer(d),
 };

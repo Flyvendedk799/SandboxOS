@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "SandboxOS — slug Gateway → Cell → MCP Kernel → Command Central",
+  "description": "SandboxOS \u2014 an MCP-native OS: slug Gateway \u2192 Cell \u2192 MCP Kernel \u2192 Command Central",
   "engines": {
     "node": ">=24"
   },
@@ -20,5 +20,10 @@
   },
   "optionalDependencies": {
     "better-sqlite3": "^11.0.0"
+  },
+  "exports": {
+    ".": "./packages/sdk/src/index.js",
+    "./sdk": "./packages/sdk/src/index.js",
+    "./sdk/client": "./packages/sdk/src/client.js"
   }
 }

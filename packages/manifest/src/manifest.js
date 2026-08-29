@@ -22,6 +22,8 @@ export function defaultManifest(name = "primary") {
       tide: {},
       agents: {},
       apps: {},
+      ports: {},
+      metrics: {},
       "mcp-registry": {},
       kernel: {},
     },
