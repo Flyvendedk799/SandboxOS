@@ -50,12 +50,14 @@ Sandbox:
 
 | Server | Provides | Example tools |
 |--------|----------|---------------|
-| `fs` | Filesystem | `read`, `write`, `list`, `stat`, `watch`, `move` |
-| `proc` | Processes | `spawn`, `exec`, `list`, `signal`, `logs` |
+| `fs` | Filesystem | `read`, `write`, `append`, `list`, `stat`, `mkdir`, `remove`, `move`, `copy`, `tree`, `search`, `readBytes`, `writeBytes` |
+| `proc` | Processes | `exec`, `list`, `signal`, and supervised jobs: `start`, `logs`, `jobs`, `stop`, `forget` |
 | `net` | Networking | `fetch`, `listen`, `forward`, `resolve` (policy-gated) |
 | `secrets` | Secret references | `put`, `getRef`, `useInEnv` (values never returned raw) |
 | `pkg` | Software install | `install`, `remove`, `list` (language/runtime packages) |
-| `scheduler` | Time/cron | `at`, `every`, `cancel`, `list` |
+| `cron` | Time/cron | `at`, `every`, `cancel`, `list` (named `cron` in the build, to keep it distinct from the control-plane Scheduler) |
+| `ports` | Reachability | `expose`, `unexpose`, `list`, `check`, `scan` — the Gateway proxies exposed ports |
+| `metrics` | Observability | `snapshot`, `history`, `activity`, `recent` |
 | `tide` | Sync protocol | `push`, `pull`, `link`, `diff`, `checkout`, `log` |
 | `agents` | Agent lifecycle | `spawn`, `list`, `message`, `pause`, `retire` |
 | `mcp-registry` | MCP management | `install`, `enable`, `disable`, `configure`, `list` |

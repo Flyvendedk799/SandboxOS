@@ -24,6 +24,11 @@ shell idiom → `(server, tool, args)`:
 ```
 ls /projects        → fs.list   { path:"/projects" }
 cat notes.md        → fs.read   { path:"notes.md" }
+tree src 2          → fs.tree   { path:"src", depth:2 }
+grep TODO src       → fs.search { query:"TODO", path:"src" }
+run "npm run dev"   → proc.start  { cmd:"npm run dev" }   # supervised, outlives the request
+logs p3f8a1         → proc.logs   { id:"p3f8a1" }
+port expose 3000    → ports.expose { port:3000 }          # then it is at /<slug>/p/3000/
 ps                  → proc.list {}
 run "npm test"      → proc.exec { cmd:"npm test" }
 tide push           → tide.push {}

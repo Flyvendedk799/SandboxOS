@@ -5,10 +5,6 @@
 > moves data between cloud and local through **Tide** — a versioned, live-syncing
 > protocol that is git-like but built for agents.
 
-SandboxOS is a 10-year project. This repository is, for now, **the grand plan** — a
-complete A-to-Z design that everything else will be built against. Code follows the
-docs, not the other way around.
-
 ---
 
 ## The one-paragraph pitch
@@ -36,6 +32,109 @@ command it through **Command Central** (a console reachable from any browser or 
    (real-time bidirectional), pick per workspace. See
    [`docs/05-tide-protocol.md`](docs/05-tide-protocol.md).
 
+---
+
+## Run it
+
+Node 24+ (22 works), no dependencies to install.
+
+```bash
+git clone https://github.com/Flyvendedk799/SandboxOS && cd SandboxOS
+SANDBOXOS_PASSWORD=letmein npm start          # → http://127.0.0.1:3939
+npm test                                       # the whole suite
+```
+
+Open the URL, sign in, and you land on your slug. Docker is used for real Cell
+isolation when present; without it the `local` backend runs the same code paths so the
+whole system works on any machine. Expose it publicly with
+`cloudflared tunnel --url http://localhost:3939`.
+
+```bash
+npx sbx login --url http://127.0.0.1:3939     # mint a machine token for this device
+npx sbx ls                                     # your Sandbox's files
+npx sbx ask "start a static server on 8080 and expose it"
+```
+
+---
+
+## What ships today
+
+The spine is alive and has grown into a machine you can work in. Roughly Phases 0–4 of
+the roadmap, plus the desktop.
+
+### The Kernel
+
+Every call goes **authenticate → authorize (default-deny) → route → execute → audit
+(hash-chained)**. Nothing reaches a Cell any other way.
+
+| server | what it gives you |
+|--------|-------------------|
+| `fs` | list · read · write · append · mkdir · remove · move · copy · stat · tree · search · readBytes · writeBytes |
+| `proc` | exec · list · **start / logs / jobs / stop / forget / signal** (supervised background processes) |
+| `ports` | expose · unexpose · list · check · scan — and the Gateway proxies them |
+| `net` | fetch, egress-policy gated |
+| `secrets` | put · list · remove · useInEnv — references, never values |
+| `pkg` | install · remove · list |
+| `cron` | at · every · list · cancel |
+| `agents` | spawn · list · get · kill, with attenuated delegation |
+| `llm` | complete · models |
+| `metrics` | snapshot · history · activity · recent |
+| `apps` | install · list · launch · remove |
+| `tide` | push · pull · diff · checkout · log |
+| `mcp-registry` | list · enable · disable · configure · install · uninstall |
+| `kernel` | whoami · capabilities · tools · auditQuery · manifestGet · manifestSet |
+
+### The desktop
+
+A dependency-free ES-module app behind the Gateway, in light and dark.
+
+- **Console** — Command Central, streamed. Shell verbs, `:call server.tool {}`, or
+  `? plain English`. History and tab-completion over the live tool catalogue.
+- **Assistant** — a streaming conversation that drives the machine with real MCP tool
+  calls, under your capabilities, with each call rendered inline and audited.
+- **Files** — a lazy tree plus a tabbed code editor with syntax highlighting,
+  auto-indent, pair closing, comment toggling and ⌘S. Upload by drag-and-drop.
+- **Shell** — a WebSocket PTY (with a built-in fallback renderer when the xterm CDN
+  is unreachable).
+- **Agents** — spawn, watch, inspect granted capabilities, kill, re-run.
+- **Ports** — expose a service and preview it in an iframe, proxied through the
+  Gateway with WebSocket upgrades for HMR.
+- **Processes** — supervised jobs with a live log tail, and the cron schedule.
+- **Apps**, **Secrets** — the app model and reference-only secret handling.
+- **Observability** — load/memory/disk/process charts, Kernel-call histograms, and a
+  full audit explorer with filters, export and hash-chain verification.
+- **Settings** — provider key, Cell power and quota, the manifest edited live, who
+  can reach the machine, machine tokens, sandboxes and distros.
+
+⌘K searches workspaces, files, actions and every MCP tool at once.
+
+### The CLI and the SDK
+
+```bash
+sbx fs put ./dist/app.js build/app.js        # streamed, binary-safe
+sbx proc start "npm run dev" --name web
+sbx port expose 3000 web
+sbx proc logs <id> --follow
+sbx ask "why is the build failing?"          # tool calls traced on stderr
+sbx access share alice --patterns fs.read,proc.list
+```
+
+```js
+import { SandboxClient } from "sandboxos/sdk";
+
+const sbx = new SandboxClient({ url, slug: "tobias", token });
+await sbx.fs.write("hello.txt", "hi");
+const job = await sbx.proc.start("npm run dev", { name: "web" });
+await sbx.ports.expose(3000, "web");
+for await (const ev of sbx.assistant.ask("summarise today's changes")) {
+  if (ev.type === "text") process.stdout.write(ev.text);
+}
+```
+
+`createMcpServer()` from the same SDK is how you write a server the Kernel can host.
+
+---
+
 ## Read in this order
 
 | # | Doc | What it answers |
@@ -54,15 +153,25 @@ command it through **Command Central** (a console reachable from any browser or 
 | 11 | [Tech stack](docs/11-tech-stack.md) | Concrete choices, aligned to the Mac Mini |
 | 12 | [Roadmap](docs/12-roadmap.md) | Phase 0 → year 10 |
 | 13 | [Open questions & risks](docs/13-open-questions.md) | What we deliberately deferred |
+| 14 | [Surface map](docs/14-surface-map.md) | Every route, tool and command that exists today |
 
-Architecture Decision Records live in [`docs/adr/`](docs/adr).
+Architecture Decision Records live in [`docs/adr/`](docs/adr). Each build phase has its
+own note: `PHASE0.md` … `PHASE24.md`.
 
-## Status
+## Layout
 
-**Phase: Plan.** No production code yet. The immediate next build is the **spine**
-(Phase 0 in the roadmap): slug gateway → one container → web terminal → an MCP Kernel
-with `fs` and `proc`. Everything in these docs is designed so that spine grows into
-the whole system without throwing work away.
+```
+apps/gateway         the front door: slug routing, auth, proxying, the desktop
+packages/kernel      the MCP router + the core servers
+packages/cell        four execution backends behind one interface
+packages/assistant   the streaming tool-use loop
+packages/agents      supervised, capability-scoped agents
+packages/tide        the versioned + live sync protocol
+packages/control-db  the control plane's SQLite schema and queries
+packages/sbx-cli     the sbx binary
+packages/sdk         SandboxClient + createMcpServer
+test/                one suite per phase
+```
 
 ## Naming & metaphor
 
