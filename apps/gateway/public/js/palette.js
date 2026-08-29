@@ -32,7 +32,7 @@ const actions = [];
 /** Panels register their own verbs here so the palette stays a single surface. */
 export function registerAction(action) { actions.push(action); }
 
-export function initPalette({ files, runCommand } = {}) {
+export function initPalette({ files, assistant, runCommand } = {}) {
   let backdrop = null;
   let items = [];
   let cursor = 0;
@@ -62,8 +62,12 @@ export function initPalette({ files, runCommand } = {}) {
     if (q.trim()) {
       pool.push({ group: "Console", icon: "console", label: `Run: ${q}`, sub: "⏎",
         run: () => runCommand?.(q), always: true });
-      pool.push({ group: "Console", icon: "agents", label: `Ask: ${q}`, sub: "natural language",
+      pool.push({ group: "Console", icon: "console", label: `Translate: ${q}`, sub: "natural language",
         run: () => runCommand?.(`? ${q}`), always: true });
+      if (assistant) {
+        pool.push({ group: "Console", icon: "assistant", label: `Ask the assistant: ${q}`, sub: "chat",
+          run: () => assistant.ask(q), always: true });
+      }
     }
 
     if (!q.trim()) return pool.filter((i) => !i.always).slice(0, 40);

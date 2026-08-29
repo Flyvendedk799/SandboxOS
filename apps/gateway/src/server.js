@@ -21,6 +21,8 @@ import {
   getQuota, setQuota, runningAgentCount, isOperator,
   getTenant, getTenantProfile, updateTenantProfile, LLM_PROVIDERS,
   appendAudit,
+  createConversation, getConversation, listConversations, renameConversation,
+  deleteConversation, appendConversationMessages, conversationMessages,
 } from "../../../packages/control-db/src/registry.js";
 import { authorize } from "../../../packages/kernel/src/capabilities.js";
 import { exposedPorts } from "../../../packages/kernel/src/servers/ports.js";
@@ -33,6 +35,7 @@ const maxSandboxes = () => Number(process.env.SANDBOXOS_MAX_SANDBOXES ?? 10);
 import { getKernel, _dropKernel } from "../../../packages/kernel/src/kernel.js";
 import { getCell } from "../../../packages/cell/src/cell.js";
 import { runCommand } from "../../../packages/command-central/src/console.js";
+import { runTurn, renderTranscript } from "../../../packages/assistant/src/assistant.js";
 import { Scheduler } from "../../../packages/scheduler/src/scheduler.js";
 import { upgradeWebSocket } from "../../../packages/pty/src/index.js";
 
@@ -695,6 +698,83 @@ async function handle(req, res) {
     send({ type: "done", code: 0 });
     res.end();
     return;
+  }
+
+  // ── Assistant ──────────────────────────────────────────────────────────────
+  // A conversation that drives this machine. It runs as the *calling principal*
+  // with the caller's own capability patterns — not as a delegated agent — so it
+  // can never exceed you, and its tool calls land in the audit log beside yours.
+
+  // GET /:slug/chats — the caller's conversations in this Sandbox.
+  if (action === "chats" && req.method === "GET" && !segments[3]) {
+    return sendJson(res, 200, { ok: true, chats: listConversations(sandbox.id, principal.id) });
+  }
+
+  // POST /:slug/chats — start one.
+  if (action === "chats" && req.method === "POST" && !segments[3]) {
+    const { title } = await readBody(req);
+    return sendJson(res, 200, { ok: true, chat: createConversation(sandbox.id, principal.id, title ?? null) });
+  }
+
+  if (action === "chats" && segments[3]) {
+    const chat = getConversation(segments[3]);
+    if (!chat || chat.sandbox_id !== sandbox.id || chat.principal_id !== principal.id) {
+      return sendJson(res, 404, { ok: false, error: "no such conversation" });
+    }
+
+    // GET /:slug/chats/:id — the transcript, flattened for rendering.
+    if (req.method === "GET" && !segments[4]) {
+      const messages = conversationMessages(chat.id);
+      return sendJson(res, 200, { ok: true, chat, transcript: renderTranscript(messages) });
+    }
+
+    // PATCH /:slug/chats/:id — rename.
+    if (req.method === "PATCH" && !segments[4]) {
+      const { title } = await readBody(req);
+      return sendJson(res, 200, { ok: true, chat: renameConversation(chat.id, title ?? null) });
+    }
+
+    // DELETE /:slug/chats/:id
+    if (req.method === "DELETE" && !segments[4]) {
+      return sendJson(res, 200, { ok: true, ...deleteConversation(chat.id) });
+    }
+
+    // POST /:slug/chats/:id/send — run one turn, streaming events over SSE.
+    if (req.method === "POST" && segments[4] === "send") {
+      const { input, model } = await readBody(req);
+      if (!input || !String(input).trim()) return sendJson(res, 400, { ok: false, error: "input required" });
+      scheduler.touch(sandbox.id);
+
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      const send = (obj) => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch { /* client gone */ } };
+
+      // Closing the tab must stop the turn, not leave a tool loop running.
+      const controller = new AbortController();
+      req.on("close", () => controller.abort());
+
+      const history = conversationMessages(chat.id);
+      // Name the conversation after its first message, so the list is readable.
+      if (!chat.title) {
+        renameConversation(chat.id, String(input).trim().slice(0, 60));
+      }
+
+      try {
+        const { messages, stopped } = await runTurn({
+          kernel, sandbox, principalId: principal.id, heldPatterns: held,
+          history, input: String(input), model, emit: send, signal: controller.signal,
+        });
+        if (messages.length) appendConversationMessages(chat.id, messages);
+        send({ type: "end", stopped });
+      } catch (e) {
+        send({ type: "error", error: e?.message ?? "assistant failed" });
+        send({ type: "end", stopped: "error" });
+      }
+      res.end();
+      return;
+    }
   }
 
   // POST /:slug/mcp — one raw MCP call (authorized + audited). The programmatic

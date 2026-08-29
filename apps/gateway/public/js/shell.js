@@ -7,15 +7,16 @@ import { $, $$, h, fill, icon, api, bus, state, setState, toast, toastError, dia
 
 export const WORKSPACES = [
   { id: "console",  icon: "console",  label: "Console",  key: "1" },
-  { id: "files",    icon: "files",    label: "Files",    key: "2" },
-  { id: "shell",    icon: "shell",    label: "Shell",    key: "3" },
-  { id: "agents",   icon: "agents",   label: "Agents",   key: "4" },
-  { id: "ports",    icon: "ports",    label: "Ports",    key: "5" },
-  { id: "jobs",     icon: "jobs",     label: "Processes",key: "6" },
-  { id: "apps",     icon: "apps",     label: "Apps",     key: "7" },
-  { id: "secrets",  icon: "secrets",  label: "Secrets",  key: "8" },
-  { id: "metrics",  icon: "metrics",  label: "Metrics",  key: "9" },
-  { id: "settings", icon: "settings", label: "Settings", key: "0" },
+  { id: "assistant", icon: "assistant", label: "Assistant", key: "2" },
+  { id: "files",    icon: "files",    label: "Files",    key: "3" },
+  { id: "shell",    icon: "shell",    label: "Shell",    key: "4" },
+  { id: "agents",   icon: "agents",   label: "Agents",   key: "5" },
+  { id: "ports",    icon: "ports",    label: "Ports",    key: "6" },
+  { id: "jobs",     icon: "jobs",     label: "Processes",key: "7" },
+  { id: "apps",     icon: "apps",     label: "Apps",     key: "8" },
+  { id: "secrets",  icon: "secrets",  label: "Secrets",  key: "9" },
+  { id: "metrics",  icon: "metrics",  label: "Metrics",  key: "0" },
+  { id: "settings", icon: "settings", label: "Settings", key: "," },
 ];
 
 const THEME_KEY = "sbx.theme";

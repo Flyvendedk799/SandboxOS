@@ -874,6 +874,117 @@ body.dock-collapsed .dock { display: none; }
 [data-theme="light"] .tk-fn  { color: #2f6fd0; }
 [data-theme="light"] .tk-tag { color: #c02a55; }
 
+/* --- Assistant ------------------------------------------------------- */
+.chat-layout { display: flex; flex: 1; min-height: 0; }
+.chat-sidebar {
+  width: 220px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--line);
+  background: var(--bg-1);
+  min-height: 0;
+}
+.chat-items { flex: 1; overflow: auto; padding: var(--s-1); }
+.chat-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: var(--s-2);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  color: var(--text-2);
+}
+.chat-item:hover { background: var(--bg-2); color: var(--text); }
+.chat-item.selected { background: var(--accent-dim); color: var(--accent); }
+.chat-item .nm { font-size: var(--fs-sm); font-weight: 500; }
+
+.chat-main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.chat-stream {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--s-4) var(--s-4) var(--s-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.msg { display: flex; flex-direction: column; gap: 3px; max-width: 780px; animation: rise var(--t-med); }
+.msg-role {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-3);
+}
+.msg-body { white-space: pre-wrap; word-break: break-word; line-height: 1.65; }
+.msg.user { align-self: flex-end; align-items: flex-end; }
+.msg.user .msg-body {
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-lg) var(--r-lg) var(--r-sm) var(--r-lg);
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-line);
+}
+.msg.error .msg-body { color: var(--err); }
+.msg.note { align-self: center; }
+.msg.note .msg-body { font-size: var(--fs-xs); }
+
+.tool-card {
+  max-width: 780px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent-line);
+  border-radius: var(--r-md);
+  background: var(--bg-1);
+  overflow: hidden;
+  animation: rise var(--t-med);
+}
+.tool-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  border-bottom: 1px solid var(--line-soft);
+}
+.tool-args, .tool-result {
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow: auto;
+}
+.tool-result { border-top: 1px solid var(--line-soft); background: var(--bg-0); color: var(--text); }
+.tool-result.stderr { color: var(--err); }
+
+.chat-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s-2);
+  flex: none;
+  margin: 0 var(--s-4) var(--s-4);
+  padding: var(--s-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg-1);
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}
+.chat-composer:focus-within { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-dim); }
+.chat-composer textarea {
+  flex: 1;
+  min-height: 30px;
+  max-height: 200px;
+  padding: 5px var(--s-2);
+  border: none;
+  background: none;
+  resize: none;
+  font-size: var(--fs-md);
+}
+.chat-composer textarea:focus { box-shadow: none; background: none; }
+
 /* --- Generic list/grid workspaces ------------------------------------ */
 .toolbar {
   display: flex;
@@ -1202,6 +1313,9 @@ body.center {
   .rail-btn[data-tip]::after { display: none; }
   .dock { position: absolute; inset: 0 0 0 auto; width: min(320px, 88vw); z-index: 30; box-shadow: var(--shadow-3); }
   .tree-pane { width: 42%; min-width: 150px; max-width: 220px; }
+  .chat-sidebar { width: 132px; }
+  .chat-stream { padding: var(--s-3); }
+  .chat-composer { margin: 0 var(--s-2) var(--s-2); }
 
   /* The topbar must never push the theme and dock buttons off-screen, so the
      omnibox collapses to its icon and the wordy Cell state drops out. */

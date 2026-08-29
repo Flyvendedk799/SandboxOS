@@ -9,6 +9,7 @@ import { initShell, setCellState } from "./shell.js";
 import { initActivity } from "./activity.js";
 import { initConsole } from "./console.js";
 import { initFiles } from "./files.js";
+import { initAssistant } from "./assistant.js";
 import { initPty } from "./pty.js";
 import { initAgents } from "./agents.js";
 import { initPorts } from "./ports.js";
@@ -84,8 +85,9 @@ function boot() {
   setCellState("connecting");
   initShell();
 
-  const consolePanel = mount("Console", initConsole);
+  mount("Console", initConsole);
   const files = mount("Files", initFiles);
+  const assistant = mount("Assistant", initAssistant);
   mount("Activity", initActivity);
   mount("Shell", initPty);
   mount("Agents", initAgents);
@@ -98,6 +100,7 @@ function boot() {
 
   mount("Palette", () => initPalette({
     files,
+    assistant,
     runCommand: (line) => bus.emit("console:run", line),
   }));
 

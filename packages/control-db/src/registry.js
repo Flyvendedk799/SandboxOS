@@ -312,6 +312,63 @@ export function queryAudit(sandboxId, { server, tool, principalId, resultKind, a
   return openDb().prepare(sql).all(...params).reverse();
 }
 
+// ---- Assistant conversations ---------------------------------------------
+
+/** Start a conversation. The title is filled in from the first message later. */
+export function createConversation(sandboxId, principalId, title = null) {
+  const id = `cnv_${crypto.randomUUID().slice(0, 8)}`;
+  const now = Date.now();
+  openDb().prepare(
+    "INSERT INTO conversations (id,sandbox_id,principal_id,title,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+  ).run(id, sandboxId, principalId, title, now, now);
+  return { id, sandbox_id: sandboxId, principal_id: principalId, title, created_at: now, updated_at: now };
+}
+
+export function getConversation(id) {
+  return openDb().prepare("SELECT * FROM conversations WHERE id=?").get(id) ?? null;
+}
+
+/** A principal's conversations in this Sandbox, most recently touched first. */
+export function listConversations(sandboxId, principalId, limit = 50) {
+  return openDb().prepare(
+    `SELECT c.*, (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id=c.id) AS messages
+     FROM conversations c
+     WHERE c.sandbox_id=? AND c.principal_id=?
+     ORDER BY c.updated_at DESC LIMIT ?`,
+  ).all(sandboxId, principalId, Math.min(Number(limit) || 50, 200));
+}
+
+export function renameConversation(id, title) {
+  openDb().prepare("UPDATE conversations SET title=?, updated_at=? WHERE id=?").run(title, Date.now(), id);
+  return getConversation(id);
+}
+
+export function deleteConversation(id) {
+  const db = openDb();
+  db.prepare("DELETE FROM conversation_messages WHERE conversation_id=?").run(id);
+  const r = db.prepare("DELETE FROM conversations WHERE id=?").run(id);
+  return { deleted: r.changes > 0 };
+}
+
+/** Append provider-shaped messages and bump the conversation's timestamp. */
+export function appendConversationMessages(conversationId, messages) {
+  const db = openDb();
+  const now = Date.now();
+  const insert = db.prepare("INSERT INTO conversation_messages (conversation_id,role,content,ts) VALUES (?,?,?,?)");
+  for (const m of messages) insert.run(conversationId, m.role ?? "user", JSON.stringify(m), now);
+  db.prepare("UPDATE conversations SET updated_at=? WHERE id=?").run(now, conversationId);
+  return messages.length;
+}
+
+/** The stored transcript, oldest first, parsed back into provider shape. */
+export function conversationMessages(conversationId, limit = 500) {
+  return openDb().prepare(
+    "SELECT content, ts FROM conversation_messages WHERE conversation_id=? ORDER BY id ASC LIMIT ?",
+  ).all(conversationId, Math.min(Number(limit) || 500, 2000))
+    .map((r) => { try { return JSON.parse(r.content); } catch { return null; } })
+    .filter(Boolean);
+}
+
 /**
  * Roll the audit log up into counts, for the metrics server and the dashboard.
  * Three cuts of the same window: by result kind, by server, and by tool — plus
