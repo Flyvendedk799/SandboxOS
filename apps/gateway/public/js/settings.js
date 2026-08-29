@@ -29,9 +29,10 @@ export function initSettings() {
   let access = [];
   let tokens = [];
   let me = null;
+  let claude = null;
 
   async function load() {
-    const [p, q, s, sb, d, ac, tk] = await Promise.all([
+    const [p, q, s, sb, d, ac, tk, cc] = await Promise.all([
       api.get("/api/profile").catch(() => null),
       api.get("/api/quota").catch(() => null),
       api.tryMcp("mcp-registry", "list", {}),
@@ -39,6 +40,7 @@ export function initSettings() {
       api.get("/api/distros").catch(() => ({ distros: [] })),
       api.get("access").catch(() => ({ access: [] })),
       api.get("tokens").catch(() => ({ tokens: [] })),
+      api.get("/api/claude-code").catch(() => null),
     ]);
     profile = p;
     quota = q?.quota ?? null;
@@ -48,12 +50,20 @@ export function initSettings() {
     access = ac?.access ?? [];
     me = ac?.you ?? null;
     tokens = tk?.tokens ?? [];
+    claude = cc;
     if (p) setState({ user: p.user, tenant: p.tenant, profile: p.profile });
     if (s) setState({ servers: s.enabled ?? [] });
     render();
   }
 
   // ── Provider key ───────────────────────────────────────────────────────────
+
+  /** What a provider row should say about itself under its name. */
+  function providerNote(p) {
+    if (p.detail) return p.detail;
+    if (p.billing === "subscription") return p.plan ? `connected · ${p.plan}` : "connected";
+    return p.configured ? "key set" : "no key yet";
+  }
 
   function providerSection() {
     const providers = profile?.profile?.providers ?? [];
@@ -63,14 +73,19 @@ export function initSettings() {
     const picker = h("div.choice-grid", null, ...providers.map((p) => h("label.choice", null,
       h("input", { type: "radio", name: "provider", value: p.id, checked: p.id === current }),
       h("span.name", p.label ?? p.id),
-      h("span.note", p.configured ? "key set" : "no key yet"),
+      h("span.note", { class: p.configured ? "ok" : "" }, providerNote(p)),
     )));
 
+    // A subscription is paid for by a plan, not by a key, so the key row would be a box
+    // with nowhere to send what you type into it. Hidden rather than disabled: a field
+    // that cannot do anything is worse than no field.
+    const keyless = providers.find((p) => p.id === current)?.billing === "subscription";
+
     return section("AI provider",
-      "Natural-language commands and AI agents run against this provider. The key is stored encrypted and never returned to the browser.",
+      "Natural-language commands and AI agents run against this provider. A key is stored encrypted and never returned to the browser; a subscription is connected below and bills to that plan.",
       picker,
       h("div.row", { style: { marginTop: "var(--s-3)" } },
-        keyInput,
+        keyless ? null : keyInput,
         h("button", {
           onclick: async () => {
             const chosen = picker.querySelector("input:checked")?.value ?? current;
@@ -88,7 +103,7 @@ export function initSettings() {
             } catch (e) { toastError("Could not save the provider", e); }
           },
         }, "Save"),
-        h("button.ghost", {
+        keyless ? null : h("button.ghost", {
           onclick: async () => {
             if (!await confirmDialog("Clear the stored key?", "Natural language and AI agents stop working until a new key is saved.")) return;
             try {
@@ -100,6 +115,70 @@ export function initSettings() {
         }, "Clear key"),
       ),
     );
+  }
+
+  // ── Claude subscription ────────────────────────────────────────────────────
+  //
+  // The real flow is `claude` in a shell: it prints a URL, you approve in a browser,
+  // you paste a code back. It is short, legible, and never asks anyone to handle a
+  // token — so this does not replace it with a wizard. It runs the same exchange on
+  // the Gateway and shows it as the session it mirrors.
+
+  function claudeSection() {
+    const connected = !!claude?.connected;
+
+    const status = h("div.row", { style: { flexWrap: "wrap" } },
+      h("span.chip", { class: connected ? "ok" : "" }, connected ? "connected" : "not connected"),
+      claude?.plan ? h("span.chip.mono", claude.plan) : null,
+      // Reported rather than hidden: an expired token still works — it refreshes on the
+      // next call — but a green light beside a dead token is a light that will look like
+      // a lie the first time something else goes wrong.
+      claude?.expired ? h("span.chip.sand", "token expired — refreshes on next use") : null,
+      h("span.spacer"),
+      connected
+        ? h("button.ghost.sm", { onclick: disconnectClaude }, "Disconnect")
+        : h("button.sm", { onclick: connectClaude }, "Connect"),
+    );
+
+    return section("Claude subscription",
+      "Sign in with a Claude plan and calls made here bill to that plan instead of a metered API key. "
+      + "The approval page says Claude Code, because this is the same login the CLI performs.",
+      status,
+    );
+  }
+
+  async function connectClaude() {
+    let started;
+    try {
+      started = await api.post("/api/claude-code/login", {});
+    } catch (e) { return toastError("Could not start the login", e); }
+
+    const got = await dialog({
+      title: "Connect a Claude subscription",
+      message: "Open the link, approve, and paste the code it shows you back here.",
+      fields: [{ name: "code", label: "Authorization code", placeholder: "code#state", hint: "The whole URL works too." }],
+      confirmLabel: "Connect",
+      render: () => h("p", null, h("a", { href: started.url, target: "_blank", rel: "noreferrer noopener" }, "Open the approval page")),
+    });
+    if (!got?.code?.trim()) return;
+
+    try {
+      claude = await api.post("/api/claude-code/login/complete", { code: got.code.trim() });
+      profile = await api.get("/api/profile");
+      toast("Claude subscription connected", { kind: "ok" });
+      render();
+    } catch (e) { toastError("Could not complete the login", e); }
+  }
+
+  async function disconnectClaude() {
+    if (!await confirmDialog("Disconnect the Claude subscription?",
+      "Calls fall back to whatever API key is configured. You can connect again at any time.")) return;
+    try {
+      claude = await api.del("/api/claude-code");
+      profile = await api.get("/api/profile");
+      toast("Disconnected", { kind: "ok" });
+      render();
+    } catch (e) { toastError("Could not disconnect", e); }
   }
 
   // ── Cell ───────────────────────────────────────────────────────────────────
@@ -416,6 +495,7 @@ export function initSettings() {
             profile?.profile?.updatedAt ? `updated ${fmtAgo(profile.profile.updatedAt)}` : ""),
         )),
       providerSection(),
+      claudeSection(),
       cellSection(),
       serversSection(),
       accessSection(),

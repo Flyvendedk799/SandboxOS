@@ -13,7 +13,10 @@ import { canDelegate } from "../../kernel/src/capabilities.js";
 
 const now = () => Date.now();
 const id = (prefix) => `${prefix}_${crypto.randomUUID().slice(0, 8)}`;
-export const LLM_PROVIDERS = ["claude", "openai"];
+// The providers a tenant may select, in the order a picker should show them. Two are
+// metered API keys and two are subscriptions the user or operator has signed in to; the
+// difference in what it takes to make a call lives in packages/llm/src/providers.js.
+export const LLM_PROVIDERS = ["claude", "claude-code", "openai", "codex"];
 
 function normalizeLlmProvider(provider) {
   const value = String(provider ?? "").trim().toLowerCase();

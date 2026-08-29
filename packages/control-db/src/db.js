@@ -1,17 +1,40 @@
 // Control-plane database (the "one brain" for the host).
 //
 // Phase-0 note: we use Node's built-in `node:sqlite` (zero native dependency,
-// runs out of the box on Node 25). The documented production target is
-// better-sqlite3 v11 — the API is near-identical (prepare/run/get/all), so the
-// swap is mechanical. See docs/11-tech-stack.md.
+// runs out of the box on Node 22.13+ and every release since). The documented
+// production target is better-sqlite3 v11 — the API is near-identical
+// (prepare/run/get/all), so the swap is mechanical. See docs/11-tech-stack.md.
 
-import { DatabaseSync } from "node:sqlite";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
 import config from "../../config/src/config.js";
+import { MIN_NODE } from "../../config/src/node-compat.js";
 
 const require = createRequire(import.meta.url);
+
+// node:sqlite is loaded through require rather than a static import, and that is
+// deliberate. On Node 22.5–22.12 the module exists only behind
+// --experimental-sqlite, and a static import of it fails at *module load* — so
+// the first thing anyone on an older 22 would see is ERR_UNKNOWN_BUILTIN_MODULE
+// naming a module they never typed, from a stack frame in a file they have no
+// reason to open. Requiring it lazily turns that into the sentence below, which
+// names all three ways out.
+let _DatabaseSync = null;
+function nodeSqlite() {
+  if (_DatabaseSync) return _DatabaseSync;
+  try {
+    _DatabaseSync = require("node:sqlite").DatabaseSync;
+  } catch (e) {
+    throw new Error(
+      `Node ${process.versions.node} cannot load the built-in node:sqlite module (${e.message}).\n` +
+      `  · Upgrade to Node ${MIN_NODE} or newer, where it needs no flag.\n` +
+      `  · Or start Node with --experimental-sqlite (22.5–22.12).\n` +
+      `  · Or run on the other driver: SANDBOXOS_DB_DRIVER=better-sqlite3.`
+    );
+  }
+  return _DatabaseSync;
+}
 
 // Driver selection (backlog #14). The control plane defaults to Node's built-in
 // node:sqlite (DatabaseSync) — zero runtime dependency, the Phase-0 choice. The
@@ -26,11 +49,11 @@ function openConnection(dbPath) {
       const Database = require("better-sqlite3");
       return new Database(dbPath);
     } catch (e) {
-      if (pref === "auto") return new DatabaseSync(dbPath); // graceful fallback
+      if (pref === "auto") return new (nodeSqlite())(dbPath); // graceful fallback
       throw new Error(`SANDBOXOS_DB_DRIVER=${pref} but better-sqlite3 could not be loaded: ${e.message}`);
     }
   }
-  return new DatabaseSync(dbPath);
+  return new (nodeSqlite())(dbPath);
 }
 
 const SCHEMA = `

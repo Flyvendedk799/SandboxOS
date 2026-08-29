@@ -36,7 +36,8 @@ command it through **Command Central** (a console reachable from any browser or 
 
 ## Run it
 
-Node 24+ (22 works), no dependencies to install.
+Node 22.13 or newer — the 22 LTS line included — and no dependencies to install.
+(On Node 22.5–22.12 add `--experimental-sqlite`; `node:sqlite` needs no flag from 22.13 on.)
 
 ```bash
 git clone https://github.com/Flyvendedk799/SandboxOS && cd SandboxOS
@@ -83,6 +84,21 @@ Every call goes **authenticate → authorize (default-deny) → route → execut
 | `tide` | init · status · mark · log · diff · checkout · state objects · push/pull wire primitives |
 | `mcp-registry` | list · enable · disable · configure · install · uninstall |
 | `kernel` | whoami · capabilities · tools · auditQuery · manifestGet · manifestSet |
+
+### Paying for the model
+
+Four providers, split by *billing* rather than by vendor: a metered **Anthropic** or
+**OpenAI** API key, encrypted per tenant; a **Claude subscription** the tenant signs in to
+from the settings page, so calls bill to their own plan rather than to whoever set the
+host up; or the **`codex` login** already on the machine, for a self-hosted instance where
+the operator's plan is the point. All four go through one credential resolver, so the
+Assistant, the AI agents and the `llm` server never learn the difference.
+
+Ported from [ai-auth](https://github.com/Flyvendedk799/ai-auth), including the handful of
+details that each cost a day to find out — chief among them that a subscription token must
+open with the Claude Code identity block, or Anthropic refuses Sonnet and Opus with a 429
+on a plan nowhere near its limit, while Haiku answers fine. See
+[`packages/ai-auth/README.md`](packages/ai-auth/README.md) for the rest of them.
 
 ### The desktop
 
@@ -168,6 +184,7 @@ packages/kernel      the MCP router + the core servers
 packages/cell        four execution backends behind one interface
 packages/assistant   the streaming tool-use loop
 packages/agents      supervised, capability-scoped agents
+packages/ai-auth     bring-your-own-credential auth: API keys and subscription logins
 packages/tide        the versioned + live sync protocol
 packages/control-db  the control plane's SQLite schema and queries
 packages/sbx-cli     the sbx binary

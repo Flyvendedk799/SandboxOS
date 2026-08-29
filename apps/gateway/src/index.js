@@ -2,6 +2,7 @@
 
 import { spawn } from "node:child_process";
 import config from "../../../packages/config/src/config.js";
+import { assertSupportedNode, quietSqliteWarning } from "../../../packages/config/src/node-compat.js";
 import { openDb } from "../../../packages/control-db/src/db.js";
 import { ensureSeed, purgeExpiredSessions, verifyAuditChain } from "../../../packages/control-db/src/registry.js";
 import { resolveBackend } from "../../../packages/cell/src/cell.js";
@@ -10,6 +11,10 @@ import { cronTick } from "../../../packages/scheduler/src/cron-runner.js";
 import { createServer, scheduler } from "./server.js";
 import { stopAllProcsEverywhere } from "../../../packages/kernel/src/servers/proc.js";
 import { killAllHosted } from "../../../packages/kernel/src/marketplace-pool.js";
+
+// Say what is wrong at the top, once, before anything else can fail obscurely.
+assertSupportedNode();
+quietSqliteWarning();
 
 const backend = await resolveBackend();
 config.cellBackend = backend; // pin the resolved choice for the rest of the process

@@ -16,14 +16,18 @@
 // not need a minted token.
 
 import { authorize } from "../../kernel/src/capabilities.js";
-import { resolveLlmCredential } from "../../llm/src/providers.js";
+import {
+  baseUrlFor, credentialHeaders, resolveLlmCredential, systemFor,
+} from "../../llm/src/providers.js";
+import { CODEX_BASE_URL } from "../../ai-auth/src/clients.js";
+import { describeProviderError } from "../../ai-auth/src/errors.js";
 import { anthropicEvents, openaiEvents } from "./stream.js";
 
 // Endpoints are read lazily and overridable so the turn loop can be pointed at a
 // stub provider in tests without mocking fetch itself.
 const CLAUDE_API_URL = () => process.env.SANDBOXOS_ANTHROPIC_URL || "https://api.anthropic.com/v1/messages";
 const OPENAI_API_URL = () => process.env.SANDBOXOS_OPENAI_URL || "https://api.openai.com/v1/chat/completions";
-const CLAUDE_API_VER = "2023-06-01";
+const CODEX_URL = () => process.env.SANDBOXOS_CODEX_URL || `${CODEX_BASE_URL}/chat/completions`;
 
 /** How many model→tools→model round trips one turn may take. */
 const MAX_STEPS = () => Number(process.env.SANDBOXOS_ASSISTANT_MAX_STEPS ?? 12);
@@ -64,8 +68,14 @@ export function systemPrompt(sandbox, servers) {
   ].join("\n");
 }
 
-/** Tool definitions for the tools these patterns actually authorize. */
-export function toolDefs(allTools, patterns, provider) {
+/**
+ * Tool definitions for the tools these patterns actually authorize.
+ *
+ * Keyed on the *wire*, not the provider: a Codex subscription and an OpenAI key speak
+ * the same tool shape even though they bill entirely differently. Passing "claude" or
+ * "anthropic" both select the Anthropic shape.
+ */
+export function toolDefs(allTools, patterns, wire) {
   const allowed = allTools.filter((t) => {
     const dot = t.name.indexOf(".");
     return !!authorize(patterns, t.name.slice(0, dot), t.name.slice(dot + 1));
@@ -74,7 +84,7 @@ export function toolDefs(allTools, patterns, provider) {
     const dot = t.name.indexOf(".");
     const name = encodeName(t.name.slice(0, dot), t.name.slice(dot + 1));
     const schema = t.inputSchema ?? { type: "object", properties: {} };
-    return provider === "openai"
+    return wire === "openai"
       ? { type: "function", function: { name, description: t.description ?? t.name, parameters: schema } }
       : { name, description: t.description ?? t.name, input_schema: schema };
   });
@@ -86,11 +96,23 @@ function clip(text) {
   return `${text.slice(0, MAX_RESULT_CHARS)}\n… [truncated ${text.length - MAX_RESULT_CHARS} characters]`;
 }
 
-async function providerError(res) {
+/**
+ * The most useful sentence available for a failed provider response.
+ *
+ * The headers are carried onto the shaped error along with the status, because a 429
+ * that reports the plan as still allowed means a per-model limit — "switch to a lighter
+ * model" — while one that does not means the allowance is genuinely spent. Same status,
+ * opposite remedies, and the difference is only in the headers.
+ */
+async function providerError(res, credential, model) {
   const text = await res.text().catch(() => "");
   let msg = `${res.status} ${res.statusText}`;
   try { msg = JSON.parse(text)?.error?.message ?? msg; } catch { if (text) msg = text.slice(0, 300); }
-  return new Error(msg);
+  const shaped = { status: res.status, message: JSON.stringify({ message: msg }), headers: res.headers };
+  const described = credential
+    ? describeProviderError(shaped, credential.provider, model, { configureAt: "Settings" })
+    : null;
+  return new Error(described ?? msg);
 }
 
 /**
@@ -108,15 +130,14 @@ async function providerError(res) {
  * @returns {Promise<{messages: object[], stopped: string}>} the appended turns
  */
 export async function runTurn({ kernel, sandbox, principalId, heldPatterns, history = [], input, emit, signal, model }) {
-  const credential = resolveLlmCredential(sandbox.tenant_id);
-  if (!credential.apiKey) {
-    const err = `No ${credential.label} API key is set for this tenant. Add one in Settings to use the assistant.`;
-    emit({ type: "error", error: err });
+  const credential = await resolveLlmCredential(sandbox.tenant_id);
+  if (!credential.configured) {
+    emit({ type: "error", error: credential.error });
     return { messages: [], stopped: "no_credential" };
   }
 
   const servers = [...kernel.servers.keys()];
-  const defs = toolDefs(kernel.listTools(), heldPatterns, credential.provider);
+  const defs = toolDefs(kernel.listTools(), heldPatterns, credential.wire);
   const maxSteps = MAX_STEPS();
   const deadline = Date.now() + MAX_MS();
   const maxTokens = MAX_TOKENS();
@@ -125,7 +146,7 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
   // The transcript we hand back to the caller to persist, in provider shape.
   const appended = [];
   const messages = [...history];
-  messages.push(credential.provider === "openai"
+  messages.push(credential.wire === "openai"
     ? { role: "user", content: input }
     : { role: "user", content: [{ type: "text", text: input }] });
   appended.push(messages.at(-1));
@@ -140,30 +161,32 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
     emit({ type: "step", step: step + 1 });
 
     // ── Ask the model, streaming ────────────────────────────────────────────
-    const isOpenAI = credential.provider === "openai";
-    const url = isOpenAI ? OPENAI_API_URL() : CLAUDE_API_URL();
-    const headers = isOpenAI
-      ? { authorization: `Bearer ${credential.apiKey}`, "content-type": "application/json" }
-      : { "x-api-key": credential.apiKey, "anthropic-version": CLAUDE_API_VER, "content-type": "application/json" };
+    const isOpenAI = credential.wire === "openai";
+    const chosen = model ?? credential.modelDefault;
+    const url = baseUrlFor(credential, CLAUDE_API_URL(), OPENAI_API_URL(), CODEX_URL());
+    const headers = credentialHeaders(credential);
     const body = isOpenAI
       ? {
-          model: model ?? credential.modelDefault,
+          model: chosen,
           stream: true,
           stream_options: { include_usage: true },
           messages: [{ role: "system", content: systemPrompt(sandbox, servers) }, ...messages],
           ...(defs.length ? { tools: defs, tool_choice: "auto" } : {}),
         }
       : {
-          model: model ?? credential.modelDefault,
+          model: chosen,
           max_tokens: 4096,
           stream: true,
-          system: systemPrompt(sandbox, servers),
+          // On a subscription token the Claude Code identity block has to come first
+          // and stand alone, or Sonnet and Opus are refused with a 429 the plan has
+          // not earned. systemFor is what puts it there.
+          system: systemFor(credential, systemPrompt(sandbox, servers)),
           messages,
           ...(defs.length ? { tools: defs } : {}),
         };
 
     const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal });
-    if (!res.ok || !res.body) throw await providerError(res);
+    if (!res.ok || !res.body) throw await providerError(res, credential, chosen);
 
     let text = "";
     let stopReason = null;
