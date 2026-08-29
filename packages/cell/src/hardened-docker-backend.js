@@ -149,6 +149,12 @@ export class HardenedDockerBackend {
     };
   }
 
+  /** Hardened Cells run with --network=none, so nothing inside them is reachable
+   *  over the network. Port preview is deliberately unavailable at this tier. */
+  async endpoint() {
+    throw new Error("hardened Cells run with --network=none; port preview is unavailable");
+  }
+
   async stop() {
     this._boot = null;
     await docker(["stop", this.container]);

@@ -313,6 +313,12 @@ export class FirecrackerBackend {
     return { snapshotPath, stateFile };
   }
 
+  /** Reach a service listening inside the guest VM over its TAP address. */
+  async endpoint(port) {
+    await this.ensureRunning();
+    return { host: GUEST_IP, port: Number(port) };
+  }
+
   async stop() {
     this._boot = null;
     // Best-effort snapshot so the next wake can restore.

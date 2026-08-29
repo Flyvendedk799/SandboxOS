@@ -22,6 +22,7 @@ import {
   getTenant, getTenantProfile, updateTenantProfile, LLM_PROVIDERS,
 } from "../../../packages/control-db/src/registry.js";
 import { authorize } from "../../../packages/kernel/src/capabilities.js";
+import { exposedPorts } from "../../../packages/kernel/src/servers/ports.js";
 import { loadManifest } from "../../../packages/manifest/src/manifest.js";
 import { putTenantSecret, removeTenantSecret } from "../../../packages/secrets/src/store.js";
 import { providerConfig, providerOptions } from "../../../packages/llm/src/providers.js";
@@ -502,6 +503,43 @@ async function handle(req, res) {
     return sendJson(res, 200, { ok: true, ...result });
   }
 
+  // ── Port preview ───────────────────────────────────────────────────────────
+  // ANY /:slug/p/:port/... — reverse-proxy the request into a service listening
+  // inside the Cell. This is what turns "I started a dev server" into "I can see
+  // my dev server": the app you launched with proc.start is reachable from the
+  // same authenticated browser tab, with no tunnels and no published host ports.
+  if (action === "p" && segments[3]) {
+    const port = Number(segments[3]);
+    if (!Number.isInteger(port) || port < 1 || port > 65535)
+      return sendJson(res, 400, { ok: false, error: "invalid port" });
+    if (!authorize(held, "ports", "access"))
+      return sendJson(res, 403, { ok: false, error: "denied: ports.access" });
+    if (!exposedPorts(sandbox)[String(port)])
+      return sendJson(res, 404, { ok: false, error: `port ${port} is not exposed — expose it from the Ports panel first` });
+
+    scheduler.touch(sandbox.id);
+    await scheduler.wake(sandbox, getQuota(principal.tenant_id)).catch(() => {});
+
+    // The route prefix differs between path routing (/alice/p/3000/…) and
+    // subdomain routing (alice.example.com/p/3000/…); strip whichever applies so
+    // the upstream path keeps its original percent-encoding intact.
+    const prefix = subSlug ? `/p/${segments[3]}` : `/${slug}/p/${segments[3]}`;
+    const rest = url.pathname.slice(prefix.length);
+    // Without a trailing slash the browser resolves relative links against the
+    // parent path, which would drop the /p/<port> prefix. Redirect once.
+    if (rest === "") {
+      res.writeHead(302, { Location: `${prefix}/${url.search}` });
+      return res.end();
+    }
+
+    let ep;
+    try {
+      ep = await getCell(sandbox).endpoint(port);
+    } catch (e) {
+      return sendJson(res, 503, { ok: false, error: e.message });
+    }
+    return proxyToCell(req, res, ep, rest + url.search, prefix);
+  }
   const kernel = await getKernel(sandbox);
 
   // POST /:slug/exec — run one Command Central line.
@@ -524,6 +562,8 @@ async function handle(req, res) {
     const VERBS = new Set([
       "ls", "cat", "stat", "write", "ps", "whoami", "servers", "enable", "disable",
       "fetch", "secrets", "secret", "pkg", "agent", "agents", "llm", "help", "clear",
+      "mkdir", "rm", "mv", "cp", "tree", "grep",
+      "run", "jobs", "logs", "stop", "ports", "port",
     ]);
     const firstToken = line.trim().split(/\s+/)[0];
     const isShell = !VERBS.has(firstToken) && !firstToken.startsWith(":");
@@ -716,6 +756,122 @@ async function handle(req, res) {
   return sendJson(res, 404, { ok: false, error: "not found" });
 }
 
+
+// ── Cell port proxy ──────────────────────────────────────────────────────────
+
+/** Headers that describe a single hop and must not be forwarded verbatim. */
+const HOP_BY_HOP = new Set([
+  "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+  "te", "trailer", "transfer-encoding", "upgrade",
+]);
+
+function forwardableHeaders(headers, hostHeader) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (HOP_BY_HOP.has(k.toLowerCase())) continue;
+    if (k.toLowerCase() === "host") continue;
+    out[k] = v;
+  }
+  out.host = hostHeader;
+  // The service inside the Cell is behind a path prefix; tell frameworks that
+  // understand these hints where they really live.
+  out["x-forwarded-proto"] = "http";
+  return out;
+}
+
+/**
+ * Reverse-proxy one HTTP request into a Cell endpoint.
+ *
+ * HTML responses are buffered so a `<base href="…">` can be injected: the app is
+ * served under /<slug>/p/<port>/, and without a base tag every root-relative asset
+ * URL it emits would resolve outside the proxy prefix. Everything else streams.
+ */
+function proxyToCell(req, res, ep, upstreamPath, prefix) {
+  return new Promise((resolve) => {
+    const upstream = http.request({
+      host: ep.host,
+      port: ep.port,
+      method: req.method,
+      path: upstreamPath || "/",
+      headers: forwardableHeaders(req.headers, `${ep.host}:${ep.port}`),
+    }, (up) => {
+      const type = String(up.headers["content-type"] ?? "");
+      const isHtml = type.includes("text/html");
+      const headers = {};
+      for (const [k, v] of Object.entries(up.headers)) {
+        if (HOP_BY_HOP.has(k.toLowerCase())) continue;
+        headers[k] = v;
+      }
+      // Rewrite redirects that point at the Cell's own root back through the proxy.
+      if (headers.location && String(headers.location).startsWith("/")) {
+        headers.location = `${prefix}${headers.location}`;
+      }
+
+      if (!isHtml) {
+        res.writeHead(up.statusCode ?? 502, headers);
+        up.pipe(res);
+        up.on("end", resolve);
+        return;
+      }
+
+      const chunks = [];
+      up.on("data", (c) => chunks.push(c));
+      up.on("end", () => {
+        let body = Buffer.concat(chunks).toString("utf8");
+        if (!/<base\s/i.test(body)) {
+          const baseTag = `<base href="${prefix}/">`;
+          if (/<head[^>]*>/i.test(body)) body = body.replace(/<head[^>]*>/i, (m) => `${m}${baseTag}`);
+          else body = `${baseTag}${body}`;
+        }
+        const buf = Buffer.from(body, "utf8");
+        delete headers["content-length"];
+        headers["content-length"] = String(buf.length);
+        res.writeHead(up.statusCode ?? 502, headers);
+        res.end(buf);
+        resolve();
+      });
+    });
+
+    upstream.on("error", (err) => {
+      if (!res.headersSent) {
+        sendJson(res, 502, { ok: false, error: `nothing is listening on port ${ep.port} (${err.code ?? err.message})` });
+      } else {
+        res.end();
+      }
+      resolve();
+    });
+
+    req.pipe(upstream);
+    req.on("aborted", () => upstream.destroy());
+  });
+}
+
+/** Proxy a WebSocket upgrade into a Cell endpoint (dev-server HMR, live reload). */
+function proxyUpgradeToCell(req, socket, head, ep, upstreamPath) {
+  const upstream = http.request({
+    host: ep.host,
+    port: ep.port,
+    method: req.method,
+    path: upstreamPath || "/",
+    headers: { ...req.headers, host: `${ep.host}:${ep.port}` },
+  });
+  upstream.on("upgrade", (upRes, upSocket, upHead) => {
+    const lines = [`HTTP/1.1 ${upRes.statusCode} ${upRes.statusMessage}`];
+    for (const [k, v] of Object.entries(upRes.headers)) {
+      for (const one of Array.isArray(v) ? v : [v]) lines.push(`${k}: ${one}`);
+    }
+    socket.write(lines.join("\r\n") + "\r\n\r\n");
+    if (upHead?.length) socket.write(upHead);
+    upSocket.pipe(socket);
+    socket.pipe(upSocket);
+    upSocket.on("error", () => socket.destroy());
+    socket.on("error", () => upSocket.destroy());
+  });
+  upstream.on("error", () => socket.destroy());
+  if (head?.length) upstream.write(head);
+  upstream.end();
+}
+
 // ── WebSocket PTY handler ────────────────────────────────────────────────────
 
 async function handleUpgrade(req, socket, head) {
@@ -724,7 +880,7 @@ async function handleUpgrade(req, socket, head) {
   const slug   = segments[1] ?? "";
   const action = segments[2] ?? "";
 
-  if (action !== "pty") { socket.destroy(); return; }
+  if (action !== "pty" && action !== "p") { socket.destroy(); return; }
 
   const sandbox = getSandboxBySlug(slug);
   if (!sandbox) { socket.destroy(); return; }
@@ -733,7 +889,22 @@ async function handleUpgrade(req, socket, head) {
   if (!principal) { socket.destroy(); return; }
 
   const held = grantsFor(principal.id, sandbox.id);
-  if (!held.length || !authorize(held, "proc", "exec")) { socket.destroy(); return; }
+  if (!held.length) { socket.destroy(); return; }
+
+  // Port-preview upgrades (dev-server HMR / live reload) tunnel straight into the
+  // Cell rather than through the PTY bridge.
+  if (action === "p") {
+    const port = Number(segments[3]);
+    if (!Number.isInteger(port) || !authorize(held, "ports", "access")) { socket.destroy(); return; }
+    if (!exposedPorts(sandbox)[String(port)]) { socket.destroy(); return; }
+    let ep;
+    try { ep = await getCell(sandbox).endpoint(port); } catch { socket.destroy(); return; }
+    const prefix = `/${slug}/p/${segments[3]}`;
+    const rest = url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : `/p/${segments[3]}`;
+    return proxyUpgradeToCell(req, socket, head, ep, (rest || "/") + url.search);
+  }
+
+  if (!authorize(held, "proc", "exec")) { socket.destroy(); return; }
 
   const ws = upgradeWebSocket(req, socket, head);
   if (!ws) return;

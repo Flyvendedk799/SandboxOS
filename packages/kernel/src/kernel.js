@@ -17,6 +17,7 @@ import { getCell } from "../../cell/src/cell.js";
 import { CATALOG, availableServers } from "./catalog.js";
 import { loadManifest, enabledServers } from "../../manifest/src/manifest.js";
 import { hostedServer, killHosted, killAllHosted } from "./marketplace-pool.js";
+import { stopAllProcs } from "./servers/proc.js";
 
 export class DeniedError extends Error {
   constructor(target) { super(`denied: ${target}`); this.name = "DeniedError"; this.code = "denied"; }
@@ -99,6 +100,7 @@ export class Kernel {
   /** Tear down: kill every out-of-process marketplace child for this Sandbox. */
   dispose() {
     killAllHosted(this.sandbox.id);
+    stopAllProcs(this.sandbox.id);
     this._marketplaceServers.clear();
   }
 

@@ -126,6 +126,18 @@ export class DockerBackend {
     };
   }
 
+  /** Reach a service listening inside the container: resolve its network IP.
+   *  The container port is used as-is — no host port publishing is needed because
+   *  the Gateway dials the container network directly. */
+  async endpoint(port) {
+    await this.ensureRunning();
+    const r = await docker(["inspect", "-f",
+      "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", this.container]);
+    const ip = (r.stdout ?? "").trim().split(/\s+/).filter(Boolean)[0];
+    if (!ip) throw new Error("container has no reachable IP address");
+    return { host: ip, port: Number(port) };
+  }
+
   async stop() {
     this._boot = null;
     await docker(["stop", this.container]);

@@ -92,6 +92,12 @@ export class LocalBackend {
     };
   }
 
+  /** Reach a service listening inside the Cell. A local Cell shares the host's
+   *  loopback, so an in-Cell listener is simply a localhost port. */
+  async endpoint(port) {
+    return { host: "127.0.0.1", port: Number(port) };
+  }
+
   async stop() { return { state: "stopped" }; }
   async destroy() { fs.rmSync(this.root, { recursive: true, force: true }); }
 }
