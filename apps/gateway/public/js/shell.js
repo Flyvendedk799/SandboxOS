@@ -66,6 +66,18 @@ export function initShell() {
   $("#slug").textContent = state.slug;
   $("#machine-btn").addEventListener("click", (e) => machineMenu(e.currentTarget));
 
+  // ── The OS ─────────────────────────────────────────────────────────────────
+  // Command Central drives the machine; the OS *is* the machine, as a place.
+  // Same Kernel, same audit log, different posture — so the way across is a link.
+  const osLink = $("#enter-os");
+  if (osLink) osLink.href = `/${state.slug}/os`;
+  document.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "o") {
+      e.preventDefault();
+      location.href = `/${state.slug}/os`;
+    }
+  });
+
   // ── Sign out ───────────────────────────────────────────────────────────────
   $("#logout").addEventListener("click", async () => {
     await fetch("/logout", { method: "POST" });

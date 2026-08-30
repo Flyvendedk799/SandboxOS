@@ -54,7 +54,15 @@ All require a grant on that Sandbox.
 
 | method | route | |
 |---|---|---|
-| `GET` | `/:slug` | the desktop (wakes the Cell) |
+| `GET` | `/:slug` | Command Central (wakes the Cell) |
+| `GET` | `/:slug/os` | the OS desktop, full screen (wakes the Cell) |
+| `GET` | `/:slug/studio` | the OS builder |
+| `GET` | `/:slug/os/doc` | the OS document + resolved theme/motion + catalogs |
+| `GET` | `/:slug/os/events` | SSE: every desktop change, with the new document |
+| `GET` | `/:slug/os/theme.css` | the active theme and motion, compiled |
+| `POST` | `/:slug/os/apps/:id/session` | open a capability session for an app frame |
+| `GET` | `/:slug/os/apps/:id/*` | a custom app's files (sandboxed frame, closed CSP) |
+| `GET` | `/:slug/os/widgets/:kind/*` | a custom widget's files |
 | `POST` | `/:slug/exec` | one Command Central line |
 | `POST` | `/:slug/exec-stream` | the same, streamed over SSE |
 | `POST` | `/:slug/stream` | run a raw command, streaming stdout/stderr |
@@ -125,6 +133,20 @@ Exposure lives in the manifest, so it survives hibernate/wake and travels with a
 **`llm`** — `complete` `models`
 **`metrics`** — `snapshot` `history` `activity` `recent`
 **`apps`** — `list` `install` `remove` `launch` (launch mints a scoped token)
+**`desktop`** — the OS itself. Document: `get` `state` `set` `patch` `rename`
+`history` `revert` `reset`. Appearance: `themeList` `themeSet` `themeDefine`
+`themeRemove` `wallpaperSet` `animationList` `animationSet` `animationDefine`
+`animationRemove`. Chrome: `dockSet` `dockPin` `shellSet` `layoutSet` `associate`. Workspaces:
+`workspaceList` `workspaceAdd` `workspaceRemove` `workspaceRename` `workspaceSwitch`.
+Windows: `windowList` `open` `close` `move` `resize` `focus` `windowSet` `arrange`
+`snap` `cycleFocus` `minimizeAll`.
+Widgets: `widgetList` `widgetAdd` `widgetRemove` `widgetSet`. Apps: `appList`
+`appDefine` `appRemove` `appFiles` `appRead` `appWrite` `appDelete`. Widget kinds:
+`widgetDefine` `widgetKindRemove` `widgetFiles` `widgetRead` `widgetWrite`.
+Notifications: `notify` `notificationsRead` `notificationsClear`. Distros:
+`distroList` `distroPublish` `distroFork` `distroExport` `distroImport`.
+Every mutation normalizes the document, bumps its revision, pushes the previous version
+onto the undo history and announces itself on `/:slug/os/events`. See docs/15.
 **`tide`** — `init` `listWorkspaces` `status` `mark` `log` `diff` `checkout` `refs` ·
 `putState` `getState` `listStates` · `fetchObjects` `receiveObjects` (the wire
 primitives a laptop daemon drives). Paths returned to callers are Sandbox-relative.
@@ -167,6 +189,8 @@ files       fs <ls|cat|tree|grep|mkdir|rm|get|put>
 processes   proc <list|start|logs|stop>
 ports       port <list|expose|close|scan>
 agents      agent <list|spawn|get|kill>
+desktop     os <show|open|close|widget|theme|motion|layout|apps|history|revert>
+            os <publish|fork|export|notify>
 state       secret · app · distro
 observe     metrics · audit · watch
 admin       access <list|share|revoke> · quota · backup
@@ -186,8 +210,9 @@ const sbx = new SandboxClient({ url, slug, token });
 
 `sbx.call(server, tool, args)` is the escape hatch; the rest is sugar over it:
 `sbx.fs.*`, `sbx.proc.*` (with `wait()`), `sbx.ports.*` (with `url()`), `sbx.agents.*`
-(with `wait()`), `sbx.secrets.*`, and `sbx.assistant.ask()` which yields turn events as
-they stream. `sbx.stream()` and `sbx.events()` are async iterators.
+(with `wait()`), `sbx.secrets.*`, `sbx.desktop.*` (the OS: open and close windows, place
+widgets, set the theme, define and write custom apps, publish and fork distros, revert a
+revision), and `sbx.assistant.ask()` which yields turn events as they stream. `sbx.stream()` and `sbx.events()` are async iterators.
 
 Errors are `SandboxError` and carry the Kernel's reason — `denied: proc.exec`, not
 `HTTP 200`.

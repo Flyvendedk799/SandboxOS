@@ -622,26 +622,38 @@ export function updateAgentState(agentId, state, { result = null, error = null, 
 
 // ---- Phase-4 distros (named manifest templates) ---------------------------
 
-export function createDistro(tenantId, { name, description, manifest }) {
+/** `os` is the Phase-27 addition: the whole desktop, packaged (see packages/os).
+ *  Absent on manifest-only distros, which keep working untouched. */
+export function createDistro(tenantId, { name, description, manifest, os = null }) {
   const db = openDb();
-  const d = { id: id("dtr"), tenant_id: tenantId, name, description: description ?? null, manifest: JSON.stringify(manifest), created_at: now() };
-  db.prepare("INSERT INTO distros (id,tenant_id,name,description,manifest,created_at) VALUES (?,?,?,?,?,?)")
-    .run(d.id, d.tenant_id, d.name, d.description, d.manifest, d.created_at);
-  return { ...d, manifest };
+  const d = {
+    id: id("dtr"), tenant_id: tenantId, name, description: description ?? null,
+    manifest: JSON.stringify(manifest), os: os == null ? null : JSON.stringify(os), created_at: now(),
+  };
+  db.prepare("INSERT INTO distros (id,tenant_id,name,description,manifest,os,created_at) VALUES (?,?,?,?,?,?,?)")
+    .run(d.id, d.tenant_id, d.name, d.description, d.manifest, d.os, d.created_at);
+  return { ...d, manifest, os };
 }
 
+const hydrateDistro = (row) => {
+  if (!row) return null;
+  let os = null;
+  try { os = row.os ? JSON.parse(row.os) : null; } catch { os = null; }
+  return { ...row, manifest: JSON.parse(row.manifest), os };
+};
+
 export function getDistro(distroId) {
-  const row = openDb().prepare("SELECT * FROM distros WHERE id=?").get(distroId);
-  return row ? { ...row, manifest: JSON.parse(row.manifest) } : null;
+  return hydrateDistro(openDb().prepare("SELECT * FROM distros WHERE id=?").get(distroId));
 }
 
 export function getDistroByName(tenantId, name) {
-  const row = openDb().prepare("SELECT * FROM distros WHERE tenant_id=? AND name=?").get(tenantId, name);
-  return row ? { ...row, manifest: JSON.parse(row.manifest) } : null;
+  return hydrateDistro(openDb().prepare("SELECT * FROM distros WHERE tenant_id=? AND name=?").get(tenantId, name));
 }
 
 export function listDistros(tenantId) {
-  return openDb().prepare("SELECT id,tenant_id,name,description,created_at FROM distros WHERE tenant_id=? ORDER BY created_at DESC").all(tenantId);
+  return openDb().prepare(
+    "SELECT id,tenant_id,name,description,created_at,(os IS NOT NULL) AS has_os FROM distros WHERE tenant_id=? ORDER BY created_at DESC"
+  ).all(tenantId);
 }
 
 export function deleteDistro(tenantId, name) {

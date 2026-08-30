@@ -30,6 +30,11 @@ import { authorize } from "../../../packages/kernel/src/capabilities.js";
 import { exposedPorts } from "../../../packages/kernel/src/servers/ports.js";
 import { safeResolve, canonicalContained, canonicalLeafContained } from "../../../packages/kernel/src/servers/fs.js";
 import { loadManifest } from "../../../packages/manifest/src/manifest.js";
+import {
+  loadOs, osEvents, resolveTheme, themeCss, resolveAnimation, animationCss,
+  appDescriptor, widgetDescriptor, effectivePermissions, withheldPermissions,
+  readBundleFile, bundleType, safeRelPath, destroyOs,
+} from "../../../packages/os/src/index.js";
 import { putTenantSecret, removeTenantSecret } from "../../../packages/secrets/src/store.js";
 import { providerConfig, providerOptions } from "../../../packages/llm/src/providers.js";
 import { claudeAccounts } from "../../../packages/ai-auth/src/tenant.js";
@@ -98,6 +103,44 @@ function sendFile(res, file) {
   } catch {
     res.writeHead(404).end("not found");
   }
+}
+
+// ---- custom app frames ----------------------------------------------------
+// A custom app is code the Kernel did not write and the shell does not trust. It
+// runs in a sandboxed iframe (opaque origin: no cookies of ours, no parent DOM,
+// no storage of ours) under the policy below. Note the explicit origin rather
+// than 'self': in an opaque origin 'self' matches nothing, which would block the
+// very files we are serving. connect-src stays closed — an app reaches the
+// machine through the shell's broker, which holds an attenuated token the frame
+// never sees.
+
+function requestOrigin(req) {
+  const proto = (req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim() || "http";
+  return `${proto}://${req.headers.host}`;
+}
+
+function frameCsp(req) {
+  const o = requestOrigin(req);
+  return [
+    "default-src 'none'",
+    `script-src ${o} 'unsafe-inline'`,
+    `style-src ${o} 'unsafe-inline'`,
+    `img-src ${o} data: blob:`,
+    `font-src ${o} data:`,
+    `media-src ${o} data: blob:`,
+    "connect-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'self'",
+  ].join("; ");
+}
+
+/** Give every app frame the `sbx` bridge whether or not its author asked for it. */
+function injectBridge(html, slug, id, kind) {
+  const tag = `<script src="/static/js/os/bridge.js" data-slug="${slug}" data-app="${id}" data-kind="${kind}"></script>`;
+  return /<head[^>]*>/i.test(html)
+    ? html.replace(/<head[^>]*>/i, (m) => `${m}\n${tag}`)
+    : `${tag}\n${html}`;
 }
 
 function readBody(req) {
@@ -520,6 +563,7 @@ async function handle(req, res) {
       return sendJson(res, 409, { ok: false, error: "cannot delete the last sandbox" });
     if (scheduler.isRunning(sb.id)) await scheduler.hibernate(sb);
     try { await getCell(sb).destroy(); } catch {}
+    destroyOs(sb); // the desktop, and every custom app's source, go with the machine
     _dropKernel(sb.id);
     deleteSandbox(sb.id);
     return sendJson(res, 200, { ok: true, deleted: sb.slug });
@@ -1115,6 +1159,139 @@ async function handle(req, res) {
       args: { refs: [`secret://${segments[3]}`], cmd, ...(timeoutMs != null ? { timeoutMs } : {}) },
     });
     return sendJson(res, r.ok ? 200 : 500, r.ok ? { ok: true, ...r.result } : { ok: false, error: r.error });
+  }
+
+  // ── The OS experience ─────────────────────────────────────────────────────
+  // Everything that CHANGES the desktop goes through /:slug/mcp → desktop.* so it
+  // is authorized and audited like every other call. These routes are the parts a
+  // browser cannot get that way: the shell itself, a live change feed, compiled
+  // CSS, and the files of apps the user (or their agent) wrote.
+
+  // GET /:slug/os — the full-screen OS. GET /:slug/studio — the builder.
+  if (action === "os" && !segments[3] && req.method === "GET") {
+    scheduler.wake(sandbox, getQuota(principal.tenant_id)).catch(() => {});
+    return sendFile(res, path.join(PUBLIC, "os.html"));
+  }
+  if (action === "studio" && !segments[3] && req.method === "GET") {
+    scheduler.wake(sandbox, getQuota(principal.tenant_id)).catch(() => {});
+    return sendFile(res, path.join(PUBLIC, "studio.html"));
+  }
+
+  // GET /:slug/os/doc — the document plus catalogs, in one round trip.
+  if (action === "os" && segments[3] === "doc" && req.method === "GET") {
+    const r = await kernel.call({ principalId: principal.id, heldPatterns: held, server: "desktop", tool: "get", args: {} });
+    return sendJson(res, r.ok ? 200 : 403, r.ok ? { ok: true, ...r.result } : { ok: false, error: r.error });
+  }
+
+  // GET /:slug/os/events — live desktop changes (SSE). Every desktop.* write lands
+  // here, whoever made it: a second tab, the Studio, or an agent three steps into a
+  // plan. This is what makes "the agent restyled it" appear rather than need a reload.
+  if (action === "os" && segments[3] === "events" && req.method === "GET") {
+    if (!authorize(held, "desktop", "get")) return sendJson(res, 403, { ok: false, error: "denied: desktop.get" });
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive",
+    });
+    const current = loadOs(sandbox);
+    res.write(`event: hello\ndata: ${JSON.stringify({ slug, rev: current.rev })}\n\n`);
+    const bus = osEvents(sandbox.id);
+    const onChange = (ev) => res.write(`data: ${JSON.stringify(ev)}\n\n`);
+    bus.on("change", onChange);
+    const keepalive = setInterval(() => res.write(": ping\n\n"), 25_000);
+    req.on("close", () => { bus.off("change", onChange); clearInterval(keepalive); });
+    return;
+  }
+
+  // GET /:slug/os/theme.css — the active theme and motion, compiled.
+  // Served as a stylesheet rather than inlined by the client so the OS, the Studio
+  // preview and every custom app frame can all link the same one and stay in step.
+  if (action === "os" && segments[3] === "theme.css" && req.method === "GET") {
+    if (!authorize(held, "desktop", "get")) return sendJson(res, 403, { ok: false, error: "denied: desktop.get" });
+    const d = loadOs(sandbox);
+    const css = themeCss(resolveTheme(d)) + animationCss(resolveAnimation(d));
+    res.writeHead(200, {
+      "Content-Type": "text/css; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Content-Length": Buffer.byteLength(css),
+    });
+    return res.end(css);
+  }
+
+  // POST /:slug/os/apps/:id/session — open a capability session for an app frame.
+  //
+  // A custom app is code we did not write, running in an opaque-origin iframe. It
+  // never receives a credential: the OS shell brokers its MCP calls with the token
+  // minted here, which holds the INTERSECTION of what the app declared and what the
+  // person opening it actually has. Ask for more than your opener holds and the
+  // extra simply does not arrive (`withheld`); ask for nothing and no token exists
+  // to steal.
+  if (action === "os" && segments[3] === "apps" && segments[4] && segments[5] === "session" && req.method === "POST") {
+    const d = loadOs(sandbox);
+    const desc = appDescriptor(d, segments[4]) ?? widgetDescriptor(d, segments[4]);
+    if (!desc) return sendJson(res, 404, { ok: false, error: `no such app: ${segments[4]}` });
+    const granted = effectivePermissions(desc.permissions ?? [], held);
+    const withheld = withheldPermissions(desc.permissions ?? [], held);
+    if (!granted.length) return sendJson(res, 200, { ok: true, token: null, patterns: [], withheld });
+    try {
+      const minted = mintMachineToken(principal.id, sandbox.id, granted, {
+        label: `app-${segments[4]}`, ttlMs: 6 * 60 * 60 * 1000,
+      });
+      return sendJson(res, 200, { ok: true, token: minted.token, patterns: minted.patterns, withheld });
+    } catch (e) {
+      return sendJson(res, 400, { ok: false, error: e.message });
+    }
+  }
+
+  // GET /:slug/os/apps/:id/<path> · GET /:slug/os/widgets/:kind/<path>
+  // The source of a custom app or widget, served into a sandboxed frame under a
+  // closed CSP. `connect-src 'none'` is deliberate: an app talks to the machine
+  // through the shell's broker, never straight out of the frame.
+  if (action === "os" && (segments[3] === "apps" || segments[3] === "widgets") && segments[4] && req.method === "GET") {
+    const isWidget = segments[3] === "widgets";
+    const d = loadOs(sandbox);
+    const desc = isWidget ? widgetDescriptor(d, segments[4]) : appDescriptor(d, segments[4]);
+    if (!desc || desc.builtin || desc.source?.type !== "bundle") {
+      return sendJson(res, 404, { ok: false, error: `no bundle for ${segments[4]}` });
+    }
+    if (!authorize(held, "desktop", "get")) return sendJson(res, 403, { ok: false, error: "denied: desktop.get" });
+
+    const rest = segments.slice(5).filter(Boolean).join("/");
+    const wanted = safeRelPath(rest || desc.source.entry);
+    if (!wanted) return sendJson(res, 400, { ok: false, error: "invalid path" });
+
+    let body, type;
+    if (desc.source.origin === "volume") {
+      // The app's source is ordinary files in the Cell — editable in the Files
+      // panel, versioned by Tide, and read here with the same containment check
+      // the raw file endpoint uses.
+      if (!authorize(held, "fs", "read")) return sendJson(res, 403, { ok: false, error: "denied: fs.read" });
+      const cell = getCell(sandbox);
+      await cell.ensureRunning();
+      try {
+        const file = await canonicalContained(cell.root, `${desc.source.volumePath}/${wanted}`);
+        body = fs.readFileSync(file);
+      } catch { return sendJson(res, 404, { ok: false, error: "not found" }); }
+      type = bundleType(wanted) ?? "application/octet-stream";
+    } else {
+      try {
+        const f = readBundleFile(sandbox, isWidget ? "widget" : "app", segments[4], wanted, { encoding: null });
+        body = f.content;
+        type = f.type;
+      } catch { return sendJson(res, 404, { ok: false, error: "not found" }); }
+    }
+
+    // The entry document gets the bridge injected, so `sbx` exists in every frame
+    // whether or not the author remembered to ask for it.
+    if (type?.startsWith("text/html")) {
+      body = Buffer.from(injectBridge(body.toString("utf8"), slug, segments[4], isWidget ? "widget" : "app"));
+    }
+    res.writeHead(200, {
+      "Content-Type": type ?? "application/octet-stream",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": frameCsp(req),
+      "Content-Length": body.length,
+    });
+    return res.end(body);
   }
 
   // GET /:slug/apps — list installed apps.

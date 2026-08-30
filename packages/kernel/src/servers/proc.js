@@ -10,6 +10,8 @@
 // Everything runs *inside the Cell* and goes through the Kernel, so even "run a
 // shell command" is an authorized, audited MCP call rather than a raw PTY bypass.
 
+import { notifyJobEnded } from "../../../os/src/notify.js";
+
 // Supervised processes, keyed by Sandbox id → job id → record. Module-level (not
 // per-server-instance) because the Kernel rebuilds its server set whenever the
 // manifest changes, and a running dev server must survive that.
@@ -146,6 +148,10 @@ export function procServer(cell, sandbox) {
               rec.state = rec.state === "stopped" ? "stopped" : ev.code === 0 ? "exited" : "failed";
               rec.code = ev.code;
               rec.exitedAt = Date.now();
+              // A build that finishes while you are looking elsewhere should still
+              // be waiting for you when you come back. No-op on a Sandbox that has
+              // never been opened as an OS.
+              notifyJobEnded(sandbox, jobView(rec));
             }
           }, { timeoutMs: args.timeoutMs ?? 24 * 60 * 60 * 1000 });
 

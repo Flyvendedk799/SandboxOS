@@ -70,6 +70,15 @@ Activity dock beside yours.
 \`⌘K\` searches every workspace, file, action and MCP tool at once.
 \`help\` in the console prints the whole verb map.
 
+## Or use it as a desktop
+
+Press **Desktop** in the top bar (\`⌘⇧O\`) and the same machine opens as an
+operating system: windows, widgets, workspaces, a dock. Nothing about it is
+fixed — the theme, the motion, the layout and the apps themselves are one JSON
+document you can edit in the **Studio** (\`/<your-slug>/studio\`) or ask the agent
+to change for you. An app you or your agent writes is real code this machine
+serves into a sandboxed frame, with exactly the capabilities it declares.
+
 Delete this file whenever you like — it is just a file.
 `;
 
