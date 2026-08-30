@@ -24,6 +24,7 @@ export function defaultManifest(name = "primary") {
       apps: {},
       ports: {},
       metrics: {},
+      desktop: {},
       "mcp-registry": {},
       kernel: {},
     },
@@ -36,12 +37,35 @@ export function manifestPath(sandbox) {
   return path.join(path.dirname(sandbox.volume_path), "Sandboxfile.json");
 }
 
+/**
+ * Servers introduced after a manifest may have been written. Each is enabled
+ * exactly once, and the fact that we did it is recorded — so a machine that has
+ * deliberately removed one does not get it back on every boot. Adding a new core
+ * server to SandboxOS should not require every existing Sandbox to be rebuilt.
+ */
+const LATE_SERVERS = { desktop: {} };
+
+function migrateManifest(sandbox, m) {
+  let changed = false;
+  m.migrated ??= {};
+  for (const [name, cfg] of Object.entries(LATE_SERVERS)) {
+    if (m.migrated[name]) continue;
+    m.servers ??= {};
+    m.servers[name] ??= cfg;
+    m.migrated[name] = true;
+    changed = true;
+  }
+  if (changed) saveManifest(sandbox, m);
+  return m;
+}
+
 export function loadManifest(sandbox) {
   const file = manifestPath(sandbox);
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
+    return migrateManifest(sandbox, JSON.parse(fs.readFileSync(file, "utf8")));
   } catch {
     const m = defaultManifest(sandbox.name);
+    m.migrated = Object.fromEntries(Object.keys(LATE_SERVERS).map((k) => [k, true]));
     saveManifest(sandbox, m);
     return m;
   }

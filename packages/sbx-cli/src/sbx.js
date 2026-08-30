@@ -218,6 +218,124 @@ async function cmdApp(args) {
   }
 }
 
+// ── os subcommands ────────────────────────────────────────────────────────
+// The desktop is a document, so the terminal can drive it like anything else:
+// open a window on your machine from a script, restyle it from CI, or package
+// the whole thing as a distro without touching a browser.
+
+async function cmdOs(args) {
+  const cfg = loadConfig();
+  if (!cfg.token) die("not logged in");
+  const sub = args[0] ?? "show";
+
+  const desktop = async (tool, toolArgs = {}) => {
+    const res = await api(cfg, `/${cfg.slug}/mcp`, {
+      method: "POST", body: { server: "desktop", tool, args: toolArgs },
+    });
+    const d = await res.json();
+    if (!d.ok) die(d.error || `desktop.${tool} failed`);
+    return d.result;
+  };
+
+  switch (sub) {
+    case "show": {
+      const s = await desktop("get");
+      const d = s.doc;
+      console.log(`${d.name}  r${d.rev}  ${d.theme.base} · ${d.animation.preset} · ${d.wm.mode}`);
+      console.log(`workspaces ${d.workspaces.length} · windows ${d.windows.length} · widgets ${d.widgets.length} · custom apps ${Object.keys(d.apps).length}`);
+      for (const w of d.windows) {
+        console.log(`  ${w.id.padEnd(16)} ${w.app.padEnd(12)} ws${w.ws} ${w.x},${w.y} ${w.w}x${w.h}${w.min ? " (min)" : ""}`);
+      }
+      break;
+    }
+    case "open": {
+      if (!args[1]) die("usage: sbx os open <app>");
+      const r = await desktop("open", { app: args[1] });
+      console.log(`opened ${r.window.app} as ${r.window.id}`);
+      break;
+    }
+    case "close":
+      if (!args[1]) die("usage: sbx os close <window-id>");
+      await desktop("close", { id: args[1] });
+      console.log("closed");
+      break;
+    case "widget":
+      if (!args[1]) die("usage: sbx os widget <kind>");
+      console.log(`placed ${(await desktop("widgetAdd", { kind: args[1] })).widget.id}`);
+      break;
+    case "theme": {
+      if (!args[1]) {
+        for (const t of (await desktop("themeList")).themes) console.log(`${t.key.padEnd(12)} ${t.name}${t.builtin ? "" : "  (custom)"}`);
+        break;
+      }
+      console.log(`theme → ${(await desktop("themeSet", { theme: args[1] })).theme.name}`);
+      break;
+    }
+    case "motion":
+      if (!args[1]) die("usage: sbx os motion <preset>");
+      console.log(`motion → ${(await desktop("animationSet", { preset: args[1] })).animation.name}`);
+      break;
+    case "layout":
+      if (!args[1]) die("usage: sbx os layout <floating|tiling>");
+      await desktop("layoutSet", { mode: args[1] });
+      console.log(`layout → ${args[1]}`);
+      break;
+    case "snap": {
+      if (!args[1] || !args[2]) die("usage: sbx os snap <window-id> <left|right|full|topleft|…> [WxH]");
+      const [vw, vh] = String(args[3] ?? "1440x900").split("x").map(Number);
+      const r = await desktop("snap", { id: args[1], region: args[2], viewport: { w: vw, h: vh } });
+      console.log(`${r.window.x},${r.window.y} ${r.window.w}x${r.window.h}`);
+      break;
+    }
+    case "assoc": {
+      if (!args[1]) {
+        const d = (await desktop("state")).doc;
+        for (const [ext, app] of Object.entries(d.shell.associations ?? {})) console.log(`${ext.padEnd(12)} ${app}`);
+        break;
+      }
+      const r = await desktop("associate", { ext: args[1], app: args[2] ?? null });
+      console.log(args[2] ? `${args[1]} → ${args[2]}` : `${args[1]} cleared`);
+      void r;
+      break;
+    }
+    case "apps":
+      for (const a of (await desktop("appList")).apps) {
+        console.log(`${a.id.padEnd(16)} ${a.kind.padEnd(8)} ${a.name}${a.permissions?.length ? `  [${a.permissions.join(",")}]` : ""}`);
+      }
+      break;
+    case "history":
+      for (const rev of (await desktop("history")).revisions) {
+        console.log(`r${String(rev.rev).padEnd(5)} ${new Date(rev.ts).toISOString()}  ${rev.label}`);
+      }
+      break;
+    case "revert":
+      if (!args[1]) die("usage: sbx os revert <rev>");
+      console.log(`now at r${(await desktop("revert", { rev: Number(args[1]) })).rev}`);
+      break;
+    case "publish": {
+      if (!args[1]) die("usage: sbx os publish <name>");
+      const r = await desktop("distroPublish", { name: args[1], replace: true });
+      console.log(`published ${r.name} (${r.apps} custom apps)`);
+      break;
+    }
+    case "fork":
+      if (!args[1]) die("usage: sbx os fork <distro>");
+      await desktop("distroFork", { id: args[1] });
+      console.log(`forked ${args[1]}`);
+      break;
+    case "export":
+      console.log(JSON.stringify((await desktop("distroExport")).payload, null, 2));
+      break;
+    case "notify":
+      if (!args[1]) die('usage: sbx os notify "<title>" ["<body>"]');
+      await desktop("notify", { title: args[1], body: args[2] ?? "", app: "sbx" });
+      console.log("sent");
+      break;
+    default:
+      die(`unknown os subcommand: ${sub}`);
+  }
+}
+
 // ── secret subcommands ────────────────────────────────────────────────────
 
 async function cmdSecret(args) {
@@ -689,6 +807,12 @@ const HELP = `sbx — drive a SandboxOS machine from anywhere.
   ports       port list · port expose <port> [name] · port close <port> · port scan
   agents      agent <list|spawn|get|kill> …
 
+  desktop     os show · os open <app> · os close <id> · os widget <kind>
+              os theme [key] · os motion <preset> · os layout <floating|tiling>
+              os snap <id> <region> [WxH] · os assoc [.ext] [app]
+              os apps · os history · os revert <rev>
+              os publish <name> · os fork <distro> · os export · os notify "<title>"
+
   state       secret <list|set|rm|use> · app <list|install> · distro <list|create|delete|snapshot>
   observe     metrics · audit [n] · watch
   admin       access <list|share|revoke> · quota [get|set …] · backup [file.db]
@@ -706,6 +830,7 @@ switch (cmd) {
   case "agent": await cmdAgent(args); break;
   case "sandbox": await cmdSandbox(args); break;
   case "app": await cmdApp(args); break;
+  case "os": await cmdOs(args); break;
   case "secret": await cmdSecret(args); break;
   case "stream": await cmdStream(args); break;
   case "distro": await cmdDistro(args); break;

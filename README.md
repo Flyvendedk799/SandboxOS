@@ -1,9 +1,10 @@
 # SandboxOS
 
 > An AI-first, web-based, MCP-native operating system. Every user gets an isolated
-> machine at a URL slug, controls it from anywhere through **Command Central**, and
-> moves data between cloud and local through **Tide** — a versioned, live-syncing
-> protocol that is git-like but built for agents.
+> machine at a URL slug, controls it from anywhere through **Command Central**, works
+> inside it on **a desktop they and their agent can rebuild**, and moves data between
+> cloud and local through **Tide** — a versioned, live-syncing protocol that is
+> git-like but built for agents.
 
 ---
 
@@ -16,9 +17,11 @@ files, processes, network, secrets, packages, the scheduler, even the OS's own
 configuration — is an MCP server. Agents speak MCP natively, so SandboxOS is the
 first operating system whose *system call interface is a tool-calling protocol*. You
 command it through **Command Central** (a console reachable from any browser or the
-`sbx` CLI), and you keep your laptop and your sandbox in lockstep through **Tide**.
+`sbx` CLI), you *live* in it through **the OS** — a real desktop whose every window,
+widget, theme and app is a document you and your agent can rewrite — and you keep your
+laptop and your sandbox in lockstep through **Tide**.
 
-## The four pillars
+## The five pillars
 
 1. **MCP is the kernel ABI.** Not an add-on — the contract. Everything is an MCP
    server; permissions are which MCP tools a caller may invoke. See
@@ -31,6 +34,10 @@ command it through **Command Central** (a console reachable from any browser or 
 4. **Tide moves everything.** Versioned core (push/pull/diff) + live mirror
    (real-time bidirectional), pick per workspace. See
    [`docs/05-tide-protocol.md`](docs/05-tide-protocol.md).
+5. **The desktop is a document.** Windows, widgets, theme, motion and the apps
+   themselves are one JSON object changed only through `desktop.*` Kernel calls — so
+   the OS you see is buildable, revertible, forkable, and as available to your agent as
+   it is to you. See [`docs/15-os-experience.md`](docs/15-os-experience.md).
 
 ---
 
@@ -60,8 +67,8 @@ npx sbx ask "start a static server on 8080 and expose it"
 
 ## What ships today
 
-The spine is alive and has grown into a machine you can work in. Roughly Phases 0–4 of
-the roadmap, plus the desktop.
+The spine is alive and has grown into a machine you can work in — and, since Phase 27,
+one you can live in. Roughly Phases 0–4 of the roadmap, plus Command Central and the OS.
 
 ### The Kernel
 
@@ -81,6 +88,7 @@ Every call goes **authenticate → authorize (default-deny) → route → execut
 | `llm` | complete · models |
 | `metrics` | snapshot · history · activity · recent |
 | `apps` | install · list · launch · remove |
+| `desktop` | the OS itself: windows · widgets · workspaces · dock · themes · motion · custom apps · distros |
 | `tide` | init · status · mark · log · diff · checkout · state objects · push/pull wire primitives |
 | `mcp-registry` | list · enable · disable · configure · install · uninstall |
 | `kernel` | whoami · capabilities · tools · auditQuery · manifestGet · manifestSet |
@@ -100,7 +108,51 @@ open with the Claude Code identity block, or Anthropic refuses Sonnet and Opus w
 on a plan nowhere near its limit, while Haiku answers fine. See
 [`packages/ai-auth/README.md`](packages/ai-auth/README.md) for the rest of them.
 
-### The desktop
+### The OS
+
+`sandboxos.dev/tobias/os` is not a dashboard for the machine. It *is* the machine, as a
+place: windows, widgets, workspaces, a dock, a menu bar, spotlight — and every one of
+those is yours to change, because **the desktop is a document**. One JSON object per
+Sandbox holds the whole thing, it lives beside the Cell, and the only way to change it
+is a `desktop.*` Kernel call.
+
+Which means your agent has exactly the powers over your desktop that you do, through
+exactly the same audited door. "Add a weather widget bottom-right, warm the palette up,
+and write me a small app that lists my exposed ports" is six tool calls — and every one
+of them is revertible from the revision history.
+
+- **Windows** — floating or tiling, drag, resize, edge-snap to halves and quarters,
+  minimise, zoom, across workspaces, all of it on the keyboard. Below 720px the whole
+  thing folds into a stack: same document, one front window, dock along the bottom.
+- **Apps** — nine built in (Files, **Terminal** — a real PTY, Console, Notes,
+  Assistant, Observability, Media, Browser, Settings), each a real client of the
+  Kernel. A *custom* app is HTML/CSS/JS you or your agent wrote, served into a
+  sandboxed opaque-origin frame with `connect-src 'none'` and a token attenuated to
+  the intersection of what the app declared and what you hold. The frame never sees a
+  credential — and when its source changes, the open window reloads itself.
+- **Widgets** — clock, load, calendar, weather, audit feed, processes, quick actions,
+  notes — all reading the real machine, and saying so when a reading is unavailable
+  rather than inventing one. Custom widget kinds work the same way apps do.
+- **Themes and motion** — six themes plus your own; compiled server-side to CSS custom
+  properties and keyframes so the OS, the Studio and every app frame stay in step.
+  Colours must be colours and motion presets are numbers, not CSS: the document is
+  agent-writable, so both grammars are closed.
+- **Notifications** — a supervised process ending and an agent coming back both land in
+  the notification centre, so the two things you delegate and stop watching are still
+  waiting when you open the tab tomorrow. Notifying never creates a desktop: a machine
+  nobody has opened as an OS stays without one.
+- **Distros** — publish your whole OS, source of your custom apps included, and anyone
+  in your tenant forks *your machine* rather than a screenshot of it. Export it to a
+  file and it leaves the tenant entirely. Five seeds ship; a new Sandbox wakes up
+  wearing Developer Box.
+
+**The Studio** (`/tobias/studio`) builds it: Library, Layers, Theme, a Code editor for
+any custom app, an Inspector, and the build agent — with the live OS as its stage. Not
+a preview of the desktop; the desktop.
+
+See [`docs/15-os-experience.md`](docs/15-os-experience.md).
+
+### Command Central
 
 A dependency-free ES-module app behind the Gateway, in light and dark. A brand-new
 Sandbox is seeded with a `WELCOME.md` that walks you through its first five minutes.
@@ -172,19 +224,21 @@ for await (const ev of sbx.assistant.ask("summarise today's changes")) {
 | 12 | [Roadmap](docs/12-roadmap.md) | Phase 0 → year 10 |
 | 13 | [Open questions & risks](docs/13-open-questions.md) | What we deliberately deferred |
 | 14 | [Surface map](docs/14-surface-map.md) | Every route, tool and command that exists today |
+| 15 | [The OS experience](docs/15-os-experience.md) | The desktop as a document, and the builder for it |
 
 Architecture Decision Records live in [`docs/adr/`](docs/adr). Each build phase has its
-own note: `PHASE0.md` … `PHASE24.md`.
+own note: `PHASE0.md` … `PHASE27.md`.
 
 ## Layout
 
 ```
-apps/gateway         the front door: slug routing, auth, proxying, the desktop
+apps/gateway         the front door: slug routing, auth, proxying, Command Central, the OS
 packages/kernel      the MCP router + the core servers
 packages/cell        four execution backends behind one interface
 packages/assistant   the streaming tool-use loop
 packages/agents      supervised, capability-scoped agents
 packages/ai-auth     bring-your-own-credential auth: API keys and subscription logins
+packages/os          the OS: the desktop document, themes, app bundles, distros
 packages/tide        the versioned + live sync protocol
 packages/control-db  the control plane's SQLite schema and queries
 packages/sbx-cli     the sbx binary

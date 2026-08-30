@@ -17,6 +17,7 @@ import {
   runningAgentCount, runningAgentCountGlobal,
 } from "../../control-db/src/registry.js";
 import { runAI } from "./ai-runner.js";
+import { notifyAgentEnded } from "../../os/src/notify.js";
 
 const maxConcurrentAgents = () => Number(process.env.SANDBOXOS_MAX_AGENTS ?? 10);
 // Backlog #13: a host-wide ceiling on concurrent agents, independent of the per-sandbox
@@ -89,8 +90,18 @@ export function agentsServer(deps) {
             systemPrompt: a.system,
           });
 
+          // An agent is work you delegated and stopped watching. When it comes
+          // back, the machine should say so — on the desktop, where it will still
+          // be tomorrow. A Sandbox never opened as an OS gets nothing.
+          const announce = () => {
+            const finished = getAgent(agent.id);
+            if (finished && finished.state !== "running" && finished.state !== "queued") {
+              notifyAgentEnded(sandbox, finished, finished.state);
+            }
+          };
+
           if (kind === "shell") {
-            _runShell(agent.id, a.cmd).catch(() => {});
+            _runShell(agent.id, a.cmd).catch(() => {}).finally(announce);
           } else {
             runAI(agent.id, {
               agentPrincipalId: minted.principalId,
@@ -100,7 +111,7 @@ export function agentsServer(deps) {
               systemPrompt: a.system ?? "",
               kernel: ctx.kernel,
               sandbox,
-            }).catch(() => {});
+            }).catch(() => {}).finally(announce);
           }
           return { id: agent.id, state: "queued", kind, patterns: minted.patterns };
         },

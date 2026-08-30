@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>SandboxOS</title>
+  <link rel="icon" href="/favicon.ico" />
+  <link rel="stylesheet" href="/static/os.css" />
+  <!-- The machine's own theme is compiled from its OS document and linked at
+       runtime by js/os/client.js, so it can change without a reload. -->
+</head>
+<body class="os-fullscreen">
+  <div id="os-root" style="height:100%"></div>
+  <div class="toasts" id="toasts"></div>
+  <div id="overlays"></div>
+  <script type="module" src="/static/js/os/os.js"></script>
+</body>
+</html>

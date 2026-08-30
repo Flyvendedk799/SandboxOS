@@ -286,6 +286,10 @@ const MIGRATIONS = [
   // key scheme a secret's ciphertext was sealed under: 0 = legacy single master key,
   // 1 = per-tenant HKDF-derived key. Default 0 so pre-existing rows decrypt correctly.
   "ALTER TABLE secrets ADD COLUMN key_version INTEGER NOT NULL DEFAULT 0",
+  // Phase 27: a distro may now carry a whole OS — the desktop document plus the
+  // source of every custom app it needs. Nullable, so the Phase-4 manifest-only
+  // distros keep working exactly as they did.
+  "ALTER TABLE distros ADD COLUMN os TEXT",
 ];
 
 // Backlog #14 (migration hardening): only swallow the benign "column/table already

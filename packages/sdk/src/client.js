@@ -44,6 +44,7 @@ export class SandboxClient {
     this.ports = new PortsApi(this);
     this.agents = new AgentsApi(this);
     this.secrets = new SecretsApi(this);
+    this.desktop = new DesktopApi(this);
     this.assistant = new AssistantApi(this);
   }
 
@@ -204,6 +205,55 @@ class SecretsApi {
       refs: names.map((n) => (n.startsWith("secret://") ? n : `secret://${n}`)), cmd, ...opts,
     });
   }
+}
+
+/** The OS itself. Everything here is a `desktop.*` call, which is the same door
+ *  the desktop's own front end and any agent use — there is no other one. */
+class DesktopApi {
+  constructor(c) { this.c = c; }
+
+  /** Document + resolved theme/motion + the app, widget, theme and distro catalogs. */
+  get() { return this.c.call("desktop", "get", {}); }
+  state() { return this.c.call("desktop", "state", {}).then((r) => r.doc); }
+  patch(patch, opts = {}) { return this.c.call("desktop", "patch", { patch, ...opts }); }
+
+  open(app, opts = {}) { return this.c.call("desktop", "open", { app, ...opts }).then((r) => r.window); }
+  close(id) { return this.c.call("desktop", "close", { id }); }
+  move(id, x, y) { return this.c.call("desktop", "move", { id, x, y }); }
+  resize(id, w, h) { return this.c.call("desktop", "resize", { id, w, h }); }
+  arrange(preset, opts = {}) { return this.c.call("desktop", "arrange", { preset, ...opts }); }
+  layout(mode, opts = {}) { return this.c.call("desktop", "layoutSet", { mode, ...opts }); }
+  snap(id, region, viewport) { return this.c.call("desktop", "snap", { id, region, ...(viewport ? { viewport } : {}) }); }
+  cycleFocus(direction = "next") { return this.c.call("desktop", "cycleFocus", { direction }); }
+  showDesktop(restore = false) { return this.c.call("desktop", "minimizeAll", { restore }); }
+  /** Which app opens a file extension. Pass app=null to clear. */
+  associate(ext, app) { return this.c.call("desktop", "associate", { ext, app }); }
+
+  widgets() { return this.c.call("desktop", "widgetList", {}).then((r) => r.widgets); }
+  addWidget(kind, opts = {}) { return this.c.call("desktop", "widgetAdd", { kind, ...opts }).then((r) => r.widget); }
+  removeWidget(id) { return this.c.call("desktop", "widgetRemove", { id }); }
+
+  theme(theme, tokens) { return this.c.call("desktop", "themeSet", { theme, ...(tokens ? { tokens } : {}) }); }
+  animation(preset) { return this.c.call("desktop", "animationSet", { preset }); }
+  notify(title, body, kind = "info") { return this.c.call("desktop", "notify", { title, body, kind }); }
+
+  /** Define a custom app and write its source — how an agent builds UI. */
+  apps() { return this.c.call("desktop", "appList", {}).then((r) => r.apps); }
+  defineApp(def) { return this.c.call("desktop", "appDefine", def).then((r) => r.app); }
+  removeApp(id, opts = {}) { return this.c.call("desktop", "appRemove", { id, ...opts }); }
+  appFiles(id) { return this.c.call("desktop", "appFiles", { id }).then((r) => r.files); }
+  readApp(id, path) { return this.c.call("desktop", "appRead", { id, path }).then((r) => r.content); }
+  writeApp(id, path, content) { return this.c.call("desktop", "appWrite", { id, path, content }); }
+
+  /** Undo. Every desktop change is a revision. */
+  history() { return this.c.call("desktop", "history", {}).then((r) => r.revisions); }
+  revert(rev) { return this.c.call("desktop", "revert", { rev }); }
+
+  distros() { return this.c.call("desktop", "distroList", {}).then((r) => r.distros); }
+  publish(name, description) { return this.c.call("desktop", "distroPublish", { name, description, replace: true }); }
+  fork(idOrName) { return this.c.call("desktop", "distroFork", { id: idOrName }); }
+  export() { return this.c.call("desktop", "distroExport", {}).then((r) => r.payload); }
+  import(payload, name) { return this.c.call("desktop", "distroImport", { payload, ...(name ? { name } : {}) }); }
 }
 
 class AssistantApi {
