@@ -49,6 +49,13 @@ function cascadeFor(doc, ws) {
 /** An imported distro is untrusted input; bound it before it becomes disk. */
 const MAX_PAYLOAD_BYTES = 8 * 1024 * 1024;
 
+/** Props merge shallowly; a null value removes the key (the same convention as `patch`). */
+function mergeProps(current, patch) {
+  const out = { ...(current ?? {}) };
+  for (const [k, v] of Object.entries(patch ?? {})) { if (v === null) delete out[k]; else out[k] = v; }
+  return out;
+}
+
 const findWindow = (doc, id) => doc.windows.find((w) => w.id === id);
 const findWidget = (doc, id) => doc.widgets.find((g) => g.id === id);
 
@@ -681,7 +688,7 @@ export function desktopServer(deps) {
               if (!d.workspaces.some((x) => x.n === Number(a.ws))) throw new Error(`no such workspace: ${a.ws}`);
               w.ws = Number(a.ws);
             }
-            if (a.props) w.props = { ...w.props, ...a.props };
+            if (a.props) w.props = mergeProps(w.props, a.props);
             if (a.back) {
               // Everything else steps up by one; this window takes the floor.
               const floor = Math.min(...d.windows.map((x) => x.z));
@@ -908,7 +915,7 @@ export function desktopServer(deps) {
               if (!d.workspaces.some((x) => x.n === Number(a.ws))) throw new Error(`no such workspace: ${a.ws}`);
               g.ws = Number(a.ws);
             }
-            if (a.props) g.props = { ...g.props, ...a.props };
+            if (a.props) g.props = mergeProps(g.props, a.props);
           }, "widgetSet", "widget", a.expectRev ?? null);
           return { ok: true, widget: findWidget(next, a.id), rev: next.rev };
         },
@@ -1113,6 +1120,17 @@ export function desktopServer(deps) {
           mutate((x) => { x.widgetKinds[a.kind].updatedAt = Date.now(); }, "widgetWrite", `widget ${a.kind} · ${w.path}`);
           announce(sandbox.id, "widgetFiles", { kind: a.kind, path: w.path });
           return { ok: true, ...w };
+        },
+      },
+
+      widgetDelete: {
+        description: "Delete one file from a custom widget's source.",
+        inputSchema: obj({ kind: S, path: S }, ["kind", "path"]),
+        async handler(_ctx, a) {
+          if (!doc().widgetKinds[a.kind]) throw new Error(`no such custom widget kind: ${a.kind}`);
+          const r = removeBundleFile(sandbox, "widget", a.kind, a.path);
+          announce(sandbox.id, "widgetFiles", { kind: a.kind, path: r.path });
+          return { ok: true, ...r };
         },
       },
 

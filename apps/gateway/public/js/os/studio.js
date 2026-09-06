@@ -11,6 +11,7 @@ import { mountSprite } from "./sprite.js";
 import { os, loadOs, connect, onOs, call, select } from "./client.js";
 import { createScreen } from "./shell.js";
 import { createBuilder, createInspector } from "./builder.js";
+import { createStudioPalette } from "./palette.js";
 import { createAgentPanel, mountAssistantWindow } from "./agent.js";
 import { startBroker } from "./frames.js";
 
@@ -25,9 +26,25 @@ let agentOpen = localStorage.getItem("sbx.studio.agent") !== "0";
 
 // ── panels ──────────────────────────────────────────────────────────────────
 
-const builder = createBuilder({ onOpenCode: (kind, id) => builder.openCode(kind, id) });
+const builder = createBuilder({ onOpenCode: (kind, id, path) => builder.openCode(kind, id, path) });
 const inspector = createInspector();
-const agent = createAgentPanel({ onClose: () => { agentOpen = false; persist(); layout(); } });
+inspector.onOpenCode = (kind, id) => builder.openCode(kind, id);
+
+/** Agent tool cards deep-link into the builder: what it wrote, where it put it. */
+function linkForTool({ tool, args, result }) {
+  if (tool === "appWrite" && args?.id) return { label: "open in Code", auto: true, run: () => builder.openCode("app", args.id, args.path) };
+  if (tool === "widgetWrite" && args?.kind) return { label: "open in Code", auto: true, run: () => builder.openCode("widget", args.kind, args.path) };
+  if (tool === "appDefine" && args?.id) return { label: "open in Code", auto: false, run: () => builder.openCode("app", args.id) };
+  if ((tool === "open" || tool === "focus" || tool === "snap" || tool === "move" || tool === "resize") && result?.window?.id) {
+    return { label: "select", auto: tool === "open", run: () => { select(result.window.id, "win"); builder.setTab("layers"); } };
+  }
+  if (tool === "widgetAdd" && result?.widget?.id) return { label: "select", auto: true, run: () => { select(result.widget.id, "widget"); builder.setTab("layers"); } };
+  if (tool === "themeSet" || tool === "themeDefine" || tool === "wallpaperSet") return { label: "open Theme", auto: false, run: () => builder.setTab("theme") };
+  if (tool === "animationDefine" || tool === "animationSet") return { label: "open Motion", auto: false, run: () => builder.setTab("motion") };
+  if (tool === "revert" || tool === "history") return { label: "open Layers", auto: false, run: () => builder.setTab("layers") };
+  return null;
+}
+const agent = createAgentPanel({ onClose: () => { agentOpen = false; persist(); layout(); }, onTool: linkForTool });
 
 const screen = createScreen({
   ctx: {
@@ -93,11 +110,41 @@ function renderRail() {
     btn("library", "library", "Build"),
     btn("layers", "layers", "Layers"),
     btn("theme", "theme", "Theme"),
+    btn("motion", "play", "Motion"),
     btn("code", "code", "Code"),
     h("span.spacer"),
+    h("button.rail-btn", { title: "Studio actions (⌘⇧P)", onclick: () => palette.open() }, icon("apps", 17)),
     h("button.rail-btn", { title: "Search (⌘K)", onclick: () => screen.spotlight() }, icon("search", 17)),
   );
 }
+
+// ── the builder's width is chrome, not desktop truth: it lives in localStorage ──
+const sash = h("div.stx-sash", { title: "Drag to resize the builder" });
+let builderW = Number(localStorage.getItem("sbx.studio.builderW")) || 0;
+if (builderW) builder.el.style.width = `${builderW}px`;
+sash.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  const start = e.clientX, w0 = builder.el.getBoundingClientRect().width;
+  document.body.classList.add("sashing");
+  const onMove = (ev) => { builderW = Math.max(260, Math.min(900, w0 + ev.clientX - start)); builder.el.style.width = `${builderW}px`; };
+  const onUp = () => { window.removeEventListener("pointermove", onMove); document.body.classList.remove("sashing"); localStorage.setItem("sbx.studio.builderW", String(builderW)); };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp, { once: true });
+});
+
+const palette = createStudioPalette({
+  actions: () => [
+    ...builder.paletteActions(),
+    { name: "Design mode", sub: "Stage", icon: "layers", run: () => { stageMode = "design"; os.design = true; paint(); } },
+    { name: "Preview mode", sub: "Stage", icon: "eye", run: () => { stageMode = "preview"; os.design = false; select(null, null); paint(); } },
+    { name: "Split view", sub: "Studio", icon: "window", run: () => { view = "split"; persist(); layout(); } },
+    { name: "Builder only", sub: "Studio", icon: "window", run: () => { view = "builder"; persist(); layout(); } },
+    { name: "OS only", sub: "Studio", icon: "window", run: () => { view = "os"; persist(); layout(); } },
+    { name: agentOpen ? "Hide the agent" : "Show the agent", sub: "Studio", icon: "assistant", run: () => { agentOpen = !agentOpen; persist(); layout(); } },
+    { name: "Open the OS full screen", sub: "Studio", icon: "window", run: () => window.open(`/${slug}/os`, "_blank") },
+    { name: "Revert to a revision…", sub: "History", icon: "refresh", run: () => builder.setTab("layers") },
+  ],
+});
 
 function renderStageBar() {
   const d = os.doc;
@@ -131,6 +178,7 @@ function layout() {
   fill(body,
     rail,
     view !== "os" ? builder.el : null,
+    view === "split" ? sash : null,
     view !== "builder" ? stage : null,
     view !== "os" ? inspector.el : null,
     agentOpen ? agent.el : null,
@@ -188,6 +236,18 @@ onOs((kind) => {
 
 document.addEventListener("keydown", (e) => {
   if (!(e.metaKey || e.ctrlKey)) return;
+  if (e.shiftKey && e.key.toLowerCase() === "p") { e.preventDefault(); palette.open(); return; }
   if (e.shiftKey && e.key.toLowerCase() === "o") { e.preventDefault(); location.href = `/${slug}/os`; }
   if (e.shiftKey && e.key.toLowerCase() === "c") { e.preventDefault(); location.href = `/${slug}`; }
 });
+
+// Unsaved files in Code are the one thing the Studio holds that the document
+// does not; leaving the page should ask.
+window.addEventListener("beforeunload", (e) => { if (builder.dirty) { e.preventDefault(); e.returnValue = ""; } });
+
+// A deep link (#code=app:port-monitor/index.html) from Spotlight or a tool card.
+(function deepLink() {
+  const m = /^#code=(app|widget):([a-z0-9_-]+)(?:\/(.+))?$/.exec(location.hash);
+  if (!m) return;
+  const off = onOs(() => { if (!os.doc) return; off(); builder.openCode(m[1], m[2], m[3] ?? null); });
+})();

@@ -38,6 +38,33 @@ export function createDesktop({ root, ctx = {} }) {
 
   const snapGhost = h("div.os-snap-ghost", { hidden: true });
   root.append(snapGhost);
+  const guideV = h("div.os-guide.v", { hidden: true });
+  const guideH = h("div.os-guide.h", { hidden: true });
+  root.append(guideV, guideH);
+
+  /** In design mode a dragged edge that comes within a few pixels of another
+   *  element's edge sticks to it, and a guide line says so. Local paint only. */
+  const GUIDE = 6;
+  function magnetize(item, kind) {
+    guideV.hidden = guideH.hidden = true;
+    if (!design()) return item;
+    const d = doc();
+    const others = [
+      ...d.windows.filter((w) => w.id !== item.id && w.ws === d.activeWorkspace && !w.min),
+      ...d.widgets.filter((g) => g.id !== item.id && g.ws === d.activeWorkspace),
+    ];
+    const xs = [], ys = [];
+    for (const o of others) { xs.push(o.x, o.x + o.w, o.x + o.w / 2); ys.push(o.y, o.y + o.h, o.y + o.h / 2); }
+    const mine = { x: [item.x, item.x + item.w, item.x + item.w / 2], y: [item.y, item.y + item.h, item.y + item.h / 2] };
+    let best = null;
+    for (const [i, mx] of mine.x.entries()) for (const ox of xs) if (Math.abs(mx - ox) <= GUIDE && (!best || Math.abs(mx - ox) < best.d)) best = { d: Math.abs(mx - ox), dx: ox - mx, at: ox };
+    if (best) { item.x = Math.round(item.x + best.dx); guideV.hidden = false; guideV.style.left = `${best.at}px`; }
+    best = null;
+    for (const [i, my] of mine.y.entries()) for (const oy of ys) if (Math.abs(my - oy) <= GUIDE && (!best || Math.abs(my - oy) < best.d)) best = { d: Math.abs(my - oy), dy: oy - my, at: oy };
+    if (best) { item.y = Math.round(item.y + best.dy); guideH.hidden = false; guideH.style.top = `${best.at}px`; }
+    void kind;
+    return item;
+  }
 
   // ── geometry ──────────────────────────────────────────────────────────────
 
@@ -255,7 +282,7 @@ export function createDesktop({ root, ctx = {} }) {
     bar.addEventListener("pointerdown", (e) => startDrag(e, win.id, "win"));
     bar.addEventListener("dblclick", () => call("windowSet", { id: win.id, max: !doc().windows.find((w) => w.id === win.id)?.max }));
     grip.addEventListener("pointerdown", (e) => startResize(e, win.id, "win"));
-    el.addEventListener("pointerdown", () => raise(win.id), true);
+    el.addEventListener("pointerdown", (e) => raise(win.id, e.shiftKey), true);
 
     root.append(el);
     return { el, body, title, bar, frame, stop, app: win.app };
@@ -270,10 +297,11 @@ export function createDesktop({ root, ctx = {} }) {
   }
 
   let raiseTimer = null;
-  function raise(id) {
+  function raise(id, add = false) {
     const w = doc().windows.find((x) => x.id === id);
     if (!w) return;
-    if (design()) select(id, "win");
+    if (design()) select(id, "win", { add });
+    if (add) return;
     if (w.z >= doc().zTop) return;
     // Coalesce: clicking around inside a window should not write a revision per click.
     clearTimeout(raiseTimer);
@@ -295,8 +323,8 @@ export function createDesktop({ root, ctx = {} }) {
       // widget otherwise has nowhere to put.
       const handle = h("div.os-widget-handle", h("span", meta.name));
       handle.addEventListener("pointerdown", (e) => {
-        if (design()) select(g.id, "widget");
-        startDrag(e, g.id, "widget");
+        if (design()) select(g.id, "widget", { add: e.shiftKey });
+        if (!e.shiftKey) startDrag(e, g.id, "widget");
       });
       frame = createFrame({ id: g.kind, kind: "widget" });
       el.append(handle, frame);
@@ -330,8 +358,8 @@ export function createDesktop({ root, ctx = {} }) {
     el.append(grip);
 
     el.addEventListener("pointerdown", (e) => {
-      if (design()) select(g.id, "widget");
-      startDrag(e, g.id, "widget");
+      if (design()) select(g.id, "widget", { add: e.shiftKey });
+      if (!e.shiftKey) startDrag(e, g.id, "widget");
     });
     root.append(el);
     return { el, stop, frame, kind: g.kind };
@@ -409,6 +437,7 @@ export function createDesktop({ root, ctx = {} }) {
         item.x = Math.max(0, snap(gesture.ox + dx));
         item.y = Math.max(0, snap(gesture.oy + dy));
         if (gesture.kind === "widget") item.pin = "none";
+        magnetize(item, gesture.kind);
       } else {
         const min = gesture.kind === "win" ? { w: 200, h: 120 } : { w: 120, h: 80 };
         item.w = Math.max(min.w, snap(gesture.ow + dx));
@@ -420,6 +449,7 @@ export function createDesktop({ root, ctx = {} }) {
   function onUp() {
     window.removeEventListener("pointermove", onMove);
     snapGhost.hidden = true;
+    guideV.hidden = guideH.hidden = true;
     if (!gesture) return;
     const g = gesture;
     gesture = null;
@@ -524,6 +554,34 @@ export function createDesktop({ root, ctx = {} }) {
   }, 0);
   window.addEventListener("blur", onBlur);
 
+  // Arrow keys nudge the selection by the grid in design mode — one `move` per
+  // keystroke, but a held key coalesces into one write when it lets go.
+  let nudge = null;
+  function onNudgeKey(e) {
+    if (!design() || !os.sel.ids?.length) return;
+    if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
+    if (e.metaKey || e.ctrlKey || e.target.closest("input, textarea, select, [contenteditable]")) return;
+    e.preventDefault();
+    const step = (doc().wm.gridSize ?? 8) * (e.shiftKey ? 5 : 1);
+    const dx = e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0;
+    const dy = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
+    localPatch((d) => {
+      for (const id of os.sel.ids) {
+        const it = d.windows.find((w) => w.id === id) ?? d.widgets.find((g) => g.id === id);
+        if (!it) continue;
+        it.x = Math.max(0, it.x + dx); it.y = Math.max(0, it.y + dy);
+        if (it.kind) it.pin = "none";
+      }
+    });
+    clearTimeout(nudge);
+    nudge = setTimeout(() => {
+      const items = os.sel.ids.map((id) => doc().windows.find((w) => w.id === id) ?? doc().widgets.find((g) => g.id === id))
+        .filter(Boolean).map((it) => ({ id: it.id, x: it.x, y: it.y, ...(it.kind ? { pin: "none" } : {}) }));
+      if (items.length) call("move", { items }).catch((err) => toastError("Could not move the selection", err));
+    }, 250);
+  }
+  document.addEventListener("keydown", onNudgeKey);
+
   // Tiling geometry and the compact/floating decision both depend on our size.
   const ro = new ResizeObserver(() => render());
   ro.observe(root);
@@ -544,6 +602,7 @@ export function createDesktop({ root, ctx = {} }) {
     destroy() {
       ro.disconnect();
       offBundle();
+      document.removeEventListener("keydown", onNudgeKey);
       window.removeEventListener("blur", onBlur);
       for (const e of wins.values()) { e.stop?.(); e.el.remove(); }
       for (const e of widgets.values()) { e.stop?.(); e.el.remove(); }

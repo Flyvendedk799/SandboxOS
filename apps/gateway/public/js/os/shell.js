@@ -40,7 +40,7 @@ export function createScreen({ ctx = {} } = {}) {
     hideOverlay();
     openOverlay = name;
     overlays.style.pointerEvents = "auto";
-    fill(overlays, node);
+    fill(overlays, typeof node === "function" ? node() : node);
   }
   function hideOverlay() {
     openOverlay = null;

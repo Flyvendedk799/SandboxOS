@@ -870,3 +870,136 @@ body.os-fullscreen .os-screen { height: 100%; border: 0; border-radius: 0; }
 .diff-row { display: flex; justify-content: space-between; gap: 10px; font-size: 10.5px; padding: 2px 0; font-family: var(--mono); }
 .diff-row .k { color: var(--stx-text-3); }
 .diff-row .v { color: var(--stx-text-2); text-align: right; }
+
+/* ============================================================================
+   4. Studio as a builder (Wave B)
+   ========================================================================== */
+
+/* ── Builder width and the sash between builder and stage ────────────────── */
+.stx-builder { min-width: 260px; max-width: 900px; }
+.stx-builder.wide { width: 560px; }
+.stx-sash { width: 5px; flex: none; cursor: col-resize; background: transparent; }
+.stx-sash:hover { background: var(--stx-accent-dim); }
+body.sashing { cursor: col-resize; user-select: none; }
+body.sashing iframe { pointer-events: none; }
+.stx-tabs .seg .dot, .code-tab .dot, .code-file .dot {
+  display: inline-block; width: 6px; height: 6px; margin-left: 5px; border-radius: 50%; background: var(--stx-sand); vertical-align: middle;
+}
+.rail-btn.sm { width: 24px; height: 24px; border-radius: 6px; }
+
+/* ── Code pane ───────────────────────────────────────────────────────────── */
+.code-pane { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.code-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--stx-line); }
+.code-picker {
+  flex: 1; height: 26px; padding: 0 8px; border: 1px solid var(--stx-line); border-radius: 7px;
+  background: var(--stx-bg-2); color: var(--stx-text); font-size: 12px; outline: none;
+}
+.code-body { display: flex; flex: 1; min-height: 0; }
+.code-tree { width: 150px; flex: none; overflow: auto; padding: 8px 6px; border-right: 1px solid var(--stx-line); }
+.code-dir { font-size: 10px; color: var(--stx-text-3); font-family: var(--mono); padding: 6px 6px 2px; }
+.code-file {
+  display: flex; align-items: center; gap: 6px; width: 100%; height: 26px; padding: 0 7px;
+  border: 0; border-radius: 6px; background: transparent; color: var(--stx-text-2); text-align: left;
+  font-family: var(--mono); font-size: 11px;
+}
+.code-file:hover { background: var(--stx-bg-2); color: var(--stx-text); }
+.code-file.on { background: var(--stx-accent-dim); color: var(--stx-accent); }
+.code-file .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.code-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.code-tabs { display: flex; gap: 2px; padding: 6px 6px 0; border-bottom: 1px solid var(--stx-line); overflow-x: auto; flex: none; }
+.code-tab { display: flex; align-items: center; border-radius: 7px 7px 0 0; background: transparent; }
+.code-tab.on { background: var(--stx-bg-2); }
+.code-tab .name { border: 0; background: transparent; color: var(--stx-text-2); font-size: 11px; padding: 6px 4px 6px 10px; font-family: var(--mono); white-space: nowrap; }
+.code-tab.on .name { color: var(--stx-text); }
+.code-tab .x { border: 0; background: transparent; color: var(--stx-text-3); padding: 0 6px; display: grid; place-items: center; }
+.code-tab .x:hover { color: var(--stx-err); }
+.code-editor { flex: 1; min-height: 0; display: flex; }
+.code-editor-slot { display: flex; flex: 1; min-height: 0; }
+.code-status { flex: none; padding: 5px 10px; border-top: 1px solid var(--stx-line); font-size: 10.5px; color: var(--stx-text-3); font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* The editor component, shared with Command Central (js/editor.js). */
+.ed { display: flex; flex: 1; min-height: 0; font-family: var(--mono); font-size: 12px; line-height: 20px; }
+.ed-gutter {
+  flex: none; padding: 10px 8px 10px 12px; text-align: right; color: var(--stx-text-3);
+  background: var(--stx-bg-1); border-right: 1px solid var(--stx-line); user-select: none; overflow: hidden;
+  font-variant-numeric: tabular-nums;
+}
+.ed-gutter div { height: 20px; }
+.ed-gutter div.cur { color: var(--stx-accent); }
+.ed-scroll { position: relative; flex: 1; min-width: 0; }
+.ed-layer { position: absolute; inset: 0; margin: 0; padding: 10px 12px; font: inherit; line-height: inherit; white-space: pre; tab-size: 2; border: none; border-radius: 0; }
+.ed-hl { pointer-events: none; overflow: hidden; color: var(--stx-text); }
+.ed-input { width: 100%; height: 100%; overflow: auto; background: transparent; color: transparent; caret-color: var(--stx-accent); resize: none; outline: none; }
+.ed-input:focus { box-shadow: none; background: transparent; border: none; }
+.ed-input::selection { background: rgba(53, 214, 196, 0.3); }
+.tk-key { color: #c792ea; }
+.tk-str { color: var(--stx-sand); }
+.tk-num { color: #f78c6c; }
+.tk-com { color: var(--stx-text-3); font-style: italic; }
+.tk-fn  { color: #82aaff; }
+.tk-tag { color: #ff6b8a; }
+.tk-att { color: var(--stx-accent); }
+.tk-pun { color: var(--stx-text-2); }
+
+/* ── Theme studio ────────────────────────────────────────────────────────── */
+.token-list { display: flex; flex-direction: column; gap: 4px; }
+.token-row { display: grid; grid-template-columns: 30px 1fr 88px auto; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 8px; }
+.token-row:hover { background: var(--stx-bg-1); }
+.token-row.overridden { background: var(--stx-accent-dim); }
+.token-row input[type="color"] { width: 30px; height: 26px; padding: 0; border: 1px solid var(--stx-line); border-radius: 6px; background: transparent; cursor: pointer; }
+.token-row .meta { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; }
+.token-row .k { font-family: var(--mono); font-size: 11px; color: var(--stx-text); }
+.token-row .l { font-size: 10px; color: var(--stx-text-3); }
+.token-row .hex { height: 24px; padding: 0 6px; border: 1px solid var(--stx-line); border-radius: 6px; background: var(--stx-bg-2); color: var(--stx-text); font-family: var(--mono); font-size: 10.5px; outline: none; }
+.wall-builder { display: flex; flex-direction: column; gap: 8px; }
+.wall-preview { height: 54px; border-radius: 9px; border: 1px solid var(--stx-line); }
+.field.row { flex-direction: row; align-items: center; gap: 10px; margin-bottom: 6px; }
+.field.row label { width: 80px; }
+.field.row input[type="range"] { flex: 1; }
+.stop-row { display: flex; align-items: center; gap: 8px; }
+.stop-row input[type="color"] { width: 34px; height: 26px; padding: 0; border: 1px solid var(--stx-line); border-radius: 6px; background: transparent; }
+.stop-row input[type="number"] { height: 24px; padding: 0 6px; border: 1px solid var(--stx-line); border-radius: 6px; background: var(--stx-bg-2); color: var(--stx-text); font-size: 11px; }
+
+/* ── Motion studio ───────────────────────────────────────────────────────── */
+.motion-sample {
+  position: relative; height: 150px; border-radius: 10px; overflow: hidden;
+  background: var(--os-wall); border: 1px solid var(--stx-line); display: grid; place-items: center;
+}
+.motion-sample .os-window.sample { position: relative; width: 200px; height: 110px; animation: none; }
+.motion-sample .os-lights span { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+.motion-sample .os-lights .close { background: #ff5f57; } .motion-sample .os-lights .min { background: #febc2e; } .motion-sample .os-lights .max { background: #28c840; }
+.motion-row { display: grid; grid-template-columns: 74px 1fr 62px; align-items: center; gap: 8px; margin: 4px 0; }
+.motion-row label { font-size: 10.5px; color: var(--stx-text-2); }
+.motion-row input[type="number"], .motion-row select { height: 24px; padding: 0 6px; border: 1px solid var(--stx-line); border-radius: 6px; background: var(--stx-bg-2); color: var(--stx-text); font-size: 11px; }
+.motion-end { margin-top: 6px; }
+
+/* ── Inspector craft ─────────────────────────────────────────────────────── */
+.align-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.align-grid.two { grid-template-columns: 1fr 1fr; }
+.align-grid .ghost { height: 28px; padding: 0; font-size: 13px; }
+.align-grid .ghost.on { border-color: var(--stx-accent); color: var(--stx-accent); }
+.layer-line { display: flex; align-items: center; gap: 2px; }
+.layer-line .layer-row { flex: 1; min-width: 0; }
+.z-btns { display: none; gap: 1px; }
+.layer-line:hover .z-btns { display: flex; }
+.z-btns button { width: 20px; height: 20px; border: 0; border-radius: 5px; background: transparent; color: var(--stx-text-3); font-size: 9px; }
+.z-btns button:hover { background: var(--stx-bg-2); color: var(--stx-text); }
+.os-guide { position: absolute; z-index: 7; pointer-events: none; background: var(--os-accent); opacity: .8; }
+.os-guide.v { top: 0; bottom: 0; width: 1px; }
+.os-guide.h { left: 0; right: 0; height: 1px; }
+
+/* ── Agent tool cards that link back into the builder ────────────────────── */
+.tool-card.linked { border-left-color: var(--stx-agent); }
+.tool-card .reveal {
+  margin-left: auto; height: 18px; padding: 0 7px; border: 1px solid var(--stx-line); border-radius: 5px;
+  background: transparent; color: var(--stx-agent); font-size: 10px; font-weight: 600; white-space: nowrap;
+}
+.tool-card .reveal:hover { background: var(--stx-bg-2); }
+
+/* ── Studio palette ──────────────────────────────────────────────────────── */
+.stx-palette { align-items: start; padding-top: 12vh; }
+.os-spotlight.studio { background: var(--stx-bg-1); border-color: var(--stx-line); color: var(--stx-text); }
+.os-spotlight.studio input { color: var(--stx-text); }
+.os-spotlight.studio .spot-row:hover, .os-spotlight.studio .spot-row.on { background: var(--stx-bg-2); }
+.os-spotlight.studio .spot-row .nm { color: var(--stx-text); }
+.os-spotlight.studio .spot-row .sub { color: var(--stx-text-3); }

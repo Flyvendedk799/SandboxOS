@@ -16,7 +16,8 @@
     "dev": "node --watch apps/gateway/src/index.js",
     "test": "node --test --no-warnings",
     "test:better-sqlite3": "SANDBOXOS_DB_DRIVER=better-sqlite3 node --test --no-warnings",
-    "tunnel": "echo 'Expose the spine publicly:' && echo '  cloudflared tunnel --url http://localhost:'${SANDBOXOS_PORT:-3939}"
+    "tunnel": "echo 'Expose the spine publicly:' && echo '  cloudflared tunnel --url http://localhost:'${SANDBOXOS_PORT:-3939}",
+    "smoke": "node scripts/browser-smoke.mjs"
   },
   "optionalDependencies": {
     "better-sqlite3": "^11.0.0"
@@ -25,5 +26,8 @@
     ".": "./packages/sdk/src/index.js",
     "./sdk": "./packages/sdk/src/index.js",
     "./sdk/client": "./packages/sdk/src/client.js"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.63.0"
   }
 }

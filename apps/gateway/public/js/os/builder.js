@@ -7,9 +7,16 @@
 // tabs, or the agent can be building while you are, without either going stale.
 
 import { h, fill, icon, dialog, confirmDialog, menu, toast, toastError, fmtBytes } from "../core.js";
-import { os, call, select, loadOs, tint, onOs } from "./client.js";
+import { os, call, select, selected, loadOs, tint, onOs } from "./client.js";
 import { iconName, ICON_NAMES } from "./sprite.js";
 import { dropSession } from "./frames.js";
+import { createCodePane } from "./code.js";
+import { createThemeStudio } from "./theme-studio.js";
+import { createMotionStudio } from "./motion-studio.js";
+
+const TABS = [["library", "Library"], ["layers", "Layers"], ["theme", "Theme"], ["motion", "Motion"], ["code", "Code"]];
+const remember = (k, v) => { try { localStorage.setItem(`sbx.studio.${k}`, v); } catch { /* private mode */ } };
+const recall = (k, dflt) => { try { return localStorage.getItem(`sbx.studio.${k}`) ?? dflt; } catch { return dflt; } };
 
 const CATEGORIES = [
   { id: "apps", name: "Apps" },
@@ -21,17 +28,19 @@ const CATEGORIES = [
 
 const ICON_CHOICES = ICON_NAMES;
 
-const ACCENTS = ["#35d6c4", "#3ec8ff", "#b98cff", "#ff8f5e", "#43d17f", "#e8c98a", "#ff6b6b", "#e6edf3"];
-
 export function createBuilder({ onOpenCode } = {}) {
-  let tab = "library";
+  let tab = TABS.some(([id]) => id === recall("tab", "library")) ? recall("tab", "library") : "library";
   let cat = "apps";
 
   const tabs = h("div.stx-tabs");
   const pane = h("div.stx-pane");
   const el = h("aside.stx-builder", null, tabs, pane);
 
-  const setTab = (t) => { tab = t; render(); };
+  const codePane = createCodePane({ onTargetChange: (t) => { if (t) remember("code", `${t.kind}:${t.id}`); } });
+  const themeStudio = createThemeStudio();
+  const motionStudio = createMotionStudio();
+
+  const setTab = (t) => { tab = t; remember("tab", t); render(); };
   const setCat = (c) => { cat = c; render(); };
 
   // ── Library ───────────────────────────────────────────────────────────────
@@ -347,10 +356,13 @@ export function createBuilder({ onOpenCode } = {}) {
   function layers() {
     const d = os.doc;
     const here = (list) => list.filter((x) => x.ws === d.activeWorkspace);
-    const row = (id, kind, name, sub, ic) => h("button.layer-row", {
-      class: os.sel.id === id ? "on" : "",
-      onclick: () => { select(id, kind); if (kind === "win") call("focus", { id }).catch(() => {}); },
-    }, icon(iconName(ic), 15), h("span.nm", name), h("span.sub", sub));
+    const row = (id, kind, name, sub, ic) => h("div.layer-line", null, h("button.layer-row", {
+      class: os.sel.ids?.includes(id) ? "on" : "",
+      onclick: (e) => { select(id, kind, { add: e.shiftKey }); if (kind === "win" && !e.shiftKey) call("focus", { id }).catch(() => {}); },
+    }, icon(iconName(ic), 15), h("span.nm", name), h("span.sub", sub)),
+    kind === "win" ? h("span.z-btns", null,
+      h("button", { title: "Bring to front", onclick: () => call("focus", { id }) }, "▲"),
+      h("button", { title: "Send to back", onclick: () => call("windowSet", { id, back: true }) }, "▼")) : null);
 
     const wins = here(d.windows).sort((a, b) => b.z - a.z);
     const gs = here(d.widgets);
@@ -448,147 +460,36 @@ export function createBuilder({ onOpenCode } = {}) {
     } catch { /* history is a nicety */ }
   }
 
-  // ── Theme tab ─────────────────────────────────────────────────────────────
-
-  function themeTab() {
-    const t = os.snap.theme;
-    const swatch = (c) => h("button.swatch-btn", {
-      class: c.toLowerCase() === String(t.accent).toLowerCase() ? "on" : "",
-      title: c, style: { background: c },
-      onclick: () => call("themeSet", { tokens: { accent: c } }),
-    });
-
-    const wallInput = h("input", { value: t.wall ?? "", placeholder: "linear-gradient(160deg,#06131d,#0a2233)" });
-    wallInput.addEventListener("change", () => call("wallpaperSet", { wallpaper: wallInput.value })
-      .catch((e) => toastError("That wallpaper was rejected", e)));
-
-    return h("div", null,
-      h("div.section-label", "Base theme"),
-      h("div.card-grid", { style: { marginBottom: "18px" } }, ...(os.snap.themes ?? []).map((th) =>
-        h("button.lib-row", {
-          class: th.key === os.doc.theme.base ? "on" : "",
-          style: { flexDirection: "column", alignItems: "stretch", gap: "7px", padding: "8px" },
-          onclick: () => call("themeSet", { theme: th.key }),
-        },
-          h("span", { style: { height: "34px", borderRadius: "7px", background: th.wall ?? th.accent, border: "1px solid var(--stx-line)" } }),
-          h("span.nm", { style: { fontSize: "11px" } }, th.name)))),
-      h("div.section-label", "Accent token"),
-      h("div.swatch-row", ...ACCENTS.map(swatch)),
-      h("div.field", { style: { marginTop: "18px" } }, h("label", "Wallpaper"), wallInput),
-      h("div.section-label", "Motion"),
-      h("div.card-grid", ...(os.snap.animations ?? []).map((a) => h("button.lib-row", {
-        class: a.key === os.doc.animation.preset ? "on" : "",
-        style: { justifyContent: "space-between" },
-        onclick: () => call("animationSet", { preset: a.key }),
-      }, h("span.nm", { style: { fontSize: "11px" } }, a.name)))),
-      h("div.note", null,
-        "Theme edits write ", h("code", "theme"), " tokens into the document and rebind every window, dock and widget live — including custom apps, which link the same compiled stylesheet."),
-    );
-  }
-
   // ── Code tab ──────────────────────────────────────────────────────────────
 
-  let codeTarget = null; // {kind:'app'|'widget', id}
-  let codeFile = null;
-
-  function openCode(kind, id) { codeTarget = { kind, id }; codeFile = null; setTab("code"); }
+  /** Deep link from the Library, the agent panel or Spotlight: show this file. */
+  function openCode(kind, id, path = null) {
+    setTab("code");
+    codePane.setTarget({ kind, id }, { path });
+  }
 
   function codeTab() {
-    const custom = [
-      ...Object.values(os.doc.apps).map((a) => ({ kind: "app", id: a.id, name: a.name, icon: a.icon })),
-      ...Object.values(os.doc.widgetKinds).map((w) => ({ kind: "widget", id: w.kind, name: w.name, icon: w.icon })),
-    ];
-    if (!custom.length) {
+    const any = codePane.render();
+    if (!any) {
       return h("div.empty", null, icon("code", 26), h("h3", "Nothing custom yet"),
-        h("p", "Create an app or a widget in the Library and its source appears here — or ask the agent to write one."));
+        h("p", "An app is a folder of HTML, CSS and JS this machine serves into a sandboxed frame. Create one in the Library and its files appear here — or ask the agent to write one."));
     }
-    if (!codeTarget || !custom.some((c) => c.kind === codeTarget.kind && c.id === codeTarget.id)) {
-      codeTarget = { kind: custom[0].kind, id: custom[0].id };
-      codeFile = null;
+    if (!codePane.target) {
+      const [kind, id] = recall("code", "").split(":");
+      if (kind && id) codePane.setTarget({ kind, id });
     }
-
-    const picker = h("select", null, ...custom.map((c) =>
-      h("option", { value: `${c.kind}:${c.id}`, selected: c.kind === codeTarget.kind && c.id === codeTarget.id }, c.name)));
-    picker.addEventListener("change", () => {
-      const [kind, id] = picker.value.split(":");
-      codeTarget = { kind, id };
-      codeFile = null;
-      render();
-    });
-
-    const fileList = h("div", { style: { display: "flex", flexDirection: "column", gap: "2px", margin: "10px 0" } });
-    const editor = h("textarea", { spellcheck: "false", style: { minHeight: "220px", fontFamily: "var(--mono)", fontSize: "11px" } });
-    const saveBtn = h("button.ghost.wide", { onclick: saveFile }, "Save file");
-    const status = h("div.dim", { style: { fontSize: "10.5px", marginTop: "6px" } }, "");
-
-    const readTool = codeTarget.kind === "widget" ? "widgetRead" : "appRead";
-    const listTool = codeTarget.kind === "widget" ? "widgetFiles" : "appFiles";
-    const writeTool = codeTarget.kind === "widget" ? "widgetWrite" : "appWrite";
-    const key = codeTarget.kind === "widget" ? { kind: codeTarget.id } : { id: codeTarget.id };
-
-    async function loadFiles() {
-      try {
-        const r = await call(listTool, key);
-        codeFile ??= r.files[0]?.path ?? null;
-        fill(fileList, ...r.files.map((f) => h("button.layer-row", {
-          class: f.path === codeFile ? "on" : "",
-          onclick: () => { codeFile = f.path; loadFile(); paintFileList(r.files); },
-        }, icon("code", 14), h("span.nm", f.path), h("span.sub", fmtBytes(f.size)))));
-        if (codeFile) loadFile();
-      } catch (e) { status.textContent = e.message; }
-    }
-    function paintFileList(files) {
-      for (const btn of fileList.children) {
-        btn.classList.toggle("on", btn.querySelector(".nm")?.textContent === codeFile);
-      }
-      void files;
-    }
-    async function loadFile() {
-      if (!codeFile) return;
-      try {
-        const r = await call(readTool, { ...key, path: codeFile });
-        editor.value = r.content;
-        status.textContent = `${codeFile} · ${r.bytes} bytes`;
-      } catch (e) { status.textContent = e.message; }
-    }
-    async function saveFile() {
-      if (!codeFile) return;
-      try {
-        await call(writeTool, { ...key, path: codeFile, content: editor.value });
-        status.textContent = `saved ${codeFile}`;
-        toast("Saved", { body: `${codeFile} — reopen the app to see it.`, kind: "ok" });
-      } catch (e) { toastError("Could not save", e); }
-    }
-
-    async function addFile() {
-      const got = await dialog({ title: "New file", fields: [{ name: "path", label: "Path", placeholder: "panel.js" }], confirmLabel: "Create" });
-      if (!got?.path) return;
-      try {
-        await call(writeTool, { ...key, path: got.path, content: "" });
-        codeFile = got.path;
-        loadFiles();
-      } catch (e) { toastError("Could not create the file", e); }
-    }
-
-    loadFiles();
-
-    return h("div", null,
-      h("div.field", null, h("label", "Editing"), picker),
-      fileList,
-      h("button.ghost", { onclick: addFile }, "Add file"),
-      h("div.field", { style: { marginTop: "10px" } }, h("label", "Source"), editor),
-      saveBtn,
-      status,
-      h("div.note", "Ask the agent to write here too — ", h("code", "desktop.appWrite"), " is the same call this button makes."),
-    );
+    return codePane.el;
   }
 
   // ── render ────────────────────────────────────────────────────────────────
 
   function render() {
     if (!os.doc) return;
-    fill(tabs, ...[["library", "Library"], ["layers", "Layers"], ["theme", "Theme"], ["code", "Code"]].map(([id, label]) =>
-      h("button.seg", { class: tab === id ? "on" : "", onclick: () => setTab(id) }, label)));
+    fill(tabs, ...TABS.map(([id, label]) =>
+      h("button.seg", { class: tab === id ? "on" : "", onclick: () => setTab(id) }, label, id === "code" && codePane.hasDirty() ? h("span.dot") : null)));
+    el.classList.toggle("wide", tab === "code");
+    if (tab !== "theme") themeStudio.destroy();
+    if (tab !== "motion") motionStudio.destroy();
 
     if (tab === "library") {
       const body = cat === "apps" ? libraryApps()
@@ -605,13 +506,34 @@ export function createBuilder({ onOpenCode } = {}) {
       fill(pane, h("div.stx-scroll", { style: { paddingTop: "12px" } }, body));
       paintHistory(pane.querySelector("#os-history"));
     } else if (tab === "theme") {
-      fill(pane, h("div.stx-scroll", { style: { paddingTop: "14px" } }, themeTab()));
+      themeStudio.render();
+      fill(pane, h("div.stx-scroll", { style: { paddingTop: "14px" } }, themeStudio.el));
+    } else if (tab === "motion") {
+      motionStudio.render();
+      fill(pane, h("div.stx-scroll", { style: { paddingTop: "14px" } }, motionStudio.el));
     } else {
-      fill(pane, h("div.stx-scroll", { style: { paddingTop: "14px" } }, codeTab()));
+      const body = codeTab();
+      if (body === codePane.el) fill(pane, body);
+      else fill(pane, h("div.stx-scroll", { style: { paddingTop: "14px" } }, body));
     }
   }
 
-  return { el, render, setTab, openCode, get tab() { return tab; } };
+  /** Verbs the Studio's own palette (⌘⇧P) offers; each is a builder action. */
+  function paletteActions() {
+    return [
+      { name: "New app…", sub: "Library", icon: "plus", run: newApp },
+      { name: "New widget…", sub: "Library", icon: "plus", run: newWidget },
+      { name: "New theme…", sub: "Library", icon: "theme", run: newTheme },
+      { name: "Publish this OS as a distro…", sub: "Distros", icon: "layers", run: publish },
+      { name: "Export distro file", sub: "Distros", icon: "save", run: exportFile },
+      { name: "Import distro file…", sub: "Distros", icon: "files", run: importFile },
+      ...TABS.map(([id, label]) => ({ name: `Go to ${label}`, sub: "Studio", icon: "layers", run: () => setTab(id) })),
+      ...Object.values(os.doc.apps).filter((a) => a.kind === "bundle").map((a) => ({ name: `Edit ${a.name} source`, sub: "Code", icon: "code", run: () => openCode("app", a.id) })),
+      { name: "Save all open files", sub: "Code", icon: "save", run: () => codePane.saveAll() },
+    ];
+  }
+
+  return { el, render, setTab, openCode, paletteActions, get tab() { return tab; }, get dirty() { return codePane.hasDirty(); } };
 }
 
 // ── Inspector ───────────────────────────────────────────────────────────────
@@ -622,22 +544,89 @@ export function createInspector() {
     h("div.panel-head", h("h2", "Inspector")),
     body);
 
+  // ── several things selected: align and distribute ────────────────────────
+
+  function multi(items) {
+    const bounds = () => ({
+      l: Math.min(...items.map((i) => i.x)), r: Math.max(...items.map((i) => i.x + i.w)),
+      t: Math.min(...items.map((i) => i.y)), b: Math.max(...items.map((i) => i.y + i.h)),
+    });
+    const commit = (fn) => {
+      const b = bounds();
+      const moves = items.map((it) => { const n = { id: it.id, x: it.x, y: it.y }; fn(n, it, b); if (it.kind) n.pin = "none"; return n; })
+        .filter((n) => { const it = items.find((i) => i.id === n.id); return n.x !== it.x || n.y !== it.y; });
+      if (moves.length) call("move", { items: moves }).catch((e) => toastError("Could not align", e));
+    };
+    const size = (fn) => {
+      const sizes = items.map((it) => { const n = { id: it.id, w: it.w, h: it.h }; fn(n, it); return n; })
+        .filter((n) => { const it = items.find((i) => i.id === n.id); return n.w !== it.w || n.h !== it.h; });
+      if (sizes.length) call("resize", { items: sizes }).catch((e) => toastError("Could not resize", e));
+    };
+    const distribute = (axis) => {
+      const sorted = [...items].sort((p, q) => (axis === "x" ? p.x - q.x : p.y - q.y));
+      const b = bounds();
+      const total = axis === "x" ? b.r - b.l : b.b - b.t;
+      const used = sorted.reduce((n, it) => n + (axis === "x" ? it.w : it.h), 0);
+      const gap = sorted.length > 1 ? (total - used) / (sorted.length - 1) : 0;
+      let cursor = axis === "x" ? b.l : b.t;
+      const moves = sorted.map((it) => {
+        const n = { id: it.id, x: it.x, y: it.y, ...(it.kind ? { pin: "none" } : {}) };
+        if (axis === "x") { n.x = Math.round(cursor); cursor += it.w + gap; } else { n.y = Math.round(cursor); cursor += it.h + gap; }
+        return n;
+      });
+      call("move", { items: moves }).catch((e) => toastError("Could not distribute", e));
+    };
+    const btn = (label, title, run) => h("button.ghost", { title, onclick: run }, label);
+    return h("div", null,
+      h("div", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "14px" } },
+        h("span.kind-tag", `${items.length} selected`),
+        h("span.dim", { style: { fontSize: "11px" } }, "shift-click to add · arrows nudge")),
+      h("div.section-label", "Align"),
+      h("div.align-grid", null,
+        btn("⇤", "Left edges", () => commit((n, it, b) => { n.x = b.l; })),
+        btn("↔", "Horizontal centres", () => commit((n, it, b) => { n.x = Math.round((b.l + b.r) / 2 - it.w / 2); })),
+        btn("⇥", "Right edges", () => commit((n, it, b) => { n.x = b.r - it.w; })),
+        btn("⤒", "Top edges", () => commit((n, it, b) => { n.y = b.t; })),
+        btn("↕", "Vertical centres", () => commit((n, it, b) => { n.y = Math.round((b.t + b.b) / 2 - it.h / 2); })),
+        btn("⤓", "Bottom edges", () => commit((n, it, b) => { n.y = b.b - it.h; }))),
+      h("div.section-label.tight", "Distribute"),
+      h("div.align-grid.two", null,
+        btn("↔ evenly", "Equal horizontal gaps", () => distribute("x")),
+        btn("↕ evenly", "Equal vertical gaps", () => distribute("y"))),
+      h("div.section-label.tight", "Match size"),
+      h("div.align-grid.two", null,
+        btn("widths", "Match the widest", () => { const w = Math.max(...items.map((i) => i.w)); size((n) => { n.w = w; }); }),
+        btn("heights", "Match the tallest", () => { const hh = Math.max(...items.map((i) => i.h)); size((n) => { n.h = hh; }); })),
+      h("div.note", "One alignment is one revision: the whole selection moves in a single desktop.move with items, so undo brings it all back at once."),
+      h("button.ghost.wide.danger", { style: { marginTop: "12px" }, onclick: async () => {
+        if (!await confirmDialog(`Delete ${items.length} elements?`, "Windows close, widgets are removed.")) return;
+        for (const it of items) await call(it.kind ? "widgetRemove" : "close", { id: it.id }).catch(() => {});
+        select(null, null);
+      } }, "Delete selection"),
+    );
+  }
+
+  // ── one thing selected: the property sheet ───────────────────────────────
+
   function render() {
     const d = os.doc;
     if (!d) return;
+    const items = selected();
+    if (items.length > 1) { fill(body, multi(items)); return; }
     const { id, kind } = os.sel;
     const item = kind === "win" ? d.windows.find((w) => w.id === id) : d.widgets.find((g) => g.id === id);
     if (!item) {
       fill(body, h("div.empty", null,
         icon("window", 26),
         h("h3", "Nothing selected"),
-        h("p", "Click a window or widget in the live OS, or a layer on the left, to edit its properties here.")));
+        h("p", "Click a window or widget in the live OS, or a layer on the left. Shift-click to select several and align them.")));
       return;
     }
 
     const meta = kind === "win"
       ? (os.snap.apps ?? []).find((a) => a.id === item.app)
       : (os.snap.widgetKinds ?? []).find((w) => w.kind === item.kind);
+    const setTool = kind === "widget" ? "widgetSet" : "windowSet";
 
     const numField = (label, key, tool) => {
       const input = h("input", { type: "number", value: item[key] });
@@ -658,25 +647,58 @@ export function createInspector() {
 
     const wsSel = h("select", null, ...d.workspaces.map((w) =>
       h("option", { value: w.n, selected: w.n === item.ws }, w.name)));
-    wsSel.addEventListener("change", () => call(kind === "widget" ? "widgetSet" : "windowSet", { id, ws: Number(wsSel.value) }));
+    wsSel.addEventListener("change", () => call(setTool, { id, ws: Number(wsSel.value) }));
+
+    const pinSel = kind === "widget" ? h("select", null, ...["none", "left", "right"].map((p) => h("option", { value: p, selected: item.pin === p }, p === "none" ? "free" : `pinned ${p}`))) : null;
+    pinSel?.addEventListener("change", () => call("widgetSet", { id, pin: pinSel.value }));
+
+    // Props: the free-form part of an element, edited as JSON with the ceiling stated.
+    const propsTa = h("textarea", { rows: 5, spellcheck: "false" });
+    propsTa.value = JSON.stringify(item.props ?? {}, null, 2);
+    const propsNote = h("span.dim", { style: { fontSize: "10.5px" } }, `${JSON.stringify(item.props ?? {}).length} of 8192 bytes`);
+    const propsBtn = h("button.ghost", { onclick: async () => {
+      let parsed;
+      try { parsed = JSON.parse(propsTa.value || "{}"); } catch (e) { toastError("Not valid JSON", e); return; }
+      if (JSON.stringify(parsed).length > 8192) { toastError("Too big", new Error("props are capped at 8 KB; anything larger is dropped by the document")); return; }
+      // props merge, so clear what was removed by sending nulls is not possible; replace wholesale via patch-free set of keys.
+      const cleared = Object.fromEntries(Object.keys(item.props ?? {}).filter((k) => !(k in parsed)).map((k) => [k, null]));
+      try { await call(setTool, { id, props: { ...cleared, ...parsed } }); toast("Props saved", { kind: "ok" }); }
+      catch (e) { toastError("Could not save props", e); }
+    } }, "Save props");
+
+    const zRow = kind === "win" ? h("div.align-grid.two", { style: { marginBottom: "14px" } },
+      h("button.ghost", { onclick: () => call("focus", { id }) }, "Bring to front"),
+      h("button.ghost", { onclick: () => call("windowSet", { id, back: true }) }, "Send to back")) : null;
+
+    const winFlags = kind === "win" ? h("div.align-grid.two", { style: { marginBottom: "14px" } },
+      h("button.ghost", { class: item.min ? "on" : "", onclick: () => call("windowSet", { id, min: !item.min }) }, item.min ? "Restore" : "Minimise"),
+      h("button.ghost", { onclick: () => call("windowSet", { id, max: !item.max }) }, item.max ? "Unzoom" : "Zoom")) : null;
+
+    const appLine = meta && !meta.builtin ? h("div.note", { style: { marginTop: "0", marginBottom: "12px" } },
+      `${meta.kind} app · capabilities: ${meta.permissions?.join(", ") || "none"}`,
+      meta.window?.singleton ? " · one window at a time" : "",
+      h("div", { style: { marginTop: "6px" } },
+        h("button.ghost", { onclick: () => onOpenCodeGlobal?.("app", meta.id) }, "Edit source"))) : null;
 
     fill(body,
       h("div", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "16px" } },
         h("span.kind-tag", kind === "win" ? "Window" : "Widget"),
-        h("span", { style: { fontSize: "13px", fontWeight: "600" } }, kind === "win" ? item.app : item.kind)),
+        h("span", { style: { fontSize: "13px", fontWeight: "600" } }, kind === "win" ? item.app : item.kind),
+        h("span.dim.mono", { style: { fontSize: "10px", marginLeft: "auto" } }, id)),
       h("div.field", null, h("label", "Title"), title),
       h("div.grid-2", null, numField("X", "x", "move"), numField("Y", "y", "move"), numField("W", "w", "resize"), numField("H", "h", "resize")),
       h("div.field", null, h("label", "Workspace"), wsSel),
-      meta && !meta.builtin
-        ? h("div.note", { style: { marginTop: "0", marginBottom: "12px" } },
-          `Capabilities: ${meta.permissions?.join(", ") || "none"}`)
-        : null,
+      pinSel ? h("div.field", null, h("label", "Pin"), pinSel) : null,
+      zRow, winFlags, appLine,
+      h("div.field", null, h("label", "Props (JSON)"), propsTa, h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "4px" } }, propsNote, propsBtn)),
       h("button.ghost.wide.danger", {
         onclick: () => call(kind === "widget" ? "widgetRemove" : "close", { id }).catch((e) => toastError("Could not delete", e)),
-      }, "Delete element"),
+      }, kind === "widget" ? "Remove widget" : "Close window"),
     );
   }
 
   onOs(() => render());
-  return { el, render };
+  return { el, render, set onOpenCode(fn) { onOpenCodeGlobal = fn; } };
 }
+
+let onOpenCodeGlobal = null;

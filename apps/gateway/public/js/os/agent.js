@@ -31,7 +31,7 @@ function preview(value, max = 90) {
   return s.length > max ? `${s.slice(0, max)}…` : s;
 }
 
-export function createAgentPanel({ onClose, quick = QUICK, title = "Build agent" } = {}) {
+export function createAgentPanel({ onClose, quick = QUICK, title = "Build agent", onTool } = {}) {
   const log = h("div.agent-log");
   const input = h("textarea", { rows: 1, placeholder: "Ask the agent to build or restyle…" });
   const send = h("button.send", { title: "Send" }, icon("send", 15));
@@ -141,16 +141,30 @@ export function createAgentPanel({ onClose, quick = QUICK, title = "Build agent"
         liveText.querySelector(".txt").append(document.createTextNode(ev.text));
         log.scrollTop = 1e6;
         break;
-      case "tool_call":
+      case "tool_call": {
         liveText = null;
-        liveTools.set(ev.id, toolCard(`${ev.server}.${ev.tool}`, ev.args));
+        const card = toolCard(`${ev.server}.${ev.tool}`, ev.args);
+        card.dataset.server = ev.server; card.dataset.tool = ev.tool;
+        card._args = ev.args;
+        liveTools.set(ev.id, card);
         break;
+      }
       case "tool_result": {
         const card = liveTools.get(ev.id);
         if (!card) break;
         const res = card.querySelector(".res");
         res.classList.toggle("err", ev.ok === false);
         res.textContent = ev.ok === false ? (ev.error ?? "failed") : preview(ev.result ?? "ok");
+        // A card that touched the desktop is a link back into the builder: the
+        // file it wrote opens in Code, the window it opened gets selected.
+        if (ev.ok !== false && card.dataset.server === "desktop") {
+          const link = onTool?.({ tool: card.dataset.tool, args: card._args ?? {}, result: ev.result });
+          if (link) {
+            card.classList.add("linked");
+            card.querySelector(".hd").append(h("button.reveal", { onclick: () => link.run() }, link.label));
+            if (link.auto) link.run();
+          }
+        }
         break;
       }
       case "error":

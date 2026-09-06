@@ -19,7 +19,7 @@ export const os = {
   connected: false,
   /** Studio-only editing affordances: selection outlines, the alignment grid. */
   design: false,
-  sel: { id: null, kind: null },
+  sel: { id: null, kind: null, ids: [] },
 };
 
 /** Subscribe to "the OS changed". Returns an unsubscribe. */
@@ -101,9 +101,25 @@ export function localPatch(fn) {
   emit("local");
 }
 
-export function select(id, kind) {
-  os.sel = { id: id ?? null, kind: kind ?? null };
+/** Select one element, or with `add`, toggle it into a multi-selection. */
+export function select(id, kind, { add = false } = {}) {
+  if (add && id) {
+    const ids = new Set(os.sel.ids ?? (os.sel.id ? [os.sel.id] : []));
+    if (ids.has(id)) ids.delete(id); else ids.add(id);
+    const list = [...ids];
+    os.sel = { id: list.at(-1) ?? null, kind: list.length === 1 ? kindOf(list[0]) : (list.length ? "multi" : null), ids: list };
+  } else {
+    os.sel = { id: id ?? null, kind: kind ?? null, ids: id ? [id] : [] };
+  }
   emit("select");
+}
+
+export const kindOf = (id) => (os.doc?.windows.some((w) => w.id === id) ? "win" : os.doc?.widgets.some((g) => g.id === id) ? "widget" : null);
+
+/** The selected elements as document objects (windows and widgets alike). */
+export function selected() {
+  const ids = os.sel.ids ?? (os.sel.id ? [os.sel.id] : []);
+  return ids.map((id) => os.doc?.windows.find((w) => w.id === id) ?? os.doc?.widgets.find((g) => g.id === id)).filter(Boolean);
 }
 
 // ── live stream ─────────────────────────────────────────────────────────────
