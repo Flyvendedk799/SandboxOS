@@ -151,6 +151,12 @@ export function osHistory(sandbox) {
   return list.map((e) => ({ rev: e.rev, ts: e.ts, label: e.label })).reverse();
 }
 
+/** One stored revision, document included, or null. */
+export function osHistoryEntry(sandbox, rev) {
+  const list = readJson(historyPath(sandbox)) ?? [];
+  return list.find((e) => Number(e.rev) === Number(rev)) ?? null;
+}
+
 /** Restore a previous revision. The restore is itself a new revision — history
  *  moves forward, so an undo can always be undone. */
 export function revertOs(sandbox, rev) {

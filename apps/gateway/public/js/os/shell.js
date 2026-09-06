@@ -53,6 +53,42 @@ export function createScreen({ ctx = {} } = {}) {
   const clockEl = h("span.clock", clockText());
   setInterval(() => { clockEl.textContent = clockText(); }, 20_000);
 
+  // Status icons show a reading or nothing. The "wifi" glyph is the live stream
+  // to this machine (connected / reconnecting), the battery is the browser's own
+  // Battery API where it exists, the load chip is `metrics.snapshot`. Decorative
+  // icons that always look fine are how a dashboard learns to lie.
+  const linkEl = h("span.status", { title: "Live connection to the machine" }, icon("wifi", 15));
+  const battEl = h("span.status", { hidden: true, title: "Battery" }, icon("battery", 17), h("span.pct"));
+  const loadEl = h("span.status", { hidden: true, title: "Cell load (1 min)" }, icon("metrics", 13), h("span.pct"));
+  let battery = null;
+  if (typeof navigator.getBattery === "function") {
+    navigator.getBattery().then((b) => {
+      battery = b;
+      const paint = () => {
+        battEl.hidden = false;
+        battEl.querySelector(".pct").textContent = `${Math.round(b.level * 100)}%${b.charging ? "⚡" : ""}`;
+        battEl.classList.toggle("warn", !b.charging && b.level < 0.15);
+      };
+      b.addEventListener("levelchange", paint);
+      b.addEventListener("chargingchange", paint);
+      paint();
+    }).catch(() => {});
+  }
+  async function readLoad() {
+    if (!os.doc?.shell?.menubar?.showStatus) return;
+    const m = await api.tryMcp("metrics", "snapshot", {});
+    const l = m?.load?.[0];
+    loadEl.hidden = l == null;
+    if (l != null) loadEl.querySelector(".pct").textContent = l.toFixed(2);
+  }
+  readLoad();
+  setInterval(readLoad, 30_000);
+  function paintLink() {
+    linkEl.classList.toggle("on", !!os.connected);
+    linkEl.classList.toggle("warn", !os.connected);
+    linkEl.title = os.connected ? "Live: changes arrive as they happen" : "Reconnecting to the machine…";
+  }
+
   function renderMenubar() {
     const d = os.doc;
     const unread = d.notifications.filter((n) => !n.read).length;
@@ -74,10 +110,12 @@ export function createScreen({ ctx = {} } = {}) {
       h("span.spacer"),
       h("button.icon-btn", { title: "Search (⌘K)", onclick: () => showOverlay("spotlight", spotlight) }, icon("search", 14)),
       bell,
-      d.shell.menubar.showStatus ? icon("wifi", 15) : null,
-      d.shell.menubar.showStatus ? icon("battery", 17) : null,
+      d.shell.menubar.showStatus ? loadEl : null,
+      d.shell.menubar.showStatus ? battEl : null,
+      d.shell.menubar.showStatus ? linkEl : null,
       d.shell.menubar.showClock ? clockEl : null,
     );
+    paintLink();
   }
 
   function workspaceMenu(e, w) {
@@ -226,6 +264,10 @@ export function createScreen({ ctx = {} } = {}) {
         { name: "Tile the windows", sub: "Layout", icon: "grid", run: () => call("layoutSet", { mode: "tiling" }) },
         { name: "Float the windows", sub: "Layout", icon: "window", run: () => call("layoutSet", { mode: "floating" }) },
         { name: "Arrange in a grid", sub: "Layout", icon: "grid", run: () => call("arrange", { preset: "grid", viewport: wm.viewport() }) },
+        { name: "Master and stack", sub: "Layout", icon: "grid", run: () => call("arrange", { preset: "master-stack", viewport: wm.viewport() }) },
+        { name: "Columns", sub: "Layout", icon: "grid", run: () => call("arrange", { preset: "columns", viewport: wm.viewport() }) },
+        { name: "Rows", sub: "Layout", icon: "grid", run: () => call("arrange", { preset: "rows", viewport: wm.viewport() }) },
+        { name: "Focus the front window", sub: "Layout", icon: "window", run: () => call("arrange", { preset: "fullscreen-focus" }) },
         { name: "Show desktop", sub: "Layout", icon: "window", run: () => call("minimizeAll", {}) },
         { name: "New workspace", sub: "Workspace", icon: "plus", run: () => call("workspaceAdd", {}) },
         { name: "Open the Studio", sub: "Build", icon: "layers", run: () => ctx.openStudio?.() },

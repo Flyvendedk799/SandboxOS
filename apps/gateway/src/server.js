@@ -68,6 +68,8 @@ const cellBackend = () => (config.cellBackend === "local" ? "local" : "docker");
 const requireIsolation = () => process.env.SANDBOXOS_REQUIRE_ISOLATION === "1";
 
 const PUBLIC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
+const OS_SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "os", "src");
+const OS_SHARED = new Set(["layout.js", "animations.js", "themes.js", "summary.js"]);
 const RESERVED = new Set(["", "login", "logout", "signup", "health", "api", "static", "favicon.ico"]);
 
 // ---- small http helpers ---------------------------------------------------
@@ -272,6 +274,13 @@ async function handle(req, res) {
   const top = segments[1] ?? "";
 
   // Static assets.
+  // A few of packages/os's modules have no Node imports on purpose: the tiling
+  // arithmetic, the theme grammar and the motion compiler. Serving them to the
+  // browser from the same file the Kernel imports is how the shell and the server
+  // can never disagree about what a tree or a preset means.
+  if (top === "static" && segments[2] === "js" && segments[3] === "os" && segments[4] === "lib" && OS_SHARED.has(segments[5])) {
+    return sendFile(res, path.join(OS_SRC, segments[5]));
+  }
   if (top === "static") return sendFile(res, path.join(PUBLIC, ...segments.slice(2)));
   if (top === "favicon.ico") return sendFile(res, path.join(PUBLIC, "favicon.svg"));
 

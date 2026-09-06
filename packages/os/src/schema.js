@@ -14,6 +14,7 @@ import crypto from "node:crypto";
 import { BUILTIN_THEMES, DEFAULT_THEME, cleanTokens, isWallpaper } from "./themes.js";
 import { BUILTIN_ANIMATIONS, DEFAULT_ANIMATION, cleanAnimation } from "./animations.js";
 import { builtinApp, builtinWidget } from "./catalog.js";
+import { reconcileTree } from "./layout.js";
 
 export const OS_DOC_VERSION = 1;
 
@@ -52,7 +53,7 @@ export const DOCK_POSITIONS = ["bottom", "left", "right", "top", "hidden"];
 export const WM_MODES = ["floating", "tiling"];
 
 export function defaultDoc(name = "untitled-os") {
-  const ws = { id: rid("ws"), n: 1, name: "Main", wallpaper: null };
+  const ws = { id: rid("ws"), n: 1, name: "Main", wallpaper: null, layout: null };
   return {
     version: OS_DOC_VERSION,
     id: rid("os"),
@@ -61,7 +62,9 @@ export function defaultDoc(name = "untitled-os") {
     updatedAt: Date.now(),
     distro: null,
     theme: { base: DEFAULT_THEME, tokens: {}, custom: {} },
-    animation: { preset: DEFAULT_ANIMATION, custom: {} },
+    // reducedMotion: "auto" honours the viewer's prefers-reduced-motion setting;
+    // "ignore" plays the preset regardless. A document choice, so it travels.
+    animation: { preset: DEFAULT_ANIMATION, custom: {}, reducedMotion: "auto" },
     wm: { mode: "floating", gap: 12, snap: true, gridSize: 8 },
     shell: {
       menubar: { visible: true, showClock: true, showStatus: true, title: null },
@@ -234,6 +237,15 @@ export function cleanAssociations(map) {
 
 function normNotification(n) {
   if (!n || typeof n !== "object") return null;
+  // A notification may carry one place to go: an app to open (with props) and
+  // optionally a window to focus. Clicking it is then a deep link, not a toast.
+  const action = n.action && typeof n.action === "object"
+    ? {
+        app: str(n.action.app, 64) || null,
+        window: isId(n.action.window) ? n.action.window : null,
+        props: plainProps(n.action.props),
+      }
+    : null;
   return {
     id: isId(n.id) ? n.id : rid("n"),
     app: str(n.app, LIMITS.nameLen, "system"),
@@ -242,6 +254,7 @@ function normNotification(n) {
     kind: oneOf(n.kind, ["ok", "warn", "err", "info", "accent"], "info"),
     ts: num(n.ts, 0, Number.MAX_SAFE_INTEGER, Date.now()),
     read: bool(n.read),
+    ...(action && (action.app || action.window) ? { action } : {}),
   };
 }
 
@@ -298,6 +311,7 @@ export function normalizeDoc(input, { name } = {}) {
   doc.animation = {
     preset: (BUILTIN_ANIMATIONS[wantAnim] || customAnims[wantAnim]) ? wantAnim : DEFAULT_ANIMATION,
     custom: customAnims,
+    reducedMotion: oneOf(input.animation?.reducedMotion, ["auto", "ignore"], "auto"),
   };
 
   doc.wm = {
@@ -337,6 +351,7 @@ export function normalizeDoc(input, { name } = {}) {
     n: i + 1,
     name: str(w?.name, LIMITS.nameLen, `Workspace ${i + 1}`),
     wallpaper: isWallpaper(w?.wallpaper) ? w.wallpaper : null,
+    layout: w?.layout ?? null,
   }));
   doc.workspaces = workspaces.length ? workspaces : base.workspaces;
   const wsNums = doc.workspaces.map((w) => w.n);
@@ -351,12 +366,25 @@ export function normalizeDoc(input, { name } = {}) {
   dedupeIds(doc.widgets);
   doc.zTop = Math.max(num(input.zTop, 0, 1e6, 10), ...doc.windows.map((w) => w.z), 10);
 
+  // The tiling tree of every workspace holds exactly the windows on it: a window
+  // that arrived (from `open`, a move, an old document with no tree at all) is
+  // split in; one that left is pruned. So a document written before trees
+  // existed tiles the same as one written today — the tree is synthesized.
+  for (const ws of doc.workspaces) {
+    const ids = doc.windows.filter((w) => w.ws === ws.n).map((w) => w.id);
+    ws.layout = reconcileTree(ws.layout, ids);
+  }
+
   doc.apps = {};
   for (const [id, a] of Object.entries(input.apps ?? {})) {
     if (Object.keys(doc.apps).length >= LIMITS.apps) break;
     const app = normApp({ ...a, id: a?.id ?? id });
     if (app && !builtinApp(app.id)) doc.apps[app.id] = app;
   }
+  // An alias that points at itself, or round a ring of aliases, can never open.
+  // Dropping it here means the dock and `open` never have to detect the loop.
+  const looped = Object.values(doc.apps).filter((a) => a.kind === "alias" && !resolveAlias(doc, a.id)).map((a) => a.id);
+  for (const id of looped) delete doc.apps[id];
   doc.widgetKinds = {};
   for (const [kind, w] of Object.entries(input.widgetKinds ?? {})) {
     if (Object.keys(doc.widgetKinds).length >= LIMITS.widgetKinds) break;
@@ -376,6 +404,24 @@ function dedupeIds(list) {
     while (seen.has(item.id)) item.id = rid(item.id.split("_")[0] || "x");
     seen.add(item.id);
   }
+}
+
+/**
+ * Follow an alias to the app it stands for. Returns the terminal app id, or null
+ * for a self-reference, a cycle, or a chain longer than anyone should build.
+ */
+export function resolveAlias(doc, appId, maxHops = 4) {
+  let id = appId;
+  const seen = new Set();
+  for (let hop = 0; hop <= maxHops; hop += 1) {
+    if (seen.has(id)) return null;
+    seen.add(id);
+    const app = doc?.apps?.[id];
+    if (!app || app.kind !== "alias") return id;
+    if (!app.target) return null;
+    id = app.target;
+  }
+  return null;
 }
 
 /** True when an app id resolves to something this document can actually launch. */

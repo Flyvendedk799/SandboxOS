@@ -153,7 +153,9 @@ export class Kernel {
       const message = err?.message ?? String(err);
       const ev = appendAudit({ ...base, resultKind: "error", error: message, capability });
       this._emit({ ...base, resultKind: "error", error: message, capability, ...ev });
-      return { ok: false, code: "error", error: message };
+      // A conditional write that lost its race is a distinct, expected outcome —
+      // the caller refreshes and retries, which it cannot do from "error" alone.
+      return { ok: false, code: err?.code === "stale_rev" ? "stale_rev" : "error", error: message };
     }
   }
 

@@ -837,3 +837,36 @@ body.os-fullscreen .os-screen { height: 100%; border: 0; border-radius: 0; }
   .stx-agent { display: none; }
   .stx-builder { width: 260px; }
 }
+
+/* ── Tiling: sashes and the leaf in front ────────────────────────────────── */
+
+.os-sashes { position: absolute; inset: 0; pointer-events: none; z-index: 6; }
+.os-sash { position: absolute; pointer-events: auto; border-radius: 4px; transition: background .12s; }
+.os-sash.row { cursor: col-resize; }
+.os-sash.col { cursor: row-resize; }
+.os-sash:hover, .os-desktop.sashing .os-sash { background: var(--os-accent-line); }
+.os-desktop.sashing { user-select: none; cursor: inherit; }
+.os-desktop.sashing iframe { pointer-events: none; }
+.os-window.front { border-color: var(--os-line-loud); }
+.os-desktop.tiling .os-window.front:not(.selected) { box-shadow: 0 0 0 1px var(--os-accent-line), 0 12px 34px rgba(0, 0, 0, .38); }
+
+/* ── Menu bar status: real signals or nothing ────────────────────────────── */
+
+.os-menubar .status { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; color: var(--os-text-3); font-family: var(--mono); }
+.os-menubar .status.on { color: var(--os-text-2); }
+.os-menubar .status.warn { color: var(--stx-warn); }
+.os-menubar .status .pct { font-variant-numeric: tabular-nums; }
+
+/* ── History ─────────────────────────────────────────────────────────────── */
+
+.hist-item { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px; }
+.hist-item .layer-row { min-width: 0; }
+.diff-toggle {
+  height: 22px; padding: 0 8px; border: 0; border-radius: 6px; font-size: 10px; font-weight: 600;
+  background: transparent; color: var(--stx-text-3); font-family: var(--mono);
+}
+.diff-toggle:hover { background: var(--stx-bg-2); color: var(--stx-text); }
+.diff-box { grid-column: 1 / -1; margin: 2px 8px 8px; padding: 8px 10px; border: 1px solid var(--stx-line); border-radius: 8px; background: var(--stx-bg-1); }
+.diff-row { display: flex; justify-content: space-between; gap: 10px; font-size: 10.5px; padding: 2px 0; font-family: var(--mono); }
+.diff-row .k { color: var(--stx-text-3); }
+.diff-row .v { color: var(--stx-text-2); text-align: right; }

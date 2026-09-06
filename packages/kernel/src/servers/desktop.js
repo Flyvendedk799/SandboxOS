@@ -19,9 +19,10 @@
 //     tool in the wrong layer.
 
 import {
-  loadOs, mutateOs, saveOs, resetOs, osHistory, revertOs, announce,
+  loadOs, mutateOs, saveOs, resetOs, osHistory, osHistoryEntry, revertOs, announce,
   normalizeDoc, normApp, normWidgetKind, cleanTokens, cleanAnimation, cleanPatterns,
-  isId, rid, LIMITS, DOCK_POSITIONS, WM_MODES,
+  isId, rid, LIMITS, DOCK_POSITIONS, WM_MODES, resolveAlias,
+  buildTree, treeBoxes, treeLeaves, splitFor, setRatio, setDir, swapLeaves, normalizeTree, describeTree, TREE_PRESETS,
   BUILTIN_THEMES, listThemes, resolveTheme,
   BUILTIN_ANIMATIONS, listAnimations, resolveAnimation,
   builtinApp, builtinWidget, appDescriptor, widgetDescriptor, listApps, listWidgetKinds,
@@ -79,10 +80,48 @@ function snapshot(doc) {
   };
 }
 
+/** Which workspace a tool means: the one named, else the active one. */
+function wsOf(d, n) {
+  const ws = n != null ? Number(n) : d.activeWorkspace;
+  const found = d.workspaces.find((w) => w.n === ws);
+  if (!found) throw new Error(`no such workspace: ${ws}`);
+  return found;
+}
+
+/** Everything a revision changed against another, structurally — for a history UI
+ *  that can say "3 windows, the theme, the dock" rather than "rev 41". */
+function structuralDiff(from, to) {
+  const ids = (list) => new Map((list ?? []).map((x) => [x.id, x]));
+  const diffList = (a, b, keys) => {
+    const A = ids(a), B = ids(b);
+    let added = 0, removed = 0, changed = 0;
+    for (const id of B.keys()) if (!A.has(id)) added += 1;
+    for (const [id, x] of A) {
+      if (!B.has(id)) { removed += 1; continue; }
+      if (keys.some((k) => JSON.stringify(x[k]) !== JSON.stringify(B.get(id)[k]))) changed += 1;
+    }
+    return { added, removed, changed };
+  };
+  const keysChanged = (a, b) => [...new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})])]
+    .filter((k) => JSON.stringify(a?.[k]) !== JSON.stringify(b?.[k]));
+  return {
+    windows: diffList(from.windows, to.windows, ["app", "title", "x", "y", "w", "h", "ws", "min", "max", "props"]),
+    widgets: diffList(from.widgets, to.widgets, ["kind", "x", "y", "w", "h", "ws", "pin", "props"]),
+    workspaces: diffList(from.workspaces, to.workspaces, ["name", "wallpaper", "layout"]),
+    theme: keysChanged({ base: from.theme?.base, ...from.theme?.tokens }, { base: to.theme?.base, ...to.theme?.tokens }),
+    animation: from.animation?.preset !== to.animation?.preset ? [to.animation?.preset] : [],
+    wm: keysChanged(from.wm, to.wm),
+    shell: keysChanged(from.shell, to.shell),
+    apps: keysChanged(from.apps, to.apps),
+    widgetKinds: keysChanged(from.widgetKinds, to.widgetKinds),
+    name: from.name !== to.name,
+  };
+}
+
 export function desktopServer(deps) {
   const { sandbox } = deps;
   const doc = () => loadOs(sandbox);
-  const mutate = (fn, op, label) => mutateOs(sandbox, fn, { op, label });
+  const mutate = (fn, op, label, expectRev = null) => mutateOs(sandbox, fn, { op, label, expectRev });
 
   /** Custom app/widget bundles this Sandbox holds, as a portable map. */
   const collectBundles = (d) => ({
@@ -143,9 +182,21 @@ export function desktopServer(deps) {
       },
 
       history: {
-        description: "Revisions available to revert to, newest first.",
-        inputSchema: obj({}),
-        async handler() { return { revisions: osHistory(sandbox), current: doc().rev }; },
+        description: "Revisions available to revert to, newest first. Pass rev to also get what that revision changed against the current document.",
+        inputSchema: obj({ rev: N }),
+        async handler(_ctx, a) {
+          const d = doc();
+          const out = { revisions: osHistory(sandbox), current: d.rev };
+          if (a.rev != null) {
+            const entry = osHistoryEntry(sandbox, a.rev);
+            if (!entry) throw new Error(`no such revision: ${a.rev}`);
+            out.rev = entry.rev;
+            out.label = entry.label;
+            out.ts = entry.ts;
+            out.diff = structuralDiff(entry.doc, d);
+          }
+          return out;
+        },
       },
 
       revert: {
@@ -352,16 +403,72 @@ export function desktopServer(deps) {
       },
 
       layoutSet: {
-        description: "Window management: floating or tiling, gap, snapping, grid size.",
-        inputSchema: obj({ mode: { type: "string", enum: WM_MODES }, gap: N, snap: B, gridSize: N }),
+        description:
+          "Window management: floating or tiling, gap, snapping, grid size — and the tiling tree itself. " +
+          "preset rebuilds a workspace's tree (master-stack, columns, rows, grid); tree sets one explicitly " +
+          "({type:'split',dir:'row'|'col',ratio,a,b} | {type:'leaf',id}). Pixels are the client's business.",
+        inputSchema: obj({
+          mode: { type: "string", enum: WM_MODES }, gap: N, snap: B, gridSize: N,
+          preset: { type: "string", enum: TREE_PRESETS }, ratio: N, ws: N, tree: { type: "object" },
+          expectRev: N,
+        }),
         async handler(_ctx, a) {
+          let ws = null;
           const next = mutate((d) => {
             if (a.mode != null) d.wm.mode = a.mode;
             if (a.gap != null) d.wm.gap = a.gap;
             if (a.snap != null) d.wm.snap = a.snap;
             if (a.gridSize != null) d.wm.gridSize = a.gridSize;
-          }, "layout", `layout → ${a.mode ?? "tuned"}`);
-          return { ok: true, wm: next.wm, rev: next.rev };
+            if (a.preset || a.tree) {
+              ws = wsOf(d, a.ws);
+              const here = d.windows.filter((w) => w.ws === ws.n);
+              if (a.tree) {
+                const cleaned = normalizeTree(a.tree, here.map((w) => w.id));
+                if (!cleaned && here.length) throw new Error("tree names no window on this workspace");
+                ws.layout = cleaned;
+              } else {
+                // Front-most first, so master-stack gives the master to the window in front.
+                const ordered = [...here].sort((x, y) => y.z - x.z).map((w) => w.id);
+                ws.layout = buildTree(ordered, a.preset, { ratio: a.ratio ?? 0.6 });
+              }
+            }
+          }, "layout", `layout → ${a.preset ?? a.mode ?? "tuned"}`, a.expectRev ?? null);
+          const at = ws ? next.workspaces.find((w) => w.n === ws.n) : null;
+          return { ok: true, wm: next.wm, ...(at ? { ws: at.n, layout: at.layout, tree: describeTree(at.layout) } : {}), rev: next.rev };
+        },
+      },
+
+      tile: {
+        description:
+          "Edit the tiling tree of a workspace in place: ratio sets the sash between window id and window with " +
+          "(their lowest common split; without `with`, the split holding id), dir flips that split, swap exchanges two leaves.",
+        inputSchema: obj({
+          ws: N, id: S, with: S, ratio: N, dir: { type: "string", enum: ["row", "col"] }, swap: S, expectRev: N,
+        }, ["id"]),
+        async handler(_ctx, a) {
+          let wsN;
+          const next = mutate((d) => {
+            const w = mustWindow(d, a.id);
+            const ws = wsOf(d, a.ws ?? w.ws);
+            wsN = ws.n;
+            let tree = ws.layout;
+            if (!tree || !treeLeaves(tree).includes(a.id)) throw new Error(`${a.id} is not on workspace ${ws.n}`);
+            if (a.swap) {
+              const other = mustWindow(d, a.swap);
+              if (other.ws !== ws.n) throw new Error(`${a.swap} is on another workspace`);
+              tree = swapLeaves(tree, a.id, a.swap);
+            }
+            if (a.ratio != null || a.dir) {
+              if (a.with) mustWindow(d, a.with);
+              const path = splitFor(tree, a.id, a.with ?? null);
+              if (path == null) throw new Error("no split between those windows");
+              if (a.ratio != null) tree = setRatio(tree, path, a.ratio);
+              if (a.dir) tree = setDir(tree, path, a.dir);
+            }
+            ws.layout = tree;
+          }, "tile", a.swap ? "swap tiles" : a.dir ? "flip split" : "resize split", a.expectRev ?? null);
+          const at = next.workspaces.find((w) => w.n === wsN);
+          return { ok: true, ws: wsN, layout: at.layout, tree: describeTree(at.layout), rev: next.rev };
         },
       },
 
@@ -466,14 +573,18 @@ export function desktopServer(deps) {
         async handler(_ctx, a) {
           let win;
           const next = mutate((d) => {
-            const desc = appDescriptor(d, a.app);
-            if (!desc) throw new Error(`no such app: ${a.app}`);
-            if (desc.kind === "alias") throw new Error(`${a.app} is an alias; open ${desc.source?.target ?? "its target"}`);
+            // An alias is a name for another app: the window runs the target,
+            // wears the alias's title, and the dock lights the alias's icon.
+            const alias = appDescriptor(d, a.app);
+            if (!alias) throw new Error(`no such app: ${a.app}`);
+            const targetId = alias.kind === "alias" ? resolveAlias(d, a.app) : a.app;
+            const desc = targetId ? appDescriptor(d, targetId) : null;
+            if (!desc || desc.kind === "alias") throw new Error(`${a.app} points at an app this machine does not have`);
             const ws = a.ws != null ? Number(a.ws) : d.activeWorkspace;
             if (!d.workspaces.some((x) => x.n === ws)) throw new Error(`no such workspace: ${ws}`);
 
             const existing = desc.window?.singleton
-              ? d.windows.find((x) => x.app === a.app && x.ws === ws) : null;
+              ? d.windows.find((x) => x.app === targetId && x.ws === ws) : null;
             if (existing) {
               existing.min = false;
               existing.z = ++d.zTop;
@@ -483,8 +594,8 @@ export function desktopServer(deps) {
             if (d.windows.length >= LIMITS.windows) throw new Error(`window limit reached (${LIMITS.windows})`);
             const at = cascadeFor(d, ws);
             win = {
-              id: rid("w"), app: a.app,
-              title: a.title ?? desc.name,
+              id: rid("w"), app: targetId,
+              title: a.title ?? alias.name,
               x: a.x ?? at.x, y: a.y ?? at.y,
               w: a.w ?? desc.window.w, h: a.h ?? desc.window.h,
               z: ++d.zTop, ws, min: false, max: false, props: a.props ?? {},
@@ -509,28 +620,37 @@ export function desktopServer(deps) {
       },
 
       move: {
-        description: "Move a window.",
-        inputSchema: obj({ id: S, x: N, y: N }, ["id"]),
+        description: "Move a window — or several windows and widgets at once with items:[{id,x,y}] (one revision, one audit row: an alignment is one intention).",
+        inputSchema: obj({ id: S, x: N, y: N, items: { type: "array", items: { type: "object" } }, expectRev: N }),
         async handler(_ctx, a) {
+          const items = Array.isArray(a.items) ? a.items : a.id ? [{ id: a.id, x: a.x, y: a.y }] : [];
+          if (!items.length) throw new Error("id or items required");
           const next = mutate((d) => {
-            const w = mustWindow(d, a.id);
-            if (a.x != null) w.x = Number(a.x);
-            if (a.y != null) w.y = Number(a.y);
-          }, "move", "move window");
-          return { ok: true, window: findWindow(next, a.id), rev: next.rev };
+            for (const it of items) {
+              const el = findWindow(d, it.id) ?? mustWidget(d, it.id);
+              if (it.x != null) el.x = Number(it.x);
+              if (it.y != null) el.y = Number(it.y);
+              if (it.pin != null && el.kind) el.pin = it.pin;
+            }
+          }, "move", items.length > 1 ? `move ${items.length} elements` : "move window", a.expectRev ?? null);
+          return { ok: true, window: a.id ? findWindow(next, a.id) ?? findWidget(next, a.id) : null, moved: items.length, rev: next.rev };
         },
       },
 
       resize: {
-        description: "Resize a window.",
-        inputSchema: obj({ id: S, w: N, h: N }, ["id"]),
+        description: "Resize a window — or several windows and widgets at once with items:[{id,w,h}].",
+        inputSchema: obj({ id: S, w: N, h: N, items: { type: "array", items: { type: "object" } }, expectRev: N }),
         async handler(_ctx, a) {
+          const items = Array.isArray(a.items) ? a.items : a.id ? [{ id: a.id, w: a.w, h: a.h }] : [];
+          if (!items.length) throw new Error("id or items required");
           const next = mutate((d) => {
-            const win = mustWindow(d, a.id);
-            if (a.w != null) win.w = Number(a.w);
-            if (a.h != null) win.h = Number(a.h);
-          }, "resize", "resize window");
-          return { ok: true, window: findWindow(next, a.id), rev: next.rev };
+            for (const it of items) {
+              const el = findWindow(d, it.id) ?? mustWidget(d, it.id);
+              if (it.w != null) el.w = Number(it.w);
+              if (it.h != null) el.h = Number(it.h);
+            }
+          }, "resize", items.length > 1 ? `resize ${items.length} elements` : "resize window", a.expectRev ?? null);
+          return { ok: true, window: a.id ? findWindow(next, a.id) ?? findWidget(next, a.id) : null, resized: items.length, rev: next.rev };
         },
       },
 
@@ -549,8 +669,8 @@ export function desktopServer(deps) {
       },
 
       windowSet: {
-        description: "Change a window: title, minimized, maximized, workspace, props.",
-        inputSchema: obj({ id: S, title: S, min: B, max: B, ws: N, props: { type: "object" } }, ["id"]),
+        description: "Change a window: title, minimized, maximized, workspace, props; back:true sends it behind everything.",
+        inputSchema: obj({ id: S, title: S, min: B, max: B, ws: N, props: { type: "object" }, back: B, expectRev: N }, ["id"]),
         async handler(_ctx, a) {
           const next = mutate((d) => {
             const w = mustWindow(d, a.id);
@@ -562,16 +682,24 @@ export function desktopServer(deps) {
               w.ws = Number(a.ws);
             }
             if (a.props) w.props = { ...w.props, ...a.props };
-          }, "windowSet", "window");
+            if (a.back) {
+              // Everything else steps up by one; this window takes the floor.
+              const floor = Math.min(...d.windows.map((x) => x.z));
+              w.z = Math.max(0, floor - 1);
+            }
+          }, "windowSet", a.back ? "send to back" : "window", a.expectRev ?? null);
           return { ok: true, window: findWindow(next, a.id), rev: next.rev };
         },
       },
 
       arrange: {
-        description: "Lay out a workspace's windows: grid, cascade, stack or centre.",
+        description:
+          "Lay out a workspace's windows: grid, cascade, stack, center, master-stack, columns, rows, or " +
+          "fullscreen-focus. In tiling mode the tree presets rebuild the tree; in floating mode they " +
+          "write geometry from the viewport you pass.",
         inputSchema: obj({
-          preset: { type: "string", enum: ["grid", "cascade", "stack", "center"] },
-          ws: N, viewport: { type: "object" },
+          preset: { type: "string", enum: ["grid", "cascade", "stack", "center", ...TREE_PRESETS, "fullscreen-focus"] },
+          ws: N, viewport: { type: "object" }, ratio: N, expectRev: N,
         }, ["preset"]),
         async handler(_ctx, a) {
           const vw = Math.max(320, Number(a.viewport?.w) || 1280);
@@ -581,6 +709,26 @@ export function desktopServer(deps) {
             const wins = d.windows.filter((w) => w.ws === ws && !w.min);
             if (!wins.length) return;
             const gap = d.wm.gap;
+            if (a.preset === "fullscreen-focus") {
+              const top = [...wins].sort((x, y) => y.z - x.z)[0];
+              for (const w of wins) w.max = w.id === top.id;
+              return;
+            }
+            if (TREE_PRESETS.includes(a.preset) && a.preset !== "grid" || (a.preset === "grid" && d.wm.mode === "tiling")) {
+              const ordered = [...wins].sort((x, y) => y.z - x.z).map((w) => w.id);
+              const tree = buildTree(ordered, a.preset, { ratio: a.ratio ?? 0.6 });
+              const here = wsOf(d, ws);
+              here.layout = normalizeTree(tree, d.windows.filter((w) => w.ws === ws).map((w) => w.id));
+              if (d.wm.mode !== "tiling") {
+                // Floating: the tree is the recipe, the viewport makes it pixels.
+                const boxes = treeBoxes(tree, { x: 0, y: 0, w: vw, h: vh }, gap);
+                for (const w of wins) {
+                  const b = boxes.get(w.id);
+                  if (b) Object.assign(w, b, { max: false });
+                }
+              }
+              return;
+            }
             if (a.preset === "grid") {
               const cols = Math.ceil(Math.sqrt(wins.length));
               const rows = Math.ceil(wins.length / cols);
@@ -608,8 +756,10 @@ export function desktopServer(deps) {
                 w.y = Math.max(gap, Math.round((vh - w.h) / 2));
               });
             }
-          }, "arrange", `arrange ${a.preset}`);
-          return { ok: true, windows: next.windows.filter((w) => w.ws === (a.ws ?? next.activeWorkspace)), rev: next.rev };
+          }, "arrange", `arrange ${a.preset}`, a.expectRev ?? null);
+          const wsN = a.ws != null ? Number(a.ws) : next.activeWorkspace;
+          const layout = next.workspaces.find((w) => w.n === wsN)?.layout ?? null;
+          return { ok: true, windows: next.windows.filter((w) => w.ws === wsN), layout, rev: next.rev };
         },
       },
 
@@ -623,7 +773,7 @@ export function desktopServer(deps) {
             type: "string",
             enum: ["left", "right", "top", "bottom", "topleft", "topright", "bottomleft", "bottomright", "full", "center"],
           },
-          viewport: { type: "object" },
+          viewport: { type: "object" }, expectRev: N,
         }, ["id", "region"]),
         async handler(_ctx, a) {
           const vw = Math.max(320, Number(a.viewport?.w) || 1280);
@@ -646,7 +796,7 @@ export function desktopServer(deps) {
               center: { x: Math.round((vw - w.w) / 2), y: Math.round((vh - w.h) / 2), w: w.w, h: w.h },
             }[a.region];
             Object.assign(w, box, { min: false, max: false, z: ++d.zTop });
-          }, "snap", `snap ${a.region}`);
+          }, "snap", `snap ${a.region}`, a.expectRev ?? null);
           return { ok: true, window: findWindow(next, a.id), rev: next.rev };
         },
       },
@@ -748,7 +898,7 @@ export function desktopServer(deps) {
 
       widgetSet: {
         description: "Move, resize, re-home or reconfigure a placed widget.",
-        inputSchema: obj({ id: S, x: N, y: N, w: N, h: N, ws: N, pin: S, props: { type: "object" } }, ["id"]),
+        inputSchema: obj({ id: S, x: N, y: N, w: N, h: N, ws: N, pin: S, props: { type: "object" }, expectRev: N }, ["id"]),
         async handler(_ctx, a) {
           const next = mutate((d) => {
             const g = mustWidget(d, a.id);
@@ -759,7 +909,7 @@ export function desktopServer(deps) {
               g.ws = Number(a.ws);
             }
             if (a.props) g.props = { ...g.props, ...a.props };
-          }, "widgetSet", "widget");
+          }, "widgetSet", "widget", a.expectRev ?? null);
           return { ok: true, widget: findWidget(next, a.id), rev: next.rev };
         },
       },
@@ -797,6 +947,7 @@ export function desktopServer(deps) {
             if (!app) throw new Error("invalid app definition");
             if (app.kind === "url" && !app.url) throw new Error("kind='url' needs a http(s) url");
             d.apps[a.id] = app;
+            if (app.kind === "alias" && !resolveAlias(d, a.id)) throw new Error(`${a.id} would point at itself, round a loop, or through too many aliases`);
             seeded = !prior && app.kind === "bundle" && app.origin === "store";
           }, "appDefine", `app ${a.id}`);
 
@@ -972,6 +1123,7 @@ export function desktopServer(deps) {
         inputSchema: obj({
           title: S, body: S, app: S,
           kind: { type: "string", enum: ["ok", "warn", "err", "info", "accent"] },
+          action: { type: "object" },
         }, ["title"]),
         async handler(_ctx, a) {
           let note;
@@ -979,6 +1131,7 @@ export function desktopServer(deps) {
             note = {
               id: rid("n"), app: a.app ?? "system", title: a.title,
               body: a.body ?? "", kind: a.kind ?? "info", ts: Date.now(), read: false,
+              ...(a.action ? { action: a.action } : {}),
             };
             d.notifications.push(note);
             while (d.notifications.length > LIMITS.notifications) d.notifications.shift();
@@ -999,11 +1152,13 @@ export function desktopServer(deps) {
       },
 
       notificationsClear: {
-        description: "Empty the notification centre.",
-        inputSchema: obj({}),
-        async handler() {
-          const next = mutate((d) => { d.notifications = []; }, "notificationsClear", "notifications cleared");
-          return { ok: true, rev: next.rev };
+        description: "Empty the notification centre, or dismiss one by id.",
+        inputSchema: obj({ id: S }),
+        async handler(_ctx, a) {
+          const next = mutate((d) => {
+            d.notifications = a.id ? d.notifications.filter((n) => n.id !== a.id) : [];
+          }, "notificationsClear", a.id ? "notification dismissed" : "notifications cleared");
+          return { ok: true, remaining: next.notifications.length, rev: next.rev };
         },
       },
 

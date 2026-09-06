@@ -8,7 +8,7 @@
 // paints optimistically and commits on release, so dragging costs one write
 // rather than sixty.
 
-import { api, slug } from "../core.js";
+import { api, slug, toast } from "../core.js";
 
 const listeners = new Set();
 const emit = (kind) => { for (const fn of listeners) { try { fn(kind); } catch (e) { console.error(e); } } };
@@ -52,19 +52,46 @@ export async function refreshDoc() {
 let wantRev = 0;
 let catchup = null;
 
+/** Tools whose arguments describe a *place* — where a gesture or an inspector
+ *  field put something. Those commit conditionally on the revision they were
+ *  painted against, so a concurrent agent edit is surfaced, not overwritten. */
+const CONDITIONAL = new Set(["move", "resize", "snap", "tile", "widgetSet", "windowSet", "layoutSet", "arrange"]);
+
+let staleToastAt = 0;
+
 /**
  * Call a desktop tool. The result carries the new revision; if the event stream
  * has not caught us up shortly after, we pull. Belt and braces, because a desktop
  * that silently stops reflecting reality is worse than one that flickers.
+ *
+ * A stale write — the document moved under us — is refreshed and announced,
+ * never retried blindly: last-write-wins is honest only when the loser knows.
  */
-export async function call(tool, args = {}) {
-  const r = await api.mcp("desktop", tool, args);
-  if (typeof r?.rev === "number") {
-    wantRev = Math.max(wantRev, r.rev);
-    clearTimeout(catchup);
-    catchup = setTimeout(() => { if ((os.doc?.rev ?? 0) < wantRev) refreshDoc().catch(() => {}); }, 600);
+export async function call(tool, args = {}, { conditional = CONDITIONAL.has(tool) } = {}) {
+  const sent = conditional && os.doc && args.expectRev === undefined ? { ...args, expectRev: os.doc.rev } : args;
+  try {
+    const r = await api.mcp("desktop", tool, sent);
+    if (typeof r?.rev === "number") {
+      wantRev = Math.max(wantRev, r.rev);
+      clearTimeout(catchup);
+      catchup = setTimeout(() => { if ((os.doc?.rev ?? 0) < wantRev) refreshDoc().catch(() => {}); }, 600);
+    }
+    return r;
+  } catch (e) {
+    if (e?.code === "stale_rev") {
+      await refreshDoc().catch(() => {});
+      if (Date.now() - staleToastAt > 1500) {
+        staleToastAt = Date.now();
+        toast("Desktop moved — refreshed", { body: "Someone else (or an agent) changed it first. Your last change was not applied.", kind: "", timeout: 3500 });
+      }
+      emit("stale");
+      const err = new Error("stale");
+      err.code = "stale_rev";
+      err.silent = true;
+      throw err;
+    }
+    throw e;
   }
-  return r;
 }
 
 /** Paint a change locally without writing it. For the duration of a gesture only. */
@@ -103,6 +130,7 @@ export function connect() {
         loadOs().catch(() => {});
       }
     } else if (ev.op === "appFiles" || ev.op === "widgetFiles") {
+      os.lastBundleChange = { id: ev.app ?? ev.kind ?? "", path: ev.path ?? null, at: Date.now() };
       emit("bundle:" + (ev.app ?? ev.kind ?? ""));
     }
   };

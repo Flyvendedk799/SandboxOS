@@ -269,6 +269,14 @@ export function createBuilder({ onOpenCode } = {}) {
         { name: "permissions", label: "Capabilities", value: (a.permissions ?? []).join(", "),
           hint: "e.g. fs.read, ports.list" },
         { name: "size", label: "Default size", value: `${a.window.w}x${a.window.h}` },
+        { name: "singleton", label: "One window at a time", type: "select", value: a.window.singleton ? "yes" : "no",
+          options: [{ value: "no", label: "No" }, { value: "yes", label: "Yes" }] },
+        { name: "opens", label: "Opens file types", value: extsFor(a.id).join(", "), hint: "e.g. .csv, .log — Files and Spotlight will use it" },
+        ...(a.kind === "bundle" ? [
+          { name: "origin", label: "Source lives in", type: "select", value: a.source?.origin ?? "store",
+            options: [{ value: "store", label: "the OS store (edited in Code, travels with distros)" }, { value: "volume", label: "the Cell volume (edited in Files, versioned by Tide)" }] },
+          { name: "volumePath", label: "Volume path", value: a.source?.volumePath ?? `apps/${a.id}`, hint: "only for volume origin" },
+        ] : []),
       ],
       confirmLabel: "Save",
     });
@@ -281,12 +289,25 @@ export function createBuilder({ onOpenCode } = {}) {
         icon: got.icon,
         hue: got.hue,
         permissions: String(got.permissions ?? "").split(/[,\s]+/).filter(Boolean),
-        window: { w: w || a.window.w, h: hh || a.window.h },
+        window: { w: w || a.window.w, h: hh || a.window.h, singleton: got.singleton === "yes" },
+        ...(got.origin ? { origin: got.origin, volumePath: got.volumePath || undefined } : {}),
       });
+      await syncAssociations(a.id, got.opens);
       dropSession(a.id); // its capability set may have changed
       await loadOs();
       toast(`${got.name} updated`, { kind: "ok" });
     } catch (e) { toastError("Could not update the app", e); }
+  }
+
+  /** Extensions currently routed to an app. */
+  const extsFor = (id) => Object.entries(os.doc.shell.associations ?? {}).filter(([, app]) => app === id).map(([ext]) => ext);
+
+  /** Make `associations` say exactly `list` for this app: add the new, clear the old. */
+  async function syncAssociations(id, list) {
+    const want = new Set(String(list ?? "").split(/[,\s]+/).filter(Boolean).map((e) => (e.startsWith(".") ? e : `.${e}`).toLowerCase()));
+    const have = new Set(extsFor(id));
+    for (const ext of want) if (!have.has(ext)) await call("associate", { ext, app: id }).catch((e) => toastError(`Could not claim ${ext}`, e));
+    for (const ext of have) if (!want.has(ext)) await call("associate", { ext, app: null }).catch(() => {});
   }
 
   function appMenu(a, ev) {
@@ -346,14 +367,84 @@ export function createBuilder({ onOpenCode } = {}) {
     );
   }
 
+  const when = (ts) => {
+    const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+    if (s < 60) return "now";
+    if (s < 3600) return `${Math.round(s / 60)}m`;
+    if (s < 86_400) return `${Math.round(s / 3600)}h`;
+    return new Date(ts).toLocaleDateString();
+  };
+
+  /** "3 windows · theme · dock" — what a revision changed, in words. */
+  function diffSummary(diff) {
+    const parts = [];
+    const list = (name, d) => {
+      const n = (d?.added ?? 0) + (d?.removed ?? 0) + (d?.changed ?? 0);
+      if (n) parts.push(`${n} ${name}${n > 1 ? "s" : ""}`);
+    };
+    list("window", diff.windows);
+    list("widget", diff.widgets);
+    list("workspace", diff.workspaces);
+    if (diff.theme?.length) parts.push(`theme (${diff.theme.join(", ")})`);
+    if (diff.animation?.length) parts.push("motion");
+    if (diff.wm?.length) parts.push(`layout (${diff.wm.join(", ")})`);
+    if (diff.shell?.length) parts.push(`shell (${diff.shell.join(", ")})`);
+    if (diff.apps?.length) parts.push(`apps (${diff.apps.join(", ")})`);
+    if (diff.widgetKinds?.length) parts.push(`widget kinds (${diff.widgetKinds.join(", ")})`);
+    if (diff.name) parts.push("name");
+    return parts.length ? parts.join(" · ") : "identical to now";
+  }
+
+  async function revertTo(rev) {
+    let summary = "";
+    try { summary = diffSummary((await call("history", { rev: rev.rev })).diff); } catch { /* fine */ }
+    const ok = await confirmDialog(`Go back to revision ${rev.rev}?`,
+      `${rev.label || "unlabelled"} · ${when(rev.ts)}. Restoring changes: ${summary}. The restore is itself a new revision, so it can be undone.`,
+      { confirmLabel: "Revert", danger: false });
+    if (!ok) return;
+    try { await call("revert", { rev: rev.rev }); await loadOs(); toast(`Back at r${rev.rev}`, { kind: "ok" }); }
+    catch (e) { toastError("Could not revert", e); }
+  }
+
+  async function showDiff(rev, host) {
+    try {
+      const r = await call("history", { rev: rev.rev });
+      const d = r.diff;
+      const row = (k, v) => h("div.diff-row", null, h("span.k", k), h("span.v", v));
+      const listV = (x) => `+${x.added} −${x.removed} ~${x.changed}`;
+      fill(host,
+        row("windows", listV(d.windows)), row("widgets", listV(d.widgets)), row("workspaces", listV(d.workspaces)),
+        row("theme", d.theme.length ? d.theme.join(", ") : "—"),
+        row("motion", d.animation.length ? d.animation.join(", ") : "—"),
+        row("layout", d.wm.length ? d.wm.join(", ") : "—"),
+        row("shell", d.shell.length ? d.shell.join(", ") : "—"),
+        row("apps", d.apps.length ? d.apps.join(", ") : "—"),
+        h("div.dim", { style: { fontSize: "10.5px", padding: "4px 0" } }, "Counts are this revision → now: added, removed, changed."));
+    } catch (e) { fill(host, h("div.dim", e.message)); }
+  }
+
   async function paintHistory(host) {
     if (!host) return;
     try {
       const r = await call("history", {});
-      fill(host, ...(r.revisions.slice(0, 8).map((rev) => h("button.layer-row", {
-        onclick: async () => { await call("revert", { rev: rev.rev }); await loadOs(); },
-      }, icon("refresh", 14), h("span.nm", rev.label || `rev ${rev.rev}`), h("span.sub", `r${rev.rev}`)))
-        || [h("div.dim", "No history yet.")]));
+      const openDiff = new Set();
+      const paint = () => fill(host, ...(r.revisions.length ? r.revisions.map((rev) => {
+        const diffHost = h("div.diff-box", { hidden: !openDiff.has(rev.rev) });
+        if (openDiff.has(rev.rev)) showDiff(rev, diffHost);
+        return h("div.hist-item", null,
+          h("button.layer-row", {
+            title: `Revert to r${rev.rev}`,
+            onclick: () => revertTo(rev),
+            oncontextmenu: (e) => { e.preventDefault(); openDiff.has(rev.rev) ? openDiff.delete(rev.rev) : openDiff.add(rev.rev); paint(); },
+          }, icon("refresh", 14), h("span.nm", rev.label || `rev ${rev.rev}`), h("span.sub", `r${rev.rev} · ${when(rev.ts)}`)),
+          h("button.diff-toggle", {
+            title: "What changed since this revision",
+            onclick: () => { openDiff.has(rev.rev) ? openDiff.delete(rev.rev) : openDiff.add(rev.rev); paint(); },
+          }, openDiff.has(rev.rev) ? "hide" : "diff"),
+          diffHost);
+      }) : [h("div.dim", { style: { padding: "4px 8px", fontSize: "11px" } }, "No history yet. Every change to the desktop will appear here.")]),
+      h("div.dim", { style: { padding: "6px 8px", fontSize: "10.5px" } }, `${r.revisions.length} of ${os.snap?.limits?.history ?? 40} revisions kept · current r${r.current}`));
+      paint();
     } catch { /* history is a nicety */ }
   }
 

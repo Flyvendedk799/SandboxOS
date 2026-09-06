@@ -16,6 +16,7 @@ import { mountApp } from "./builtins.js";
 import { mountWidget } from "./widgets.js";
 import { createFrame, destroyFrame, appSession, reloadFramesFor } from "./frames.js";
 import { iconName } from "./sprite.js";
+import { pruneTree, treeBoxes, treeSashes } from "./lib/layout.js";
 
 /** How close to an edge a drag has to get before it offers to snap. */
 const SNAP_EDGE = 26;
@@ -40,23 +41,81 @@ export function createDesktop({ root, ctx = {} }) {
 
   // ── geometry ──────────────────────────────────────────────────────────────
 
+  /** The workspace's tiling tree, pruned to the windows actually on screen, as
+   *  pixel boxes. Same tree, same arithmetic as the server — a second viewport
+   *  gets different pixels from the same document, which is the whole point. */
   function tileBoxes(list) {
-    const gap = doc().wm.gap ?? 12;
+    const d = doc();
+    const gap = d.wm.gap ?? 12;
     const rect = root.getBoundingClientRect();
-    const cols = Math.ceil(Math.sqrt(list.length)) || 1;
-    const rows = Math.ceil(list.length / cols) || 1;
-    const cw = (rect.width - gap * (cols + 1)) / cols;
-    const ch = (rect.height - gap * (rows + 1)) / rows;
+    const ws = d.workspaces.find((w) => w.n === d.activeWorkspace);
+    const tree = pruneTree(ws?.layout, list.map((w) => w.id));
+    const boxes = treeBoxes(tree, { x: 0, y: 0, w: rect.width, h: rect.height }, gap);
     const out = new Map();
-    list.forEach((w, i) => {
-      out.set(w.id, {
-        left: gap + (i % cols) * (cw + gap),
-        top: gap + Math.floor(i / cols) * (ch + gap),
-        width: Math.max(160, cw),
-        height: Math.max(100, ch),
+    for (const [id, b] of boxes) {
+      out.set(id, { left: b.x, top: b.y, width: Math.max(160, b.w), height: Math.max(100, b.h) });
+    }
+    return { boxes: out, sashes: treeSashes(tree, { x: 0, y: 0, w: rect.width, h: rect.height }, gap) };
+  }
+
+  // ── sashes: the grab bars between tiled siblings ───────────────────────────
+  const sashLayer = h("div.os-sashes");
+  root.append(sashLayer);
+  let sashGesture = null;
+
+  function paintSashes(sashes) {
+    if (!sashes?.length) { sashLayer.replaceChildren(); return; }
+    sashLayer.replaceChildren(...sashes.map((s) => {
+      const el = h("div.os-sash", { class: s.dir });
+      Object.assign(el.style, { left: `${s.x}px`, top: `${s.y}px`, width: `${s.w}px`, height: `${s.h}px` });
+      el.addEventListener("pointerdown", (e) => startSash(e, s));
+      return el;
+    }));
+  }
+
+  function startSash(e, s) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    sashGesture = { s, sx: e.clientX, sy: e.clientY, ratio: s.ratio };
+    root.classList.add("sashing");
+    const onMove = (ev) => {
+      if (!sashGesture) return;
+      const delta = s.dir === "row" ? ev.clientX - sashGesture.sx : ev.clientY - sashGesture.sy;
+      const ratio = Math.min(0.9, Math.max(0.1, s.ratio + delta / Math.max(1, s.span)));
+      sashGesture.ratio = ratio;
+      // Paint locally against the document's tree: the split that separates the
+      // first leaf on each side is the one the server will resize too.
+      localPatch((d) => {
+        const ws = d.workspaces.find((w) => w.n === d.activeWorkspace);
+        if (ws?.layout) ws.layout = setRatioBetween(ws.layout, s.a, s.b, ratio);
       });
-    });
-    return out;
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      root.classList.remove("sashing");
+      const g = sashGesture;
+      sashGesture = null;
+      if (!g || Math.abs(g.ratio - s.ratio) < 0.002) return;
+      call("tile", { id: s.a, with: s.b, ratio: Math.round(g.ratio * 1000) / 1000 })
+        .catch((err) => toastError("Could not resize the split", err));
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+  }
+
+  /** setRatio on the lowest common split of two leaves — the client-side twin of
+   *  what `desktop.tile { id, with, ratio }` does. */
+  function setRatioBetween(tree, a, b, ratio) {
+    const has = (n, id) => (n.type === "leaf" ? n.id === id : has(n.a, id) || has(n.b, id));
+    const walk = (n) => {
+      if (n.type === "leaf") return n;
+      const aInA = has(n.a, a), bInA = has(n.a, b);
+      if (aInA && bInA) return { ...n, a: walk(n.a) };
+      if (!aInA && !bInA) return { ...n, b: walk(n.b) };
+      return { ...n, ratio };
+    };
+    return walk(tree);
   }
 
   const isCompact = () => root.getBoundingClientRect().width < COMPACT_WIDTH;
@@ -242,7 +301,24 @@ export function createDesktop({ root, ctx = {} }) {
       frame = createFrame({ id: g.kind, kind: "widget" });
       el.append(handle, frame);
       el.classList.add("framed");
-      stop = () => destroyFrame(frame);
+      // `refreshMs` is the widget's own request to be ticked. The host keeps the
+      // clock, not the frame: a hidden workspace, a folded phone or a background
+      // tab pauses it, so a definition cannot burn the machine from off-screen.
+      let timer = null;
+      const tick = () => {
+        if (el.hidden || document.hidden) return;
+        try { frame.contentWindow?.postMessage({ __sbx: 1, id: "event", type: "event", event: "tick", detail: { at: Date.now() } }, "*"); }
+        catch { /* frame gone */ }
+      };
+      const arm = () => {
+        clearInterval(timer);
+        const ms = Number(meta.refreshMs) || 0;
+        if (ms >= 1000) timer = setInterval(tick, ms);
+      };
+      arm();
+      const onVis = () => tick();
+      document.addEventListener("visibilitychange", onVis);
+      stop = () => { clearInterval(timer); document.removeEventListener("visibilitychange", onVis); destroyFrame(frame); };
     } else {
       const inner = mountWidget(g.kind, el, g, ctx);
       if (inner) stop = inner;
@@ -261,14 +337,20 @@ export function createDesktop({ root, ctx = {} }) {
     return { el, stop, frame, kind: g.kind };
   }
 
-  function placeWidget(el, g) {
+  function placeWidget(el, g, entry) {
     const rect = root.getBoundingClientRect();
     el.style.width = `${g.w}px`;
     el.style.height = `${g.h}px`;
     el.style.top = `${g.y}px`;
     if (g.pin === "right") { el.style.right = "20px"; el.style.left = "auto"; }
     else { el.style.left = `${g.x}px`; el.style.right = "auto"; }
-    el.hidden = g.ws !== doc().activeWorkspace;
+    const hidden = g.ws !== doc().activeWorkspace;
+    if (el.hidden !== hidden) {
+      el.hidden = hidden;
+      // A framed widget is told when it comes and goes, so it can stop polling.
+      try { entry?.frame?.contentWindow?.postMessage({ __sbx: 1, id: "event", type: "event", event: "visibility", detail: { visible: !hidden } }, "*"); }
+      catch { /* frame gone */ }
+    }
     if (g.x > rect.width) el.style.left = `${Math.max(0, rect.width - g.w - 20)}px`;
   }
 
@@ -372,6 +454,7 @@ export function createDesktop({ root, ctx = {} }) {
     const d = doc();
     if (!d) return;
     root.classList.toggle("design", design());
+    root.classList.toggle("tiling", d.wm.mode === "tiling");
 
     // Windows.
     const live = new Set(d.windows.map((w) => w.id));
@@ -381,7 +464,10 @@ export function createDesktop({ root, ctx = {} }) {
     const openHere = d.windows.filter((w) => w.ws === d.activeWorkspace && !w.min);
     const compact = isCompact();
     root.classList.toggle("compact", compact);
-    const tiles = !compact && d.wm.mode === "tiling" ? tileBoxes(openHere.filter((w) => !w.max)) : null;
+    const tiled = !compact && d.wm.mode === "tiling" ? tileBoxes(openHere.filter((w) => !w.max)) : null;
+    const tiles = tiled?.boxes ?? null;
+    if (!sashGesture) paintSashes(tiled?.sashes ?? []);
+    sashLayer.hidden = !tiled;
     const front = [...openHere].sort((a, b) => b.z - a.z)[0]?.id ?? null;
 
     for (const w of d.windows) {
@@ -393,7 +479,8 @@ export function createDesktop({ root, ctx = {} }) {
         entry = buildWindow(w); wins.set(w.id, entry);
       }
       if (entry.title.textContent !== w.title) entry.title.textContent = w.title;
-      entry.el.classList.toggle("selected", design() && os.sel.id === w.id);
+      entry.el.classList.toggle("selected", design() && (os.sel.id === w.id || os.sel.ids?.includes(w.id)));
+      entry.el.classList.toggle("front", w.id === front);
       entry.el.classList.toggle("draggable", !compact && d.wm.mode === "floating" && !w.max);
       entry.el.querySelector(".os-resize").hidden = compact || d.wm.mode === "tiling" || w.max;
       placeWindow(entry.el, w, tiles, front);
@@ -411,9 +498,9 @@ export function createDesktop({ root, ctx = {} }) {
         entry = buildWidget(g);
         widgets.set(g.id, entry);
       }
-      entry.el.classList.toggle("selected", design() && os.sel.id === g.id);
+      entry.el.classList.toggle("selected", design() && (os.sel.id === g.id || os.sel.ids?.includes(g.id)));
       entry.el.classList.add("draggable");
-      placeWidget(entry.el, g);
+      placeWidget(entry.el, g, entry);
     }
   }
 
@@ -444,7 +531,10 @@ export function createDesktop({ root, ctx = {} }) {
   // An app whose source just changed should show the change. This is what closes
   // the loop when the agent (or you, in the Studio's Code tab) writes a file.
   const offBundle = onOs((kind) => {
-    if (typeof kind === "string" && kind.startsWith("bundle:")) reloadFramesFor(kind.slice(7));
+    if (typeof kind === "string" && kind.startsWith("bundle:")) {
+      const id = kind.slice(7);
+      reloadFramesFor(id, { path: os.lastBundleChange?.id === id ? os.lastBundleChange.path : null });
+    }
   });
 
   return {

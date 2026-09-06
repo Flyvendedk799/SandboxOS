@@ -7,6 +7,7 @@
 // knows about HTTP, sessions or principals on purpose.
 
 export * from "./schema.js";
+export * from "./layout.js";
 export * from "./themes.js";
 export * from "./animations.js";
 export * from "./catalog.js";
