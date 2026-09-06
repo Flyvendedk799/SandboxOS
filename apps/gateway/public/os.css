@@ -1003,3 +1003,18 @@ body.sashing iframe { pointer-events: none; }
 .os-spotlight.studio .spot-row:hover, .os-spotlight.studio .spot-row.on { background: var(--stx-bg-2); }
 .os-spotlight.studio .spot-row .nm { color: var(--stx-text); }
 .os-spotlight.studio .spot-row .sub { color: var(--stx-text-3); }
+
+/* ── Gallery (Wave D) ────────────────────────────────────────────────────── */
+.distro-thumb { border-radius: 8px; overflow: hidden; border: 1px solid var(--stx-line); margin-bottom: 9px; line-height: 0; }
+.distro-thumb svg { width: 100%; height: auto; display: block; }
+.distro-card .vis {
+  margin-left: auto; padding: 1px 7px; border-radius: 999px; font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+  background: var(--stx-bg-2); color: var(--stx-text-3);
+}
+.distro-card .vis.public { background: rgba(67, 209, 127, .14); color: var(--stx-ok); }
+.distro-card .vis.seed { background: var(--stx-accent-dim); color: var(--stx-accent); }
+.distro-card .vis.private { background: rgba(240, 184, 73, .14); color: var(--stx-warn); }
+.tag-row { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+.tagchip { height: 18px; padding: 0 7px; border: 0; border-radius: 999px; font-size: 10px; background: var(--stx-bg-2); color: var(--stx-text-2); font-family: var(--mono); }
+.tagchip:hover { color: var(--stx-accent); }
+.dropping { outline: 2px dashed var(--stx-accent); outline-offset: 4px; border-radius: 10px; }

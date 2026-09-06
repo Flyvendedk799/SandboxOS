@@ -175,6 +175,11 @@ export function normApp(a) {
     createdAt: num(a.createdAt, 0, Number.MAX_SAFE_INTEGER, Date.now()),
     updatedAt: num(a.updatedAt, 0, Number.MAX_SAFE_INTEGER, Date.now()),
   };
+  // The app's other face: tools an agent can call. Either a thin façade over
+  // existing Kernel tools (`tools[].proxy`), or a companion server shipped in
+  // the bundle (`entrypoint`) and hosted out of process. See ADR-0004.
+  const mcp = normAppMcp(a.mcp, a.id);
+  if (mcp) app.mcp = mcp;
   if (kind === "bundle") {
     app.entry = safeRelPath(a.entry) ?? "index.html";
     app.origin = oneOf(a.origin, ["store", "volume"], "store");
@@ -185,6 +190,44 @@ export function normApp(a) {
     app.target = str(a.target, 64);
   }
   return app;
+}
+
+/** Server names an app may not take: the core catalog, and anything an operator
+ *  would confuse with it. Kept here (not in the Kernel) so a hostile document
+ *  cannot even *declare* a server called `fs`. */
+export const RESERVED_SERVER_NAMES = new Set([
+  "fs", "proc", "cron", "net", "secrets", "pkg", "tide", "agents", "llm", "apps", "ports",
+  "metrics", "desktop", "mcp-registry", "kernel", "registry", "system", "os", "sbx",
+]);
+
+const TOOL_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,47}$/;
+
+function normAppMcp(m, appId) {
+  if (!m || typeof m !== "object") return null;
+  const name = isId(m.name) ? m.name : appId;
+  if (RESERVED_SERVER_NAMES.has(name)) return null;
+  const out = {
+    name,
+    enabled: bool(m.enabled, true),
+    runtime: "host-sandboxed",
+    tools: [],
+  };
+  const entry = safeRelPath(m.entrypoint);
+  if (entry && /\.(m?js)$/.test(entry)) out.entrypoint = entry;
+  for (const t of Array.isArray(m.tools) ? m.tools.slice(0, 32) : []) {
+    if (!t || typeof t !== "object" || !TOOL_NAME_RE.test(t.name ?? "")) continue;
+    const proxy = t.proxy && typeof t.proxy === "object" && PATTERN_RE.test(`${t.proxy.server}.${t.proxy.tool}`) && !String(t.proxy.tool).includes("*")
+      ? { server: String(t.proxy.server), tool: String(t.proxy.tool), args: plainProps(t.proxy.args) }
+      : null;
+    out.tools.push({
+      name: t.name,
+      description: str(t.description, 300),
+      inputSchema: t.inputSchema && typeof t.inputSchema === "object" ? plainProps(t.inputSchema) : { type: "object", properties: {} },
+      ...(proxy ? { proxy } : {}),
+    });
+  }
+  if (!out.entrypoint && !out.tools.length) return null;
+  return out;
 }
 
 export function normWidgetKind(w) {
@@ -279,6 +322,9 @@ export function normalizeDoc(input, { name } = {}) {
         id: str(input.distro.id, 64),
         name: str(input.distro.name, LIMITS.nameLen),
         forkedAt: num(input.distro.forkedAt, 0, Number.MAX_SAFE_INTEGER, Date.now()),
+        // Lineage: where it came from, so a machine can always say what it grew from.
+        ...(input.distro.tenant ? { tenant: str(input.distro.tenant, 64) } : {}),
+        ...(input.distro.visibility ? { visibility: oneOf(input.distro.visibility, ["private", "tenant", "public"], "tenant") } : {}),
       }
     : null;
 

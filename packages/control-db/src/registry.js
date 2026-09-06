@@ -624,23 +624,58 @@ export function updateAgentState(agentId, state, { result = null, error = null, 
 
 /** `os` is the Phase-27 addition: the whole desktop, packaged (see packages/os).
  *  Absent on manifest-only distros, which keep working untouched. */
-export function createDistro(tenantId, { name, description, manifest, os = null }) {
+const VISIBILITIES = new Set(["private", "tenant", "public"]);
+
+export function createDistro(tenantId, { name, description, manifest, os = null, visibility = "tenant", tags = [], preview = null, publisher = null }) {
   const db = openDb();
   const d = {
     id: id("dtr"), tenant_id: tenantId, name, description: description ?? null,
     manifest: JSON.stringify(manifest), os: os == null ? null : JSON.stringify(os), created_at: now(),
+    visibility: VISIBILITIES.has(visibility) ? visibility : "tenant",
+    tags: JSON.stringify((Array.isArray(tags) ? tags : []).slice(0, 12)),
+    preview: preview == null ? null : JSON.stringify(preview),
+    publisher,
   };
-  db.prepare("INSERT INTO distros (id,tenant_id,name,description,manifest,os,created_at) VALUES (?,?,?,?,?,?,?)")
-    .run(d.id, d.tenant_id, d.name, d.description, d.manifest, d.os, d.created_at);
-  return { ...d, manifest, os };
+  db.prepare("INSERT INTO distros (id,tenant_id,name,description,manifest,os,created_at,visibility,tags,preview,publisher) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+    .run(d.id, d.tenant_id, d.name, d.description, d.manifest, d.os, d.created_at, d.visibility, d.tags, d.preview, d.publisher);
+  return { ...d, manifest, os, tags: JSON.parse(d.tags), preview };
 }
+
+const parseJson = (v, dflt) => { try { return v == null ? dflt : JSON.parse(v); } catch { return dflt; } };
 
 const hydrateDistro = (row) => {
   if (!row) return null;
-  let os = null;
-  try { os = row.os ? JSON.parse(row.os) : null; } catch { os = null; }
-  return { ...row, manifest: JSON.parse(row.manifest), os };
+  return { ...row, manifest: parseJson(row.manifest, {}), os: parseJson(row.os, null), tags: parseJson(row.tags, []), preview: parseJson(row.preview, null) };
 };
+
+/** Change who can see a distro. */
+export function setDistroVisibility(tenantId, name, visibility) {
+  if (!VISIBILITIES.has(visibility)) throw new Error(`visibility must be private, tenant or public`);
+  const r = openDb().prepare("UPDATE distros SET visibility=? WHERE tenant_id=? AND name=?").run(visibility, tenantId, name);
+  return { updated: r.changes > 0 };
+}
+
+/** Count a fork, for the gallery's sake. */
+export function bumpDistroForks(distroId) {
+  openDb().prepare("UPDATE distros SET forks = forks + 1 WHERE id=?").run(distroId);
+}
+
+const GALLERY_COLS = "id,tenant_id,name,description,created_at,visibility,tags,preview,publisher,forks,(os IS NOT NULL) AS has_os";
+
+/** Distros this tenant can fork: its own (any visibility, except another
+ *  principal's private ones) plus everyone's public ones. Never the payload. */
+export function listGallery(tenantId, { principalId = null, publicOnly = false, q = "" } = {}) {
+  const db = openDb();
+  const rows = publicOnly
+    ? db.prepare(`SELECT ${GALLERY_COLS} FROM distros WHERE visibility='public' ORDER BY forks DESC, created_at DESC`).all()
+    : db.prepare(`SELECT ${GALLERY_COLS} FROM distros WHERE tenant_id=? OR visibility='public' ORDER BY (tenant_id=?) DESC, created_at DESC`).all(tenantId, tenantId);
+  const needle = String(q ?? "").toLowerCase().trim();
+  return rows
+    .filter((r) => !(r.visibility === "private" && r.tenant_id === tenantId && principalId && r.publisher && r.publisher !== principalId))
+    .filter((r) => !(r.visibility === "private" && r.tenant_id !== tenantId))
+    .map((r) => ({ ...r, tags: parseJson(r.tags, []), preview: parseJson(r.preview, null), mine: r.tenant_id === tenantId }))
+    .filter((r) => !needle || r.name.toLowerCase().includes(needle) || (r.description ?? "").toLowerCase().includes(needle) || r.tags.some((t) => t.includes(needle)));
+}
 
 export function getDistro(distroId) {
   return hydrateDistro(openDb().prepare("SELECT * FROM distros WHERE id=?").get(distroId));
@@ -652,8 +687,8 @@ export function getDistroByName(tenantId, name) {
 
 export function listDistros(tenantId) {
   return openDb().prepare(
-    "SELECT id,tenant_id,name,description,created_at,(os IS NOT NULL) AS has_os FROM distros WHERE tenant_id=? ORDER BY created_at DESC"
-  ).all(tenantId);
+    `SELECT ${GALLERY_COLS} FROM distros WHERE tenant_id=? ORDER BY created_at DESC`
+  ).all(tenantId).map((r) => ({ ...r, tags: parseJson(r.tags, []), preview: parseJson(r.preview, null) }));
 }
 
 export function deleteDistro(tenantId, name) {

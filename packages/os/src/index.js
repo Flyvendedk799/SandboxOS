@@ -8,6 +8,7 @@
 
 export * from "./schema.js";
 export * from "./layout.js";
+export * from "./summary.js";
 export * from "./themes.js";
 export * from "./animations.js";
 export * from "./catalog.js";

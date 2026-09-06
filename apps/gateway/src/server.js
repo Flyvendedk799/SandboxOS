@@ -15,7 +15,7 @@ import {
   createSession, revokeSession, ensureSeed, recentAudit, queryAudit,
   mintMachineToken, createSandboxForTenant,
   createAccount, verifyAccount, getPrimarySandboxForTenant,
-  createDistro, getDistroByName, listDistros, deleteDistro, sandboxCountForTenant,
+  createDistro, getDistro, getDistroByName, listDistros, deleteDistro, sandboxCountForTenant,
   createTenant, totalSandboxCount, tenantAgentStats, getAgent,
   listSandboxesForTenant, deleteSandbox,
   getQuota, setQuota, runningAgentCount, isOperator,
@@ -29,11 +29,12 @@ import {
 import { authorize } from "../../../packages/kernel/src/capabilities.js";
 import { exposedPorts } from "../../../packages/kernel/src/servers/ports.js";
 import { safeResolve, canonicalContained, canonicalLeafContained } from "../../../packages/kernel/src/servers/fs.js";
-import { loadManifest } from "../../../packages/manifest/src/manifest.js";
+import { loadManifest, saveManifest } from "../../../packages/manifest/src/manifest.js";
 import {
   loadOs, osEvents, resolveTheme, themeCss, resolveAnimation, animationCss,
   appDescriptor, widgetDescriptor, effectivePermissions, withheldPermissions,
   readBundleFile, bundleType, safeRelPath, destroyOs,
+  importPayload, importBundle, saveOs, docFromDistroSpec, builtinDistro,
 } from "../../../packages/os/src/index.js";
 import { putTenantSecret, removeTenantSecret } from "../../../packages/secrets/src/store.js";
 import { providerConfig, providerOptions } from "../../../packages/llm/src/providers.js";
@@ -582,7 +583,7 @@ async function handle(req, res) {
   if (top === "api" && segments[2] === "sandboxes" && req.method === "POST" && !segments[3]) {
     const principal = authenticate(req);
     if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
-    const { slug: newSlug, name, distro: distroName } = await readBody(req);
+    const { slug: newSlug, name, distro: distroName, seed } = await readBody(req);
     if (!SLUG_RE.test(newSlug ?? "") || RESERVED.has(newSlug)) return sendJson(res, 400, { ok: false, error: "invalid slug" });
     // Backlog #7: fail safe — never create a Cell on the unisolated local backend
     // when isolation is required (production multi-tenant posture).
@@ -596,14 +597,34 @@ async function handle(req, res) {
     try {
       const sb = createSandboxForTenant(principal.tenant_id, principal.id, { slug: newSlug, name, cellBackend: cellBackend() });
       seedVolume(sb);
+      let wearing = null;
       if (distroName) {
-        const distro = getDistroByName(principal.tenant_id, distroName);
-        if (distro) {
-          const { saveManifest } = await import("../../../packages/manifest/src/manifest.js");
-          saveManifest(sb, distro.manifest);
+        // A distro is one snapshot with two layers: the Cell's composition
+        // (its manifest) and, when it has one, the desktop. A new machine
+        // wakes up wearing both. Your tenant's rows, or anyone's public one.
+        const distro = getDistroByName(principal.tenant_id, distroName) ?? getDistro(distroName);
+        if (distro && (distro.tenant_id === principal.tenant_id || distro.visibility === "public")) {
+          if (distro.manifest?.servers) saveManifest(sb, { ...loadManifest(sb), ...distro.manifest, installed: {} });
+          if (distro.os) {
+            try {
+              const { doc, bundles } = importPayload(distro.os, {
+                name: name ?? distro.name,
+                distro: { id: distro.id, name: distro.name, tenant: distro.tenant_id, visibility: distro.visibility ?? "tenant" },
+                trusted: distro.tenant_id === principal.tenant_id,
+              });
+              for (const [id, files] of Object.entries(bundles.apps ?? {})) importBundle(sb, "app", id, files);
+              for (const [kind, files] of Object.entries(bundles.widgets ?? {})) importBundle(sb, "widget", kind, files);
+              saveOs(sb, doc, { label: `from ${distro.name}` });
+              wearing = distro.name;
+            } catch { /* a bad payload leaves a plain machine, not no machine */ }
+          }
         }
+      } else if (seed) {
+        // First run does not have to be Developer Box: any built-in seed will do.
+        const spec = builtinDistro(String(seed));
+        if (spec) { saveOs(sb, docFromDistroSpec(spec, { name: name ?? spec.name }), { label: `seed ${spec.name}` }); wearing = spec.name; }
       }
-      return sendJson(res, 200, { ok: true, slug: sb.slug });
+      return sendJson(res, 200, { ok: true, slug: sb.slug, ...(wearing ? { wearing } : {}) });
     } catch (e) {
       return sendJson(res, 409, { ok: false, error: e.message });
     }

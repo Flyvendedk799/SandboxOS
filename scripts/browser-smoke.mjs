@@ -159,6 +159,23 @@ try {
   check(true, "⌘⇧P opens the Studio palette");
   await studio.keyboard.press("Escape");
 
+  // Wave C/D: a "UI + tools" app from the Library, and the gallery.
+  await studio.click(".stx-tabs .seg:has-text('Library')");
+  await studio.waitForSelector(".card-grid");
+  await desktop("appDefine", { id: "toolful", name: "Toolful", starter: "tools" });
+  await studio.waitForTimeout(700);
+  check((await studio.textContent(".card-grid")).includes("3 tools"), "the Library shows how many tools an app serves");
+  await studio.click(".chip:has-text('Distros')");
+  await studio.waitForSelector(".distro-card", { timeout: 8_000 });
+  check((await studio.$$(".distro-card .distro-thumb svg")).length >= 5, "gallery cards carry silhouettes, not screenshots");
+  await desktop("distroPublish", { name: "Smoke Box", tags: ["smoke"], visibility: "public", replace: true });
+  await studio.fill(".stx-scroll input[placeholder^='Search']", "smoke");
+  await studio.waitForTimeout(600);
+  check((await studio.textContent(".stx-scroll")).includes("Smoke Box"), "the gallery searches by tag");
+  check(await studio.$(".distro-card .vis.public"), "and shows who can see a distro");
+  await studio.fill(".stx-scroll input[placeholder^='Search']", "");
+  await studio.waitForTimeout(500);
+
   // Multi-select two windows on the stage in design mode and align them.
   await studio.click(".stx-tabs .seg:has-text('Layers')");
   await studio.waitForSelector(".layer-row");

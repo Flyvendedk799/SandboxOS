@@ -18,6 +18,8 @@ import { CATALOG, availableServers } from "./catalog.js";
 import { loadManifest, enabledServers } from "../../manifest/src/manifest.js";
 import { hostedServer, killHosted, killAllHosted } from "./marketplace-pool.js";
 import { stopAllProcs } from "./servers/proc.js";
+import { syncAppServers, appServerSignature } from "./app-servers.js";
+import { osEvents, hasOs, loadOs } from "../../os/src/index.js";
 
 export class DeniedError extends Error {
   constructor(target) { super(`denied: ${target}`); this.name = "DeniedError"; this.code = "denied"; }
@@ -36,6 +38,9 @@ export class Kernel {
      *  (marketplace-pool.js); we cache only the tool descriptors here so the
      *  synchronous rebuild() can register a proxy without re-spawning anything. */
     this._marketplaceServers = new Map();
+    /** Servers that custom apps in the OS document declare (app-servers.js):
+     *  name → { kind: "facade"|"hosted", app, signature, server? }. */
+    this._appServers = new Map();
     /** Live event bus: emits 'audit' for every call so the console can tail it. */
     this.events = new EventEmitter();
     this.events.setMaxListeners(0);
@@ -60,6 +65,24 @@ export class Kernel {
     this._marketplaceServers.delete(name);
     killHosted(this.sandbox.id, name);
   }
+
+  /** Is `name` a core or installed server — something an app may not shadow? */
+  isCoreServer(name) {
+    if (CATALOG[name]) return true;
+    const m = loadManifest(this.sandbox);
+    return !!(m.servers?.[name] || m.installed?.[name]);
+  }
+
+  /** Drop an app's server (façade or hosted companion). */
+  unregisterAppServer(name) {
+    const entry = this._appServers.get(name);
+    if (!entry) return;
+    this._appServers.delete(name);
+    if (entry.kind === "hosted") this.unloadMarketplaceServer(name);
+  }
+
+  /** Reconcile app servers with the OS document. See app-servers.js. */
+  syncAppServers() { return syncAppServers(this); }
 
   /** Build an in-process PROXY server for a marketplace entry. Each tool handler
    *  forwards (args only) to the isolated child; the Kernel's authorize+audit path
@@ -94,14 +117,25 @@ export class Kernel {
       const mk = this._marketplaceServers.get(name);
       if (mk) this.servers.set(name, this._marketplaceProxy(name, mk));
     }
+    // Apps' servers come after the manifest so a core name always wins.
+    for (const [name, entry] of this._appServers) {
+      if (this.servers.has(name)) continue;
+      if (entry.kind === "facade") this.servers.set(name, entry.server);
+      else {
+        const mk = this._marketplaceServers.get(name);
+        if (mk) this.servers.set(name, { ...this._marketplaceProxy(name, mk), _app: entry.app });
+      }
+    }
     return this;
   }
 
   /** Tear down: kill every out-of-process marketplace child for this Sandbox. */
   dispose() {
+    this._offOs?.();
     killAllHosted(this.sandbox.id);
     stopAllProcs(this.sandbox.id);
     this._marketplaceServers.clear();
+    this._appServers.clear();
   }
 
   /** The unified tool catalog — the union of every enabled server, namespaced. */
@@ -145,7 +179,7 @@ export class Kernel {
 
     // 3. Execute + 4. Audit.
     try {
-      const result = await t.handler({ kernel: this, cell: this.cell, sandbox: this.sandbox, principalId }, args);
+      const result = await t.handler({ kernel: this, cell: this.cell, sandbox: this.sandbox, principalId, heldPatterns, onBehalfOf }, args);
       const ev = appendAudit({ ...base, resultKind: "ok", capability });
       this._emit({ ...base, resultKind: "ok", capability, ...ev });
       return { ok: true, result };
@@ -187,7 +221,25 @@ export async function getKernel(sandbox) {
       try { await kernel.loadMarketplaceServer(name, source); }
       catch { /* skip unresolvable sources on boot */ }
     }
-    return kernel.rebuild();
+    kernel.rebuild();
+    // The OS document may declare app servers. Register them now, and keep the
+    // set reconciled with every desktop write (define, remove, fork, revert…).
+    // A machine with no desktop has no app servers — notifying and now serving
+    // never create one.
+    if (hasOs(sandbox)) {
+      try { await kernel.syncAppServers(); } catch { /* one broken app is not a boot failure */ }
+    }
+    let lastSig = hasOs(sandbox) ? appServerSignature(loadOs(sandbox)) : "";
+    const onChange = (ev) => {
+      if (!ev?.doc) return;
+      const sig = appServerSignature(ev.doc);
+      if (sig === lastSig) return;
+      lastSig = sig;
+      kernel.syncAppServers().catch(() => {});
+    };
+    osEvents(sandbox.id).on("change", onChange);
+    kernel._offOs = () => osEvents(sandbox.id).off("change", onChange);
+    return kernel;
   })();
   _kernels.set(sandbox.id, p);
   return p;

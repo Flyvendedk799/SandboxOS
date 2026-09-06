@@ -145,6 +145,9 @@ export function connect() {
       if (["appDefine", "widgetDefine", "appRemove", "widgetKindRemove", "set", "revert", "reset"].includes(ev.op)) {
         loadOs().catch(() => {});
       }
+    } else if (ev.op === "appServers") {
+      // An app's tools came or went: the catalog (not the document) changed.
+      loadOs().catch(() => {});
     } else if (ev.op === "appFiles" || ev.op === "widgetFiles") {
       os.lastBundleChange = { id: ev.app ?? ev.kind ?? "", path: ev.path ?? null, at: Date.now() };
       emit("bundle:" + (ev.app ?? ev.kind ?? ""));

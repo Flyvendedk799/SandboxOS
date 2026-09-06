@@ -223,6 +223,14 @@ class DesktopApi {
   resize(id, w, h) { return this.c.call("desktop", "resize", { id, w, h }); }
   arrange(preset, opts = {}) { return this.c.call("desktop", "arrange", { preset, ...opts }); }
   layout(mode, opts = {}) { return this.c.call("desktop", "layoutSet", { mode, ...opts }); }
+  /** Tiling: rebuild a workspace's tree from a preset (master-stack, columns, rows, grid). */
+  tile(preset, opts = {}) { return this.c.call("desktop", "layoutSet", { preset, ...opts }); }
+  /** Tiling: move the sash between two windows, flip a split, or swap two leaves. */
+  tileSet(id, opts = {}) { return this.c.call("desktop", "tile", { id, ...opts }); }
+  /** The desktop as a short textual map — read it before rearranging a machine you cannot see. */
+  summary() { return this.c.call("desktop", "summarize", {}).then((r) => r.map); }
+  /** A semantic screenshot: SVG silhouettes of windows and widgets in the theme's colours. */
+  silhouette(opts = {}) { return this.c.call("desktop", "silhouette", opts).then((r) => r.svg); }
   snap(id, region, viewport) { return this.c.call("desktop", "snap", { id, region, ...(viewport ? { viewport } : {}) }); }
   cycleFocus(direction = "next") { return this.c.call("desktop", "cycleFocus", { direction }); }
   showDesktop(restore = false) { return this.c.call("desktop", "minimizeAll", { restore }); }
@@ -241,17 +249,24 @@ class DesktopApi {
   apps() { return this.c.call("desktop", "appList", {}).then((r) => r.apps); }
   defineApp(def) { return this.c.call("desktop", "appDefine", def).then((r) => r.app); }
   removeApp(id, opts = {}) { return this.c.call("desktop", "appRemove", { id, ...opts }); }
+  /** Switch an app's tool face on or off (its server registers or deregisters). */
+  appTools(id, enabled) { return this.c.call("desktop", "appDefine", { id, mcp: { enabled } }).then((r) => r.server); }
   appFiles(id) { return this.c.call("desktop", "appFiles", { id }).then((r) => r.files); }
   readApp(id, path) { return this.c.call("desktop", "appRead", { id, path }).then((r) => r.content); }
   writeApp(id, path, content) { return this.c.call("desktop", "appWrite", { id, path, content }); }
 
   /** Undo. Every desktop change is a revision. */
   history() { return this.c.call("desktop", "history", {}).then((r) => r.revisions); }
+  /** What a revision changed against the current document. */
+  diff(rev) { return this.c.call("desktop", "history", { rev }).then((r) => r.diff); }
   revert(rev) { return this.c.call("desktop", "revert", { rev }); }
 
-  distros() { return this.c.call("desktop", "distroList", {}).then((r) => r.distros); }
-  publish(name, description) { return this.c.call("desktop", "distroPublish", { name, description, replace: true }); }
-  fork(idOrName) { return this.c.call("desktop", "distroFork", { id: idOrName }); }
+  /** The gallery: seeds, your tenant's distros, and every public one. */
+  distros(opts = {}) { return this.c.call("desktop", "distroList", opts).then((r) => r.distros); }
+  publish(name, description, opts = {}) { return this.c.call("desktop", "distroPublish", { name, description, replace: true, ...opts }); }
+  /** Who can see a distro you published: private, tenant or public. */
+  visibility(name, visibility) { return this.c.call("desktop", "distroSet", { name, visibility }); }
+  fork(idOrName, opts = {}) { return this.c.call("desktop", "distroFork", { id: idOrName, ...opts }); }
   export() { return this.c.call("desktop", "distroExport", {}).then((r) => r.payload); }
   import(payload, name) { return this.c.call("desktop", "distroImport", { payload, ...(name ? { name } : {}) }); }
 }

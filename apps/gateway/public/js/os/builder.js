@@ -13,6 +13,7 @@ import { dropSession } from "./frames.js";
 import { createCodePane } from "./code.js";
 import { createThemeStudio } from "./theme-studio.js";
 import { createMotionStudio } from "./motion-studio.js";
+import { silhouetteSvg } from "./lib/summary.js";
 
 const TABS = [["library", "Library"], ["layers", "Layers"], ["theme", "Theme"], ["motion", "Motion"], ["code", "Code"]];
 const remember = (k, v) => { try { localStorage.setItem(`sbx.studio.${k}`, v); } catch { /* private mode */ } };
@@ -55,7 +56,8 @@ export function createBuilder({ onOpenCode } = {}) {
       },
         h("span.glyph", { style: { background: tint(a.hue, 0.14), color: a.hue } }, icon(iconName(a.icon), 18)),
         h("span.nm", a.name),
-        a.builtin ? null : h("span.sub", a.kind === "url" ? "url" : "custom"),
+        a.builtin ? null : h("span.sub", [a.kind === "url" ? "url" : a.kind === "alias" ? "alias" : "custom",
+          a.mcp ? ` · ${a.mcp.live ? `${a.mcp.tools.length} tool${a.mcp.tools.length === 1 ? "" : "s"}` : a.mcp.enabled ? "tools (not live)" : "tools off"}` : ""].join("")),
       ))),
       h("button.ghost.wide", { style: { marginTop: "10px" }, onclick: newApp }, "New app…"),
       h("div.note", null,
@@ -106,23 +108,90 @@ export function createBuilder({ onOpenCode } = {}) {
     )));
   }
 
+  // ── the gallery ───────────────────────────────────────────────────────────
+
+  let galleryQ = "";
+  let galleryScope = "all";   // all | mine | public
+  let galleryRows = null;
+
+  async function loadGallery() {
+    try {
+      const r = await call("distroList", { q: galleryQ, scope: galleryScope });
+      galleryRows = r.distros;
+    } catch { galleryRows = os.snap.distros ?? []; }
+    render();
+  }
+
+  function distroCard(d) {
+    const preview = d.preview ?? (d.builtin ? { theme: { accent: d.hue }, windows: d.apps.map((_, i) => ({ x: 60 + i * 120, y: 60 + i * 60, w: 420, h: 280 })), widgets: [], dock: "bottom" } : null);
+    const thumb = h("div.distro-thumb");
+    if (preview) thumb.innerHTML = silhouetteSvg({ ...preview, label: d.name }, { width: 280, height: 150 });
+    const vis = d.builtin ? "seed" : d.visibility ?? "tenant";
+    return h("div.distro-card", null,
+      thumb,
+      h("div.hd", null,
+        h("span.tag", { style: { background: d.hue ?? preview?.theme?.accent ?? "var(--stx-accent)" } }),
+        h("h4", d.name),
+        h("span.vis", { class: vis, title: d.builtin ? "Ships with SandboxOS" : d.mine ? `Published by your tenant · ${vis}` : "Published publicly by another tenant" }, vis),
+        d.forks ? h("span.sub", { style: { fontSize: "10px", color: "var(--stx-text-3)" } }, `${d.forks} fork${d.forks === 1 ? "" : "s"}`) : null),
+      h("p", d.description || "No description."),
+      d.tags?.length ? h("div.tag-row", ...d.tags.map((t) => h("button.tagchip", { onclick: () => { galleryQ = t; loadGallery(); } }, t))) : null,
+      preview && !d.builtin ? h("div.dim", { style: { fontSize: "10.5px", margin: "2px 0 8px" } },
+        `${preview.windows?.length ?? 0} windows · ${preview.widgets?.length ?? 0} widgets · ${preview.apps ?? 0} custom apps${preview.tools ? ` · ${preview.tools} with tools` : ""}`) : null,
+      h("div", { style: { display: "flex", gap: "6px" } },
+        h("button.ghost", { style: { flex: "1" }, onclick: () => fork(d) }, "Fork this distro"),
+        d.mine && !d.builtin ? h("button.ghost", { title: "Who can see it", onclick: () => visibilityMenu(d) }, icon("eye", 13)) : null),
+    );
+  }
+
+  async function visibilityMenu(d) {
+    const got = await dialog({
+      title: `${d.name} · visibility`,
+      fields: [{ name: "visibility", label: "Who can see and fork it", type: "select", value: d.visibility ?? "tenant",
+        options: [{ value: "private", label: "Only me" }, { value: "tenant", label: "Everyone in my tenant" }, { value: "public", label: "Every tenant on this host (public gallery)" }] }],
+      confirmLabel: "Save",
+    });
+    if (!got?.visibility) return;
+    try { await call("distroSet", { name: d.name, visibility: got.visibility }); toast(`${d.name} is now ${got.visibility}`, { kind: "ok" }); loadGallery(); }
+    catch (e) { toastError("Could not change visibility", e); }
+  }
+
   function libraryDistros() {
-    const list = os.snap.distros ?? [];
-    return h("div", { style: { display: "flex", flexDirection: "column", gap: "9px" } },
-      ...list.map((d) => h("div.distro-card", null,
-        h("div.hd", null,
-          h("span.tag", { style: { background: d.hue ?? "var(--stx-accent)" } }),
-          h("h4", d.name),
-          d.builtin ? null : h("span.sub", { style: { fontSize: "10px", color: "var(--stx-text-3)" } }, "yours")),
-        h("p", d.description || "No description."),
-        h("button.ghost", { onclick: () => fork(d) }, "Fork this distro"),
-      )),
+    if (galleryRows === null) { galleryRows = os.snap.distros ?? []; setTimeout(loadGallery, 0); }
+    const search = h("input", { value: galleryQ, placeholder: "Search the gallery — name, description, tag" });
+    let t = null;
+    search.addEventListener("input", () => { galleryQ = search.value; clearTimeout(t); t = setTimeout(loadGallery, 250); });
+    const chip = (id, label) => h("button.chip", { class: galleryScope === id ? "on" : "", onclick: () => { galleryScope = id; loadGallery(); } }, label);
+    const dropZone = h("div", { style: { display: "flex", flexDirection: "column", gap: "9px" } },
+      h("div.field", { style: { marginBottom: "4px" } }, search),
+      h("div.chip-row", { style: { padding: "0 0 6px" } }, chip("all", "All"), chip("mine", "Mine"), chip("public", "Public")),
+      ...(galleryRows.length ? galleryRows.map(distroCard) : [h("div.empty", null, icon("layers", 22), h("h3", "Nothing here"), h("p", galleryQ ? "No distro matches that." : "Publish this machine, and it appears here for your tenant — or publicly, if you choose."))]),
       h("button.ghost.wide", { style: { marginTop: "4px" }, onclick: publish }, "Publish this OS as a distro…"),
       h("div", { style: { display: "flex", gap: "8px", marginTop: "8px" } },
         h("button.ghost", { style: { flex: "1" }, onclick: exportFile }, "Export file"),
         h("button.ghost", { style: { flex: "1" }, onclick: importFile }, "Import file")),
-      h("div.note", "Publishing packages the document and the source of every custom app, so a fork gets your machine, not a screenshot of it. Export writes the same package to a file, which is how a distro leaves your tenant."),
+      h("div.note", "A distro is your whole machine: the desktop, the source and tools of every custom app, and which servers the Cell runs. Fork one and you get the machine, not a screenshot. Drop a .sandboxos.json file here to install it."),
     );
+    dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dropping"); });
+    dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dropping"));
+    dropZone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropZone.classList.remove("dropping");
+      const file = e.dataTransfer?.files?.[0];
+      if (file) installFile(file);
+    });
+    return dropZone;
+  }
+
+  /** The words a fork replaces: what you have now versus what you get. */
+  function forkSummary(d) {
+    const doc = os.doc;
+    const here = `${doc.windows.length} windows, ${doc.widgets.length} widgets, ${Object.keys(doc.apps).length} custom apps, theme ${doc.theme.base}`;
+    const p = d.preview;
+    const there = d.builtin
+      ? `${d.apps.length + (d.customApps?.length ?? 0)} windows, ${d.widgets.length} widgets, theme ${d.theme}`
+      : p ? `${p.windows?.length ?? 0} windows, ${p.widgets?.length ?? 0} widgets, ${p.apps ?? 0} custom apps${p.tools ? ` (${p.tools} with tools${d.mine ? "" : ", arriving switched off"})` : ""}, ${p.workspaces ?? 1} workspaces` : "another machine";
+    return `This replaces your OS. Now: ${here}. After: ${there}. It is one revision — undo it from Layers → History.`;
   }
 
   /** A distro as a file: the only way one travels between tenants today. */
@@ -140,46 +209,72 @@ export function createBuilder({ onOpenCode } = {}) {
 
   async function importFile() {
     const input = h("input", { type: "file", accept: ".json,application/json", style: { display: "none" } });
-    input.addEventListener("change", async () => {
-      const file = input.files?.[0];
-      input.remove();
-      if (!file) return;
-      if (!await confirmDialog(`Install ${file.name}?`, "It replaces your current desktop. The change is one revision — undo it from Layers → History.")) return;
-      try {
-        const payload = JSON.parse(await file.text());
-        const r = await call("distroImport", { payload });
-        await loadOs();
-        toast("Installed", { body: `${r.apps} custom apps came with it.`, kind: "ok" });
-      } catch (e) { toastError("Could not install that file", e); }
-    });
+    input.addEventListener("change", () => { const file = input.files?.[0]; input.remove(); if (file) installFile(file); });
     document.body.append(input);
     input.click();
   }
 
-  async function fork(d) {
-    if (!await confirmDialog("Fork this distro?", `Your current desktop is replaced by ${d.name}. The change is one revision — undo it from the History tab.`, { confirmLabel: "Fork", danger: false })) return;
+  async function installFile(file) {
+    let payload;
+    try { payload = JSON.parse(await file.text()); } catch (e) { toastError("Not a distro file", e); return; }
+    const p = payload?.os;
+    const there = p ? `${p.windows?.length ?? 0} windows, ${p.widgets?.length ?? 0} widgets, ${Object.keys(p.apps ?? {}).length} custom apps, theme ${p.theme?.base}` : "unknown contents";
+    const got = await dialog({
+      title: `Install ${file.name}?`,
+      message: `${forkSummary({ preview: null, builtin: false, name: file.name }).split(" After:")[0]} After: ${there}. ${payload.integrity ? "Its bundles are hashed and will be verified." : "It carries no integrity block (an older export)."} Any companion servers arrive switched off.`,
+      fields: [{ name: "manifest", label: "Cell composition", type: "select", value: "keep",
+        options: [{ value: "keep", label: "Keep my servers as they are" }, { value: "apply", label: "Apply the file's server composition too" }] }],
+      confirmLabel: "Install",
+    });
+    if (!got) return;
     try {
-      await call("distroFork", { id: d.id });
+      const r = await call("distroImport", { payload, applyManifest: got.manifest === "apply" });
       await loadOs();
-      toast(`Forked ${d.name}`, { kind: "ok" });
+      toast("Installed", { body: `${r.apps} custom apps came with it${r.verified ? ", verified" : ""}.${r.disabledServers?.length ? ` ${r.disabledServers.length} server(s) are off until you enable them.` : ""}`, kind: "ok" });
+    } catch (e) { toastError("Could not install that file", e); }
+  }
+
+  async function fork(d) {
+    if (!await confirmDialog(`Fork ${d.name}?`, forkSummary(d), { confirmLabel: "Fork", danger: false })) return;
+    try {
+      const r = await call("distroFork", { id: d.id });
+      await loadOs();
+      const off = (r.tools ?? []).filter((t) => !t.enabled);
+      toast(`Forked ${d.name}`, {
+        body: off.length ? `${off.length} app server${off.length > 1 ? "s" : ""} arrived switched off — right-click the app in the Library to turn it on.` : r.seeded?.length ? `${r.seeded.length} files seeded into the Cell.` : undefined,
+        kind: "ok",
+      });
+      loadGallery();
     } catch (e) { toastError("Could not fork that distro", e); }
   }
 
   async function publish() {
     const got = await dialog({
       title: "Publish this OS as a distro",
-      message: "Anyone in your tenant can fork it. The document and every custom app's source travel with it.",
+      message: "The desktop, the source and tools of every custom app, and the Cell's server composition travel together.",
       fields: [
         { name: "name", label: "Name", value: os.doc.name },
         { name: "description", label: "Description", placeholder: "What is this machine for?" },
+        { name: "tags", label: "Tags", placeholder: "dev, research", hint: "comma-separated, searchable in the gallery" },
+        { name: "visibility", label: "Who can see it", type: "select", value: "tenant",
+          options: [{ value: "private", label: "Only me" }, { value: "tenant", label: "Everyone in my tenant" }, { value: "public", label: "Every tenant on this host" }] },
+        { name: "notifications", label: "Notifications", type: "select", value: "strip",
+          options: [{ value: "strip", label: "Leave them out (default)" }, { value: "keep", label: "Include them" }] },
+        { name: "replace", label: "If the name exists", type: "select", value: "replace",
+          options: [{ value: "replace", label: "Replace it" }, { value: "fail", label: "Stop and tell me" }] },
       ],
       confirmLabel: "Publish",
     });
     if (!got?.name) return;
     try {
-      const r = await call("distroPublish", { name: got.name, description: got.description, replace: true });
+      const r = await call("distroPublish", {
+        name: got.name, description: got.description, visibility: got.visibility,
+        tags: String(got.tags ?? "").split(/[,\s]+/).filter(Boolean),
+        keepNotifications: got.notifications === "keep", replace: got.replace === "replace",
+      });
       await loadOs();
-      toast(`Published ${r.name}`, { body: `${r.apps} custom apps packaged.`, kind: "ok" });
+      toast(`Published ${r.name} (${r.visibility})`, { body: `${r.apps} custom apps, ${r.tools} with tools, ${r.servers} servers packaged.`, kind: "ok" });
+      loadGallery();
     } catch (e) { toastError("Could not publish", e); }
   }
 
@@ -190,26 +285,37 @@ export function createBuilder({ onOpenCode } = {}) {
   async function newApp() {
     const got = await dialog({
       title: "New app",
-      message: "You get a runnable starter — an index.html, a stylesheet and a script that already calls the machine. Edit it in Code.",
+      message: "An app is a window for you and, if you want, tools for the agent. Either way you get a runnable starter to edit in Code.",
       fields: [
         { name: "name", label: "Name", placeholder: "Port Monitor" },
-        { name: "id", label: "Id", placeholder: "port-monitor", hint: "lowercase, used in the URL" },
-        { name: "permissions", label: "Capabilities", placeholder: "fs.read, ports.list", hint: "MCP patterns this app may call" },
+        { name: "id", label: "Id", placeholder: "port-monitor", hint: "lowercase, used in the URL and as the server name" },
+        { name: "shape", label: "Shape", type: "select", value: "ui",
+          options: [
+            { value: "ui", label: "UI only — a window" },
+            { value: "tools", label: "UI + tools — a window and a companion server the agent can call" },
+          ] },
+        { name: "permissions", label: "Capabilities", placeholder: "fs.read, ports.list", hint: "MCP patterns this app may call from its window" },
       ],
       confirmLabel: "Create",
     });
     if (!got?.name) return;
     const id = slugify(got.id || got.name);
     try {
-      await call("appDefine", {
+      const r = await call("appDefine", {
         id, name: got.name,
         permissions: String(got.permissions ?? "").split(/[,\s]+/).filter(Boolean),
+        ...(got.shape === "tools" ? { starter: "tools" } : {}),
       });
       await loadOs();
       dropSession(id);
       await call("dockPin", { app: id, pinned: true });
-      onOpenCode?.("app", id);
-      toast(`${got.name} created`, { body: "Open it from the dock; edit its source in Code.", kind: "ok" });
+      onOpenCode?.("app", id, got.shape === "tools" ? "server.js" : null);
+      toast(`${got.name} created`, {
+        body: got.shape === "tools"
+          ? (r.server?.live ? `Its tools are live: ${id}.ping, ${id}.add, ${id}.list. Ask the agent to call one.` : r.server?.problem ?? "Its server did not start.")
+          : "Open it from the dock; edit its source in Code.",
+        kind: r.server?.problem ? "err" : "ok",
+      });
     } catch (e) { toastError("Could not create the app", e); }
   }
 
@@ -324,6 +430,13 @@ export function createBuilder({ onOpenCode } = {}) {
       { label: "Open", icon: "window", run: () => call("open", { app: a.id }) },
       { label: "Settings…", icon: "settings", run: () => appSettings(a) },
       { label: "Edit source", icon: "code", disabled: a.kind !== "bundle", run: () => onOpenCode?.("app", a.id) },
+      a.mcp ? { label: a.mcp.enabled ? `Switch its tools off (${a.mcp.name}.*)` : `Switch its tools on (${a.mcp.name}.*)`, icon: "play",
+        run: async () => {
+          try { const r = await call("appDefine", { id: a.id, mcp: { enabled: !a.mcp.enabled } }); await loadOs();
+            toast(r.server?.live ? `${a.mcp.name}.* is live` : r.server?.problem ?? `${a.mcp.name}.* is off`, { kind: r.server?.problem ? "err" : "ok" }); }
+          catch (e) { toastError("Could not change the server", e); }
+        } } : null,
+      a.mcp?.live ? { label: `Tools: ${a.mcp.tools.join(", ")}`, icon: "apps", run: () => {} } : null,
       { label: os.doc.shell.dock.pinned.includes(a.id) ? "Remove from dock" : "Keep in dock", icon: "apps",
         run: () => call("dockPin", { app: a.id, pinned: !os.doc.shell.dock.pinned.includes(a.id) }) },
       "-",
@@ -332,7 +445,7 @@ export function createBuilder({ onOpenCode } = {}) {
         await call("appRemove", { id: a.id });
         await loadOs();
       } },
-    ]);
+    ].filter(Boolean));
   }
 
   function widgetMenu(w) {

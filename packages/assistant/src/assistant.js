@@ -16,6 +16,7 @@
 // not need a minted token.
 
 import { authorize } from "../../kernel/src/capabilities.js";
+import { hasOs, loadOs, summarizeDoc } from "../../os/src/index.js";
 import {
   baseUrlFor, credentialHeaders, resolveLlmCredential, systemFor,
 } from "../../llm/src/providers.js";
@@ -45,7 +46,22 @@ export const decodeName = (n) => {
   return i === -1 ? [n, ""] : [n.slice(0, i), n.slice(i + 2)];
 };
 
-export function systemPrompt(sandbox, servers) {
+/** The desktop map, when this machine has a desktop and the caller may see it. */
+function desktopContext(sandbox, servers, heldPatterns) {
+  if (!servers.includes("desktop") || !hasOs(sandbox)) return [];
+  if (!authorize(heldPatterns ?? [], "desktop", "state")) return [];
+  try {
+    const d = loadOs(sandbox);
+    return [
+      "",
+      "The desktop (desktop.* tools change it; the map below is the current document —",
+      "call desktop.summarize for a fresh one after you change things):",
+      summarizeDoc(d),
+    ];
+  } catch { return []; }
+}
+
+export function systemPrompt(sandbox, servers, heldPatterns = null) {
   return [
     `You are the assistant inside SandboxOS, running on the Sandbox "${sandbox.slug}".`,
     "",
@@ -65,6 +81,7 @@ export function systemPrompt(sandbox, servers) {
     "",
     "Be concise. Report what you actually did and what the machine actually said.",
     "When a tool fails, say so plainly and either fix it or explain what is blocking.",
+    ...desktopContext(sandbox, servers, heldPatterns),
   ].join("\n");
 }
 
@@ -170,7 +187,7 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
           model: chosen,
           stream: true,
           stream_options: { include_usage: true },
-          messages: [{ role: "system", content: systemPrompt(sandbox, servers) }, ...messages],
+          messages: [{ role: "system", content: systemPrompt(sandbox, servers, heldPatterns) }, ...messages],
           ...(defs.length ? { tools: defs, tool_choice: "auto" } : {}),
         }
       : {
@@ -180,7 +197,7 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
           // On a subscription token the Claude Code identity block has to come first
           // and stand alone, or Sonnet and Opus are refused with a 429 the plan has
           // not earned. systemFor is what puts it there.
-          system: systemFor(credential, systemPrompt(sandbox, servers)),
+          system: systemFor(credential, systemPrompt(sandbox, servers, heldPatterns)),
           messages,
           ...(defs.length ? { tools: defs } : {}),
         };

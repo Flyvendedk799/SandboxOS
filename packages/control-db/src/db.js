@@ -290,6 +290,13 @@ const MIGRATIONS = [
   // source of every custom app it needs. Nullable, so the Phase-4 manifest-only
   // distros keep working exactly as they did.
   "ALTER TABLE distros ADD COLUMN os TEXT",
+  // Wave D: a gallery. Visibility decides who can see and fork a row; tags and
+  // a preview let a card be drawn without loading the (up to 8 MB) payload.
+  "ALTER TABLE distros ADD COLUMN visibility TEXT NOT NULL DEFAULT 'tenant'",
+  "ALTER TABLE distros ADD COLUMN tags TEXT",
+  "ALTER TABLE distros ADD COLUMN preview TEXT",
+  "ALTER TABLE distros ADD COLUMN publisher TEXT",
+  "ALTER TABLE distros ADD COLUMN forks INTEGER NOT NULL DEFAULT 0",
 ];
 
 // Backlog #14 (migration hardening): only swallow the benign "column/table already

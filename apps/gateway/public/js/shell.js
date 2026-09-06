@@ -148,16 +148,30 @@ async function newSandbox() {
     fields: [
       { name: "slug", label: "Slug", placeholder: "scratch", hint: "lowercase letters, digits and dashes" },
       { name: "name", label: "Name", placeholder: "Scratch machine" },
-      ...(distros.length
-        ? [{ name: "distro", label: "From distro", type: "select", options: [{ value: "", label: "— none —" }, ...distros.map((d) => ({ value: d.name, label: d.name }))] }]
-        : []),
+      // A new machine wakes up wearing a desktop. Which one is your call: a
+      // built-in seed, or a distro you (or your tenant) published — desktop,
+      // apps, tools and server composition included.
+      { name: "distro", label: "Start from", type: "select", value: "seed:dev",
+        options: [
+          { value: "seed:dev", label: "Developer Box (seed)" },
+          { value: "seed:research", label: "Research Box (seed)" },
+          { value: "seed:creator", label: "Creator Studio (seed)" },
+          { value: "seed:ops", label: "Social Ops (seed)" },
+          { value: "seed:workshop", label: "Workshop — an app whose source lives in the volume (seed)" },
+          { value: "seed:minimal", label: "Minimal (seed)" },
+          ...distros.map((d) => ({ value: `distro:${d.name}`, label: `${d.name}${d.has_os ? " (desktop + composition)" : " (composition only)"}` })),
+        ] },
     ],
     confirmLabel: "Create",
   });
   if (!got?.slug) return;
   try {
-    const r = await api.post("/api/sandboxes", { slug: got.slug, name: got.name || got.slug, distro: got.distro || undefined });
-    toast("Sandbox created", { body: `/${r.slug}`, kind: "ok" });
+    const from = String(got.distro ?? "");
+    const r = await api.post("/api/sandboxes", {
+      slug: got.slug, name: got.name || got.slug,
+      ...(from.startsWith("distro:") ? { distro: from.slice(7) } : from.startsWith("seed:") ? { seed: from.slice(5) } : {}),
+    });
+    toast("Sandbox created", { body: `/${r.slug}${r.wearing ? ` · wearing ${r.wearing}` : ""}`, kind: "ok" });
     location.href = `/${r.slug}`;
   } catch (e) { toastError("Could not create sandbox", e); }
 }
