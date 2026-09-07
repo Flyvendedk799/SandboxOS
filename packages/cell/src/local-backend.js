@@ -7,6 +7,8 @@
 import fs from "node:fs";
 import { execFile, spawn } from "node:child_process";
 import { groupHandle } from "./handles.js";
+import os from "node:os";
+import { newMarker, ptyWrapper, resizeScript, cleanupScript } from "./pty.js";
 
 export class LocalBackend {
   constructor(sandbox) {
@@ -78,26 +80,35 @@ export class LocalBackend {
     return handle;
   }
 
-  /** Spawn an interactive shell and bridge stdio via callbacks.
-   *  Returns a { write(data), kill(), resize(cols,rows) } handle.
-   *  Note: without a real PTY, ncurses programs (vim, top) won't render correctly. */
+  /** Spawn an interactive shell under a real pty (see pty.js) and bridge stdio
+   *  via callbacks. Returns a { write(data), kill(), resize(cols,rows) } handle. */
   execInteractive(onData, onClose, { env = {}, cols = 80, rows = 24 } = {}) {
     fs.mkdirSync(this.root, { recursive: true });
     const shell = process.env.SHELL || "/bin/sh";
-    const proc = spawn(shell, ["-i"], {
+    const marker = newMarker();
+    const tmp = os.tmpdir();
+    const fullEnv = this._minimalEnv(env, { TERM: "xterm-256color", COLUMNS: String(cols), LINES: String(rows) });
+    // Detached: the shell and everything it started form one group we can end
+    // together, so a closed tab never leaves a pty holding the Gateway open.
+    const proc = spawn("/bin/sh", ["-c", ptyWrapper(`${shell} -i`, tmp), "sh", marker], {
       cwd: this.root,
-      // Backlog #7: minimal env (PATH+HOME) plus the terminal vars an interactive
-      // shell needs; no host process.env spread.
-      env: this._minimalEnv(env, { TERM: "xterm-256color", COLUMNS: String(cols), LINES: String(rows) }),
+      env: fullEnv,
       stdio: ["pipe", "pipe", "pipe"],
+      detached: true,
     });
     proc.stdout.on("data", onData);
     proc.stderr.on("data", onData);
-    proc.on("close", onClose);
+    const resize = (c, r) => { try { spawn("/bin/sh", ["-c", resizeScript(marker, c, r, tmp)], { env: fullEnv, stdio: "ignore" }); } catch { /* best effort */ } };
+    // The pty starts unsized (our stdin is a pipe): size it once the shell is up.
+    const first = setTimeout(() => resize(cols, rows), 250);
+    const cleanup = () => { try { spawn("/bin/sh", ["-c", cleanupScript(marker, tmp)], { stdio: "ignore", detached: true }).unref(); } catch {} try { process.kill(-proc.pid, "SIGKILL"); } catch {} };
+    let closed = false;
+    proc.on("exit", () => { clearTimeout(first); cleanup(); if (!closed) { closed = true; onClose(); } });
+    proc.on("error", () => { if (!closed) { closed = true; onClose(); } });
     return {
       write(data) { try { proc.stdin.write(data); } catch {} },
-      kill()      { try { proc.kill("SIGKILL"); } catch {} },
-      resize()    { /* no-op without a real PTY */ },
+      kill()      { cleanup(); try { proc.kill("SIGKILL"); } catch {} },
+      resize,
     };
   }
 

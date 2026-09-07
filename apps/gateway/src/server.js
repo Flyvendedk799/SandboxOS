@@ -1505,7 +1505,14 @@ async function handleUpgrade(req, socket, head) {
     { cols: 80, rows: 24 },
   );
 
+  // An open terminal is activity. Without this the idle reaper hibernates the
+  // Cell under a shell someone is looking at, and the session "just ends".
+  scheduler.touch(sandbox.id);
+  const keepAwake = setInterval(() => scheduler.touch(sandbox.id), 60_000);
+  keepAwake.unref();
+
   ws.on("message", (buf) => {
+    scheduler.touch(sandbox.id);
     // Control frames: SOH (0x01) prefix + JSON body.
     if (buf[0] === 0x01) {
       try {
@@ -1517,7 +1524,7 @@ async function handleUpgrade(req, socket, head) {
     shell.write(buf);
   });
 
-  ws.on("close", () => shell.kill());
+  ws.on("close", () => { clearInterval(keepAwake); shell.kill(); });
 }
 
 export function createServer() {

@@ -38,6 +38,10 @@ export class WsConn extends EventEmitter {
     socket.on("data", (c) => { this._buf = Buffer.concat([this._buf, c]); this._drain(); });
     socket.on("close", () => this.emit("close"));
     socket.on("error", () => this.emit("close"));
+    // http.Server sockets are half-open: a client that goes away sends FIN and
+    // the socket stays writable forever unless we finish it. Without this the
+    // shell behind a closed terminal tab lived on, pipes and all.
+    socket.on("end", () => { try { socket.end(); socket.destroy(); } catch { /* gone */ } });
   }
 
   _drain() {
