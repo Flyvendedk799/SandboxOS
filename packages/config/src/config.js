@@ -6,7 +6,9 @@
 // (the survhub lesson: tests must not pollute the real home/DB).
 
 import os from "node:os";
+import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 function env(name, fallback) {
   const v = process.env[name];
@@ -45,3 +47,32 @@ export const config = {
 };
 
 export default config;
+
+
+/**
+ * What code this process is running: the git commit of the checkout (read from
+ * .git without spawning git), or SANDBOXOS_BUILD when a deploy sets it, plus the
+ * moment the process started. Reported by /health and shown in Settings, so a
+ * deploy that did not restart the Gateway is visible instead of mysterious.
+ */
+let _build = null;
+export function buildInfo() {
+  if (_build) return _build;
+  let commit = process.env.SANDBOXOS_BUILD ?? null;
+  if (!commit) {
+    try {
+      const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+      const head = fs.readFileSync(path.join(root, ".git", "HEAD"), "utf8").trim();
+      if (head.startsWith("ref: ")) {
+        const ref = head.slice(5);
+        try { commit = fs.readFileSync(path.join(root, ".git", ref), "utf8").trim(); }
+        catch {
+          const packed = fs.readFileSync(path.join(root, ".git", "packed-refs"), "utf8");
+          commit = packed.split("\n").find((l) => l.endsWith(` ${ref}`))?.split(" ")[0] ?? null;
+        }
+      } else commit = head;
+    } catch { commit = null; }
+  }
+  _build = { commit: commit ? commit.slice(0, 12) : null, startedAt: Date.now() };
+  return _build;
+}

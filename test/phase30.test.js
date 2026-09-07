@@ -222,3 +222,21 @@ test("the interactive shell runs on a real pty: job control on, no tty warning, 
   assert.match(text, /41 133/, `stty size reflects the resize the client asked for: ${JSON.stringify(text.slice(-200))}`);
   assert.match(text, /JOBS=[a-zA-Z]*m/, "the shell has job control (m in $-)");
 });
+
+// ── Deploys are visible ─────────────────────────────────────────────────────
+
+test("/health names the build, and OS assets are revalidated rather than cached forever", async () => {
+  const health = await (await fetch(`http://127.0.0.1:${port}/health`)).json();
+  assert.ok(health.build, "the Gateway reports what it runs");
+  assert.ok(health.build.commit == null || /^[0-9a-f]{7,12}$/.test(health.build.commit), `a commit, when the checkout has one: ${health.build.commit}`);
+  assert.ok(health.build.startedAt > 0);
+
+  const r = await fetch(`http://127.0.0.1:${port}/static/js/os/os.js`);
+  assert.equal(r.headers.get("cache-control"), "no-cache", "a browser must ask again on every load");
+  const etag = r.headers.get("etag");
+  assert.ok(etag, "and has an ETag to ask with");
+  const again = await fetch(`http://127.0.0.1:${port}/static/js/os/os.js`, { headers: { "If-None-Match": etag } });
+  assert.equal(again.status, 304, "an unchanged file costs a 304, not a download");
+  const page = await fetch(`http://127.0.0.1:${port}/${sandbox.slug}/os`, { headers: { Authorization: `Bearer ${token}` } });
+  assert.equal(page.headers.get("cache-control"), "no-cache", "the OS page itself too");
+});

@@ -711,6 +711,13 @@ const settings = {
     fill(host, h("div.app", body));
     let section = win.props?.section ?? "desktop";
 
+    // The Gateway says which commit it runs; the page knows nothing until it asks.
+    const buildEl = h("span.v", "…");
+    api.get("/health").then((hh) => {
+      const b = hh?.build;
+      buildEl.textContent = b ? `${b.commit ?? "unknown commit"} · up since ${new Date(b.startedAt).toLocaleString()}` : "unavailable";
+    }).catch(() => { buildEl.textContent = "unavailable"; });
+
     function render() {
       const d = os.doc;
       if (!d) return;
@@ -778,6 +785,7 @@ const settings = {
         row("Workspaces", h("span.v", String(d.workspaces.length))),
         row("Custom apps", h("span.v", `${Object.keys(d.apps).length}${Object.values(d.apps).filter((a) => a.mcp).length ? ` (${Object.values(d.apps).filter((a) => a.mcp).length} with tools)` : ""}`)),
         row("Distro", h("span.v", d.distro?.name ? `${d.distro.name}${d.distro.tenant ? " · another tenant" : ""}` : "none")),
+        row("Server build", buildEl),
         h("div", { style: { padding: "10px", display: "flex", gap: "8px", flexWrap: "wrap" } },
           h("button.app-btn", { onclick: () => ctx.openStudio?.() }, "Open Studio"),
           h("button.app-btn", { onclick: () => (location.href = `/${slug}`) }, "Command Central"),

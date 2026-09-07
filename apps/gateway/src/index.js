@@ -21,6 +21,11 @@ config.cellBackend = backend; // pin the resolved choice for the rest of the pro
 
 openDb();
 const { tenant, sandbox } = ensureSeed(backend);
+{
+  const { buildInfo } = await import("../../../packages/config/src/config.js");
+  const b = buildInfo();
+  console.log(`SandboxOS build ${b.commit ?? "(unknown commit)"} · node ${process.versions.node} · cells: ${backend}`);
+}
 seedVolume(sandbox); // first run only — an existing volume is never touched
 
 // Backlog #4: verify the audit hash-chain on boot — tamper-evidence is only
