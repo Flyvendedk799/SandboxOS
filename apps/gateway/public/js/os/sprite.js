@@ -38,6 +38,14 @@ const ICONS = {
   sync: '<path d="M2.6 8.4c1.6-1.7 3.1-1.7 4.7 0s3.1 1.7 4.7 0 3.1-1.7 4.7 0"/><path d="M2.6 13.4c1.6-1.7 3.1-1.7 4.7 0s3.1 1.7 4.7 0 3.1-1.7 4.7 0"/>',
   back: '<path d="M12 5l-5 5 5 5"/>',
   eye: '<path d="M1.8 10S4.9 4.8 10 4.8 18.2 10 18.2 10 15.1 15.2 10 15.2 1.8 10 1.8 10z"/><circle cx="10" cy="10" r="2.4"/>',
+  split: '<rect x="3" y="3.5" width="14" height="13" rx="2"/><path d="M10 3.5v13"/>',
+  align: '<path d="M3.5 4v12"/><rect x="6" y="6" width="10" height="3" rx="1"/><rect x="6" y="11" width="6" height="3" rx="1"/>',
+  tag: '<path d="M3.5 4.5h6l7 7-5.5 5.5-7-7z"/><circle cx="7" cy="8" r="1.1"/>',
+  tools: '<path d="M12.5 3.5a3.5 3.5 0 00-3.3 4.6L4 13.3l2.7 2.7 5.2-5.2a3.5 3.5 0 004.6-3.3l-2.2 2.2-2-.6-.6-2 2.2-2.2z"/>',
+  phone: '<rect x="6" y="2.5" width="8" height="15" rx="2"/><path d="M9 15h2"/>',
+  keyboard: '<rect x="2.5" y="5.5" width="15" height="9" rx="2"/><path d="M5.5 8.5h1M8.5 8.5h1M11.5 8.5h1M14.5 8.5h1M6 11.5h8"/>',
+  up: '<path d="M10 15.5V4.5M5 9.5l5-5 5 5"/>',
+  wand: '<path d="M4 16l9-9M12 4l1 1M15 7l1 1M9 3l.5 1.5M16.5 12l-1.5-.5"/>',
 };
 
 let injected = false;

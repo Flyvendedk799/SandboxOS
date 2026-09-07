@@ -106,12 +106,65 @@ try {
   check((await page.textContent(".os-spotlight .results")).includes("Master and stack"), "spotlight offers the tree presets");
   await page.keyboard.press("Escape");
 
+  // The terminal screen: cursor addressing, an alternate buffer, scroll regions.
+  const term = await page.evaluate(async () => {
+    const { createScreen } = await import("/static/js/os/ansi.js");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const s = createScreen(host, { cols: 20, rows: 4 });
+    const text = () => [...host.querySelectorAll(".t-line")].map((l) => l.textContent.replace(/\s+$/, ""));
+    s.write("one\r\ntwo\r\n");
+    s.write("\x1b[1;1Hzap");                       // overwrite at row 1, col 1
+    await new Promise((r) => requestAnimationFrame(r));
+    const main = text();
+    s.write("\x1b[?1049h\x1b[2J\x1b[3;5HALT");    // alternate screen, cursor to 3,5
+    await new Promise((r) => requestAnimationFrame(r));
+    const alt = text();
+    const altMode = s.alt;
+    s.write("\x1b[?1049l");                        // back to main
+    await new Promise((r) => requestAnimationFrame(r));
+    const back = text();
+    s.write("\x1b[2;3r\x1b[3;1Ha\nb\nc");          // scroll region rows 2-3
+    await new Promise((r) => requestAnimationFrame(r));
+    const region = text();
+    host.remove();
+    return { main, alt, altMode, back, region };
+  });
+  check(term.main[0] === "zap" && term.main[1] === "two", `cursor addressing overwrites in place (${JSON.stringify(term.main)})`);
+  check(term.altMode && term.alt.length === 4 && term.alt[2] === "    ALT", `the alternate buffer is exactly the screen (${JSON.stringify(term.alt)})`);
+  check(term.back[0] === "zap", "leaving the alternate buffer restores the main one");
+  check(term.region[0] === "zap" && !term.region.includes("a"), `a scroll region scrolls only its rows (${JSON.stringify(term.region)})`);
+
+  // Notifications: a deep link and a per-item dismiss.
+  const noteWin = (await desktop("state")).doc.windows[0];
+  await desktop("notify", { title: "smoke says hi", action: { window: noteWin.id } });
+  await page.waitForTimeout(400);
+  await page.click(".os-menubar .icon-btn[title='Notifications']");
+  await page.waitForSelector(".os-notifs .notif");
+  check((await page.textContent(".os-notifs")).includes("smoke says hi"), "the notification centre groups and lists");
+  await page.click(".os-notifs .notif .dismiss");
+  await page.waitForTimeout(400);
+  check(!(await desktop("state")).doc.notifications.some((n) => n.title === "smoke says hi"), "dismissing one is one notificationsClear{id}");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Shift+?");
+  await page.waitForSelector(".os-keys", { timeout: 4000 });
+  check(true, "⌘? shows the cheat sheet");
+  await page.keyboard.press("Escape");
+
   // Compact: 390px wide.
   await page.setViewportSize({ width: 390, height: 800 });
   await page.waitForTimeout(400);
   const visible = await page.$$eval(".os-window", (els) => els.filter((e) => !e.hidden).length);
   check(visible === 1, `phone width shows one front window (${visible})`);
   check(await page.$(".os-dock"), "the dock stays reachable on a phone");
+  check(await page.$(".os-shelf"), "widgets go into a shelf instead of vanishing");
+  await page.click(".os-shelf-handle");
+  await page.waitForTimeout(400);
+  check((await page.$$eval(".os-shelf-body .os-widget", (els) => els.filter((e) => !e.hidden).length)) >= 1, "the shelf holds the workspace's widgets");
+  check((await page.$$eval(".os-dock .dock-app .lbl", (els) => els.filter((e) => getComputedStyle(e).display !== "none").length)) >= 1, "dock icons carry labels on a phone");
+  await desktop("workspaceAdd", { name: "Two", switchTo: false });
+  await page.waitForTimeout(400);
+  check((await page.$$(".os-ws-dots button")).length === 2, "workspace dots appear with a second workspace");
   await page.setViewportSize({ width: 1400, height: 900 });
   await page.close();
 
@@ -142,6 +195,11 @@ try {
   await studio.waitForTimeout(800);
   check((await studio.textContent(".code-status")).includes("written by another editor") || (await studio.$(".code-tab.on .name:has-text('app.js')")),
     "an agent's appWrite lands in the open editor");
+
+  // Settings reshapes the desktop without the Studio.
+  await desktop("open", { app: "settings" });
+  await studio.waitForSelector(".stx-viewport .os-window .kv", { timeout: 8_000 });
+  check((await studio.$$(".stx-viewport .os-window .kv")).length >= 12, "Settings has a full Desktop section");
 
   await studio.click(".stx-tabs .seg:has-text('Theme')");
   await studio.waitForSelector(".token-row", { timeout: 5_000 });

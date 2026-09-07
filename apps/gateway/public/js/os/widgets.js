@@ -70,17 +70,30 @@ const load = {
 
 const calendar = {
   mount(host) {
+    // Local, and only local: no calendar service, so no egress and nothing to
+    // be honest about being unavailable. Month navigation is a view, not a write.
     const now = new Date();
-    const y = now.getFullYear(), mo = now.getMonth(), today = now.getDate();
-    const first = new Date(y, mo, 1).getDay();
-    const days = new Date(y, mo + 1, 0).getDate();
-    const cells = [];
-    for (let i = 0; i < first; i += 1) cells.push(h("span"));
-    for (let i = 1; i <= days; i += 1) cells.push(h("span", { class: i === today ? "today" : "" }, String(i)));
-    fill(host,
-      h("div.w-label", now.toLocaleDateString([], { month: "long", year: "numeric" })),
-      h("div.w-cal", ...cells));
-    return () => {};
+    let y = now.getFullYear(), mo = now.getMonth();
+    const stop = (e) => e.stopPropagation();
+    function paint() {
+      const first = new Date(y, mo, 1).getDay();
+      const days = new Date(y, mo + 1, 0).getDate();
+      const isNow = y === now.getFullYear() && mo === now.getMonth();
+      const cells = ["S", "M", "T", "W", "T", "F", "S"].map((d) => h("span.dow", d));
+      for (let i = 0; i < first; i += 1) cells.push(h("span"));
+      for (let i = 1; i <= days; i += 1) cells.push(h("span", { class: isNow && i === now.getDate() ? "today" : "" }, String(i)));
+      fill(host,
+        h("div.w-cal-head", null,
+          h("button", { onpointerdown: stop, onclick: (e) => { stop(e); mo -= 1; if (mo < 0) { mo = 11; y -= 1; } paint(); } }, "‹"),
+          h("div.w-label", { onpointerdown: stop, onclick: (e) => { stop(e); y = now.getFullYear(); mo = now.getMonth(); paint(); }, title: "Back to today" },
+            new Date(y, mo, 1).toLocaleDateString([], { month: "long", year: "numeric" })),
+          h("button", { onpointerdown: stop, onclick: (e) => { stop(e); mo += 1; if (mo > 11) { mo = 0; y += 1; } paint(); } }, "›")),
+        h("div.w-cal", ...cells));
+    }
+    paint();
+    // Roll over at midnight, so "today" stays honest on a machine left open.
+    const id = setInterval(() => { const d = new Date(); if (d.getDate() !== now.getDate()) { now.setTime(d.getTime()); paint(); } }, 60_000);
+    return () => clearInterval(id);
   },
 };
 
@@ -90,7 +103,14 @@ const weather = {
     const lat = widget.props?.lat ?? 55.6761;
     const lon = widget.props?.lon ?? 12.5683;
     const temp = h("div.w-big", "—");
-    const sub = h("div", { style: { fontSize: "11px", color: "var(--os-text-2)" } }, place);
+    const sub = h("div", { style: { fontSize: "11px", color: "var(--os-text-2)", cursor: "text" }, title: "Double-click to change the place" }, place);
+    sub.addEventListener("dblclick", async (e) => {
+      e.stopPropagation();
+      const name = prompt("Place (name, or lat,lon)", place);
+      if (!name) return;
+      const m = /^\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*$/.exec(name);
+      call("widgetSet", { id: widget.id, props: m ? { lat: Number(m[1]), lon: Number(m[2]), place: name } : { place: name } }).catch(() => {});
+    });
     const note = h("div", { style: { fontSize: "11px", color: "var(--os-text-3)", marginTop: "10px" } }, "fetching…");
     fill(host,
       h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start" } },
@@ -133,15 +153,25 @@ const audit = {
 };
 
 const jobs = {
-  mount(host) {
+  mount(host, widget, ctx) {
     const list = h("div.w-feed");
     fill(host, h("div.w-label", "Processes"), list);
+    const stop = (e) => e.stopPropagation();
+    // Actions are the same proc.* calls the console makes; a denied one shows
+    // the Kernel's answer rather than pretending the button did nothing.
+    const act = async (label, fn) => {
+      try { await fn(); } catch (e) { ctx?.notify?.(`${label} failed`, e.message); }
+    };
     return loop(async () => {
       const r = await api.tryMcp("proc", "jobs", {});
-      const rows = (r?.jobs ?? []).slice(0, 6).map((j) => h("div.line", null,
+      if (!r) { fill(list, h("span.dim", { style: { fontSize: "10px" } }, "proc.jobs unavailable")); return; }
+      const rows = (r.jobs ?? []).slice(0, 6).map((j) => h("div.line", null,
         h("span", { class: j.state === "running" ? "ok" : "denied" }, j.state ?? "?"),
-        h("span.what", j.name ?? j.cmd ?? j.id)));
-      fill(list, ...(rows.length ? rows : [h("span.dim", { style: { fontSize: "10px" } }, "no supervised jobs")]));
+        h("span.what", j.name ?? j.cmd ?? j.id),
+        h("span.acts", null,
+          h("button", { title: "Logs (opens the Console)", onpointerdown: stop, onclick: (e) => { stop(e); ctx?.launch?.("console", { run: `logs ${j.id}` }); } }, "logs"),
+          j.state === "running" ? h("button", { title: "Stop", onpointerdown: stop, onclick: (e) => { stop(e); act("stop", () => api.mcp("proc", "stop", { id: j.id })); } }, "stop") : null)));
+      fill(list, ...(rows.length ? rows : [h("span.dim", { style: { fontSize: "10px" } }, "no supervised jobs · run \"<cmd>\" name")]));
     }, 5000);
   },
 };

@@ -296,6 +296,11 @@ async function cmdOs(args) {
     case "map":
       console.log((await desktop("summarize")).map);
       break;
+    case "tui": {
+      const { runTui } = await import("./os-tui.js");
+      await runTui({ cfg, api, die });
+      break;
+    }
     case "silhouette":
       process.stdout.write((await desktop("silhouette", { width: Number(args[1]) || 640, height: Number(args[2]) || 400 })).svg);
       break;

@@ -147,6 +147,74 @@ export function createDesktop({ root, ctx = {} }) {
 
   const isCompact = () => root.getBoundingClientRect().width < COMPACT_WIDTH;
 
+  // ── phone chrome ───────────────────────────────────────────────────────────
+  // Same document. On a narrow screen the renderer changes, the model does not:
+  // one front window, a strip of workspace dots, and a shelf the widgets slide
+  // into rather than vanish from. Nothing here writes a revision on rotate.
+  const dots = h("div.os-ws-dots", { hidden: true });
+  const shelf = h("div.os-shelf", { hidden: true });
+  const shelfHandle = h("button.os-shelf-handle", { title: "Widgets", onclick: () => toggleShelf() }, h("span.grip"), h("span.lbl", "Widgets"));
+  const shelfBody = h("div.os-shelf-body");
+  shelf.append(shelfHandle, shelfBody);
+  root.append(dots, shelf);
+  let shelfOpen = false;
+  function toggleShelf(open = !shelfOpen) {
+    shelfOpen = open;
+    shelf.classList.toggle("open", shelfOpen);
+    shelfHandle.querySelector(".lbl").textContent = shelfOpen ? "Hide widgets" : "Widgets";
+    for (const [, entry] of widgets) entry.frame?.contentWindow?.postMessage({ __sbx: 1, id: "event", type: "event", event: "visibility", detail: { visible: shelfOpen } }, "*");
+  }
+
+  function paintDots(d) {
+    if (d.workspaces.length < 2) { dots.hidden = true; return; }
+    dots.hidden = false;
+    dots.replaceChildren(...d.workspaces.map((w) => h("button", {
+      class: w.n === d.activeWorkspace ? "on" : "",
+      title: w.name, "aria-label": `Workspace ${w.n}: ${w.name}`,
+      onclick: () => call("workspaceSwitch", { n: w.n }),
+    })));
+  }
+
+  // Swipe left/right on the front window's title bar (or the empty desktop) to
+  // cycle windows; swipe across the dots to change workspace. One tool call each.
+  let swipe = null;
+  root.addEventListener("touchstart", (e) => {
+    if (!isCompact() || e.touches.length !== 1) return;
+    const t = e.touches[0];
+    const onBar = e.target.closest(".os-titlebar, .os-ws-dots");
+    if (!onBar && e.target !== root) return;
+    swipe = { x: t.clientX, y: t.clientY, ws: !!e.target.closest(".os-ws-dots"), at: Date.now() };
+  }, { passive: true });
+  root.addEventListener("touchend", (e) => {
+    if (!swipe) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - swipe.x, dy = t.clientY - swipe.y;
+    const g = swipe; swipe = null;
+    if (Math.abs(dx) < 60 || Math.abs(dy) > 50 || Date.now() - g.at > 600) return;
+    const d = doc();
+    if (g.ws) {
+      const n = d.activeWorkspace + (dx < 0 ? 1 : -1);
+      if (d.workspaces.some((w) => w.n === n)) call("workspaceSwitch", { n });
+    } else {
+      call("cycleFocus", { direction: dx < 0 ? "next" : "prev" }).catch(() => {});
+    }
+  }, { passive: true });
+
+  // A long press on a title bar is the phone's right-click: the window menu.
+  let press = null;
+  root.addEventListener("touchstart", (e) => {
+    if (!isCompact()) return;
+    const bar = e.target.closest(".os-titlebar");
+    if (!bar) return;
+    const id = bar.closest(".os-window")?.dataset.id;
+    press = setTimeout(() => {
+      const t = e.touches[0];
+      ctx.windowMenu?.({ x: t.clientX, y: t.clientY }, id);
+    }, 550);
+  }, { passive: true });
+  root.addEventListener("touchend", () => clearTimeout(press), { passive: true });
+  root.addEventListener("touchmove", () => clearTimeout(press), { passive: true });
+
   function placeWindow(el, w, tiles, front) {
     const rect = root.getBoundingClientRect();
     // On a phone, "floating windows" is the wrong answer to a real question. The
@@ -154,7 +222,9 @@ export function createDesktop({ root, ctx = {} }) {
     // the front window is shown, full-bleed, and the dock becomes the switcher.
     if (isCompact()) {
       Object.assign(el.style, { left: "0px", top: "0px", width: `${rect.width}px`, height: `${rect.height}px` });
-      el.style.zIndex = String(w.z);
+      // Only the front window is shown, so its document z is moot here — and
+      // the phone chrome (dots, shelf) must sit above it.
+      el.style.zIndex = "2";
       el.hidden = w.min || w.ws !== doc().activeWorkspace || w.id !== front;
       return;
     }
@@ -367,6 +437,14 @@ export function createDesktop({ root, ctx = {} }) {
 
   function placeWidget(el, g, entry) {
     const rect = root.getBoundingClientRect();
+    if (isCompact()) {
+      // The shelf: same element, same widget instance, stacked instead of placed.
+      if (el.parentElement !== shelfBody) shelfBody.append(el);
+      Object.assign(el.style, { left: "", right: "", top: "", width: "100%", height: `${Math.min(g.h, 220)}px` });
+      el.hidden = g.ws !== doc().activeWorkspace;
+      return;
+    }
+    if (el.parentElement !== root) root.append(el);
     el.style.width = `${g.w}px`;
     el.style.height = `${g.h}px`;
     el.style.top = `${g.y}px`;
@@ -494,6 +572,10 @@ export function createDesktop({ root, ctx = {} }) {
     const openHere = d.windows.filter((w) => w.ws === d.activeWorkspace && !w.min);
     const compact = isCompact();
     root.classList.toggle("compact", compact);
+    dots.hidden = !compact;
+    if (compact) paintDots(d);
+    shelf.hidden = !compact || !d.widgets.some((g) => g.ws === d.activeWorkspace);
+    if (!compact && shelfOpen) toggleShelf(false);
     const tiled = !compact && d.wm.mode === "tiling" ? tileBoxes(openHere.filter((w) => !w.max)) : null;
     const tiles = tiled?.boxes ?? null;
     if (!sashGesture) paintSashes(tiled?.sashes ?? []);

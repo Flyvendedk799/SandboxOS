@@ -11,6 +11,7 @@ import { h, fill, icon, dialog, confirmDialog, toast, toastError } from "../core
 import { os, call, loadOs } from "./client.js";
 import { THEME_TOKENS, themeCss, isWallpaper, isColor } from "./lib/themes.js";
 
+const COLOR_TOKENS = THEME_TOKENS.filter((k) => k !== "wall" && k !== "grain");
 const TOKEN_LABELS = {
   bg0: "Deepest background", bg1: "Panels and windows", bg2: "Title bars, chips", bg3: "Raised surfaces",
   line: "Hairlines", lineLoud: "Strong lines", text: "Text", text2: "Secondary text", text3: "Muted text",
@@ -156,7 +157,7 @@ export function createThemeStudio() {
       const snippet = {
         tool: "desktop.themeDefine",
         args: { key: wearing?.key ?? "custom", name: t.name, base: wearing?.builtin ? wearing.key : "midnight", scheme: t.scheme,
-          tokens: Object.fromEntries(THEME_TOKENS.map((k) => [k, t[k]])) },
+          tokens: Object.fromEntries(THEME_TOKENS.filter((k) => t[k] != null).map((k) => [k, t[k]])) },
       };
       const ta = h("textarea", { readonly: true, rows: 12, style: { width: "100%", fontFamily: "var(--mono)", fontSize: "10.5px" } });
       ta.value = JSON.stringify(snippet, null, 2);
@@ -184,7 +185,13 @@ export function createThemeStudio() {
           h("span.nm", { style: { fontSize: "11px" } }, th.name, th.builtin ? null : h("span.sub", " · yours"))))),
 
       h("div.section-label", "Tokens"),
-      h("div.token-list", ...THEME_TOKENS.filter((k) => k !== "wall").map(tokenRow)),
+      h("div.token-list", ...COLOR_TOKENS.map(tokenRow)),
+      (() => {
+        const grain = h("input", { type: "range", min: 0, max: 0.4, step: 0.01, value: t.grain ?? 0, title: "Grain" });
+        grain.addEventListener("input", () => previewTheme({ grain: Number(grain.value) }));
+        grain.addEventListener("change", () => commit("grain", Number(grain.value)));
+        return h("div.field.row", { style: { marginTop: "8px" } }, h("label", `Grain ${Math.round((t.grain ?? 0) * 100)}%`), grain);
+      })(),
       h("div.dim", { style: { fontSize: "10.5px", padding: "6px 4px 12px" } },
         Object.keys(overrides).length ? `${Object.keys(overrides).length} overrides on ${t.name}. Drag a swatch to preview; release to write one themeSet.` : `No overrides — you are wearing ${t.name} as designed.`),
 

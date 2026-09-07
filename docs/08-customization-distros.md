@@ -101,9 +101,18 @@ tools) with no separate integration work — the same app, two faces. A "notes" 
 notes window *and* a `notes` MCP server (`note.create`, `note.search`). This duality is
 why SandboxOS is genuinely agent-native at the application layer, not just the kernel.
 
-Apps are installed into a Sandbox via the manifest/registry, themeable via design
-tokens (the `tokens.css` discipline from Brandify/your design-system work), and appear
-both on the desktop and in the tool catalog.
+**Shipped (Phase 29, [ADR-0004](adr/0004-app-mcp-duality.md)).** A custom app in the OS
+document may carry an `mcp` block. Two honest shapes: a *façade* whose tools are
+attenuated aliases of Kernel tools (no new code runs), and a *companion* — a module in
+the app's bundle, hosted out of process with no handle to the machine — that the Kernel
+registers as a server named after the app. Both appear in `kernel.tools`, in Spotlight
+and on the Library card; both sit behind the same authorize → route → audit path; both
+travel with the distro. The Kernel reconciles its app servers with the document on
+boot and on every desktop write. See docs/15 §5.
+
+Apps are themeable via design tokens (one compiled stylesheet, `/:slug/os/theme.css`,
+that the shell, the Studio and every app frame link) and appear both on the desktop
+and in the tool catalog.
 
 ## Distros: forking and sharing whole machines
 
@@ -122,6 +131,17 @@ agents) you can instantiate, fork, and share. Because a Sandbox is a Tide tree
 Distros are how "highly customizable, very interchangeable" becomes a *community*
 property, not just a personal one — the on-ramp from "I configured my machine" to
 "thousands of people start from machines others designed."
+
+**Shipped (Phase 29).** One snapshot with two layers: the Sandboxfile's server
+composition and, when the machine has one, the OS document with the source and tools
+of every custom app. `desktop.distroPublish` stores it with a visibility (`private`,
+`tenant`, `public`), tags, and a preview record; `distroList` is the gallery across
+tenants; `distroFork` and `POST /api/sandboxes { distro }` instantiate both layers —
+core servers only, marketplace servers by name, a stranger's companion servers
+switched off until you enable them. Payloads carry a per-bundle SHA-256 integrity
+block that import verifies. Phase-4 manifest-only rows keep working; Phase-27 OS-only
+rows keep working. Tide-based *update* (rebasing a fork onto upstream) is still ahead.
+See docs/15 §6.
 
 ## Theming & the human surface
 

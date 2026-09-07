@@ -23,6 +23,8 @@ const QUICK = [
   "Add a weather widget",
   "Tile the windows",
   "Build me a port monitor app",
+  "Tidy this workspace",
+  "Summarize my desktop",
 ];
 
 function preview(value, max = 90) {

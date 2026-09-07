@@ -6,7 +6,7 @@
 // `notifications` — so "hide the dock", "put it on the left", "rename the menu"
 // are ordinary `desktop.*` calls, and an agent can do every one of them.
 
-import { h, fill, icon, api, slug, menu, toastError } from "../core.js";
+import { h, fill, icon, api, slug, menu, toast, toastError } from "../core.js";
 import { os, call, tint } from "./client.js";
 import { createDesktop } from "./wm.js";
 import { iconName } from "./sprite.js";
@@ -30,8 +30,23 @@ export function createScreen({ ctx = {} } = {}) {
 
   const wm = createDesktop({
     root: desktopEl,
-    ctx: { ...ctx, launch, mark: () => call("arrange", { preset: "grid", viewport: wm.viewport() }) },
+    ctx: { ...ctx, launch, mark: () => call("arrange", { preset: "grid", viewport: wm.viewport() }), windowMenu },
   });
+
+  /** The window's menu — a right-click on a desktop, a long press on a phone. */
+  function windowMenu(at, id) {
+    const w = os.doc.windows.find((x) => x.id === id);
+    if (!w) return;
+    menu(at, [
+      { label: w.min ? "Restore" : "Minimise", icon: "window", run: () => call("windowSet", { id, min: !w.min }) },
+      { label: w.max ? "Unzoom" : "Zoom", run: () => call("windowSet", { id, max: !w.max }) },
+      { label: "Next window", key: "⌘`", run: () => call("cycleFocus", {}) },
+      "-",
+      ...os.doc.workspaces.filter((x) => x.n !== w.ws).map((x) => ({ label: `Move to ${x.name}`, run: () => call("windowSet", { id, ws: x.n }) })),
+      "-",
+      { label: "Close", icon: "x", key: "⌘W", danger: true, run: () => call("close", { id }) },
+    ]);
+  }
 
   // ── overlay plumbing ──────────────────────────────────────────────────────
   let openOverlay = null;
@@ -145,12 +160,16 @@ export function createScreen({ ctx = {} } = {}) {
       const mine = d.windows.filter((w) => w.app === id && w.ws === d.activeWorkspace);
       return h("button.dock-app", {
         title: meta.name,
+        "aria-label": meta.name,
         style: { width: `${size}px`, height: `${size}px`, background: tint(meta.hue), color: meta.hue },
-        onclick: () => (mine.length && mine.every((w) => w.min)
-          ? call("focus", { id: mine[0].id })
+        // On a phone the dock is the app switcher: tap brings the app's window
+        // to the front rather than opening another one.
+        onclick: () => (mine.length && (mine.every((w) => w.min) || desktopEl.classList.contains("compact"))
+          ? call("focus", { id: [...mine].sort((a, b) => b.z - a.z)[0].id })
           : launch(id)),
         oncontextmenu: (e) => { e.preventDefault(); dockMenu(e, meta, mine); },
       }, icon(iconName(meta.icon), Math.round(size / 2)),
+        h("span.lbl", meta.name),
         h("span.dot", { style: { background: mine.length ? meta.hue : "transparent" } }));
     }));
   }
@@ -199,18 +218,38 @@ export function createScreen({ ctx = {} } = {}) {
   }
 
   // ── notifications ─────────────────────────────────────────────────────────
+  /** Where a notification leads: its own action, or the app that sent it. */
+  function followNotification(n) {
+    const d = os.doc;
+    const focusWindow = (id) => call("focus", { id }).catch(() => {});
+    if (n.action?.window && d.windows.some((w) => w.id === n.action.window)) return focusWindow(n.action.window);
+    if (n.action?.app) return launch(n.action.app, n.action.props);
+    const byApp = { Processes: "metrics", Agents: "assistant", Distros: "settings", SandboxOS: "settings" };
+    const appId = byApp[n.app] ?? ((os.snap.apps ?? []).find((a) => a.id === n.app || a.name === n.app)?.id ?? null);
+    if (!appId) return null;
+    const open = d.windows.find((w) => w.app === appId && w.ws === d.activeWorkspace);
+    return open ? focusWindow(open.id) : launch(appId);
+  }
+
   function notifPanel() {
     const list = [...os.doc.notifications].reverse();
     call("notificationsRead", {}).catch(() => {});
+    // Group by who is talking: the machine's own processes, agents, then each
+    // app. A flat list buries the one thing you delegated under twenty toasts.
+    const groupOf = (n) => (n.app === "Processes" ? "Processes" : n.app === "Agents" ? "Agents" : n.app === "system" || n.app === "SandboxOS" ? "System" : n.app);
+    const groups = new Map();
+    for (const n of list) { const g = groupOf(n); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(n); }
     const panel = h("div.os-panel.os-notifs", { onclick: (e) => e.stopPropagation() },
       h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" } },
-        h("span", { style: { fontSize: "12px", fontWeight: "650" } }, "Notifications"),
-        h("button.app-btn", { onclick: () => { call("notificationsClear", {}); hideOverlay(); } }, "Clear")),
-      ...(list.length ? list.map((n) => h("div.notif", { class: n.kind },
-        h("div.hd", null, h("b", n.title), h("span", ago(n.ts))),
-        n.body ? h("p", n.body) : null,
-        n.app && n.app !== "system" ? h("span.src", n.app) : null))
-        : [h("div.dim", { style: { fontSize: "11.5px" } }, "Nothing to report.")]),
+        h("span", { style: { fontSize: "12px", fontWeight: "650" } }, `Notifications${list.length ? ` · ${list.length}` : ""}`),
+        list.length ? h("button.app-btn", { onclick: () => { call("notificationsClear", {}); hideOverlay(); } }, "Clear all") : null),
+      ...(list.length ? [...groups.entries()].flatMap(([g, items]) => [
+        h("div.os-label", { style: { marginBottom: "6px" } }, g),
+        ...items.map((n) => h("div.notif", { class: `${n.kind}${n.action || true ? " link" : ""}`, title: "Open", onclick: () => { hideOverlay(); followNotification(n); } },
+          h("div.hd", null, h("b", n.title), h("span", ago(n.ts)),
+            h("button.dismiss", { title: "Dismiss", "aria-label": "Dismiss", onclick: (e) => { e.stopPropagation(); call("notificationsClear", { id: n.id }).catch(() => {}); e.currentTarget.closest(".notif")?.remove(); } }, icon("x", 10))),
+          n.body ? h("p", n.body) : null)),
+      ]) : [h("div.dim", { style: { fontSize: "11.5px" } }, "Nothing to report. Supervised processes and agents announce themselves here when they finish — and it stays until you dismiss it.")]),
     );
     return h("div.os-overlay", { style: { background: "transparent", backdropFilter: "none" }, onclick: hideOverlay }, panel);
   }
@@ -253,7 +292,17 @@ export function createScreen({ ctx = {} } = {}) {
     const actions = () => {
       const d = os.doc;
       const out = [];
-      for (const a of os.snap.apps ?? []) out.push({ name: a.name, sub: a.builtin ? "Application" : "Custom app", icon: a.icon, run: () => launch(a.id) });
+      for (const a of os.snap.apps ?? []) {
+        out.push({ name: a.name, sub: a.builtin ? "Application" : a.kind === "alias" ? "Alias" : "Custom app", icon: a.icon, run: () => launch(a.id) });
+        if (!a.builtin && a.kind === "bundle") out.push({ name: `Edit ${a.name} source`, sub: "Studio · Code", icon: "code", run: () => { location.href = `/${slug}/studio#code=app:${a.id}`; } });
+        for (const t of a.mcp?.live ? a.mcp.tools : []) {
+          out.push({ name: `${a.mcp.name}.${t}`, sub: `Tool · ${a.name}`, icon: "play", run: async () => {
+            try { const r = await api.mcp(a.mcp.name, t, {}); toast(`${a.mcp.name}.${t}`, { body: JSON.stringify(r).slice(0, 200), kind: "ok", timeout: 6000 }); }
+            catch (e) { toastError(`${a.mcp.name}.${t} failed`, e); }
+          } });
+        }
+      }
+      for (const p of recentFiles()) out.push({ name: p.split("/").pop(), sub: `Recent · ${p}`, icon: "files", run: () => launch(appFor(p) ?? "files", { path: p }) });
       for (const w of os.snap.widgetKinds ?? []) out.push({ name: `Add ${w.name}`, sub: "Widget", icon: w.icon, run: () => call("widgetAdd", { kind: w.kind }) });
       for (const t of os.snap.themes ?? []) out.push({ name: `${t.name} theme`, sub: "Theme", icon: "theme", run: () => call("themeSet", { theme: t.key }) });
       for (const a of os.snap.animations ?? []) out.push({ name: `${a.name} motion`, sub: "Animation", icon: "play", run: () => call("animationSet", { preset: a.key }) });
@@ -271,6 +320,13 @@ export function createScreen({ ctx = {} } = {}) {
         { name: "Show desktop", sub: "Layout", icon: "window", run: () => call("minimizeAll", {}) },
         { name: "New workspace", sub: "Workspace", icon: "plus", run: () => call("workspaceAdd", {}) },
         { name: "Open the Studio", sub: "Build", icon: "layers", run: () => ctx.openStudio?.() },
+        ...["library", "layers", "theme", "motion", "code"].map((t) => ({ name: `Studio · ${t[0].toUpperCase()}${t.slice(1)}`, sub: "Build", icon: "layers", run: () => { location.href = `/${slug}/studio#tab=${t}`; } })),
+        { name: "Publish this OS as a distro", sub: "Distros", icon: "layers", run: async () => {
+          const name = prompt("Distro name", d.name);
+          if (!name) return;
+          try { const r = await call("distroPublish", { name, replace: true }); toast(`Published ${r.name}`, { kind: "ok" }); } catch (e) { toastError("Could not publish", e); }
+        } },
+        { name: "Keyboard shortcuts", sub: "Help", icon: "apps", run: () => showOverlay("keys", cheatSheet) },
         { name: "Command Central", sub: "Machine", icon: "shell", run: () => { location.href = `/${slug}`; } },
       );
       return out;
@@ -284,7 +340,7 @@ export function createScreen({ ctx = {} } = {}) {
       const fileRows = q.length >= 2
         ? (fileIndex ?? []).filter((p) => p.toLowerCase().includes(q)).slice(0, 5).map((p) => ({
             name: p.split("/").pop(), sub: p, icon: "files",
-            run: () => launch(appFor(p) ?? "files", { path: p }),
+            run: () => { rememberFile(p); launch(appFor(p) ?? "files", { path: p }); },
           }))
         : [];
       rows = [...matched.slice(0, 8 - fileRows.length), ...fileRows];
@@ -314,6 +370,30 @@ export function createScreen({ ctx = {} } = {}) {
         results));
   }
 
+  /** Files opened from Spotlight, most recent first. Chrome, not desktop truth. */
+  const RECENT_KEY = `sbx.os.recent.${slug}`;
+  function recentFiles() { try { return JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]").slice(0, 6); } catch { return []; } }
+  function rememberFile(p) {
+    try { localStorage.setItem(RECENT_KEY, JSON.stringify([p, ...recentFiles().filter((x) => x !== p)].slice(0, 12))); } catch { /* private mode */ }
+  }
+
+  // ── the cheat sheet (⌘?) ──────────────────────────────────────────────────
+  function cheatSheet() {
+    const rows = [
+      ["⌘K", "Search apps, files, widgets, themes, tools, actions"], ["⌘?", "This sheet"],
+      ["⌘1…9", "Switch workspace"], ["⌘W", "Close window"], ["⌘M", "Minimise"],
+      ["⌘↑ / ⌘↓", "Zoom / unzoom"], ["⌘← / ⌘→", "Snap left / right"], ["⌘`", "Next window (⇧ for previous)"],
+      ["⌘⇧D", "Show desktop"], ["⌘⇧B", "Open the Studio"], ["⌘⇧C", "Command Central"],
+      ["Drag to an edge", "Snap to a half, a quarter, or full"], ["Drag a sash", "Resize a tiled split"],
+      ["Studio: ⌘⇧P", "Studio actions"], ["Studio: ⇧-click", "Multi-select; arrows nudge, ⇧ ×5"], ["Studio: ⌘S", "Save the file in Code"],
+    ];
+    return h("div.os-overlay.center", { onclick: hideOverlay },
+      h("div.os-panel.os-keys", { onclick: (e) => e.stopPropagation() },
+        h("div.os-label", "Keyboard"),
+        h("div.keys-grid", ...rows.flatMap(([k, what]) => [h("kbd", k), h("span", what)])),
+        h("div.dim", { style: { fontSize: "10.5px", marginTop: "10px" } }, "Every shortcut is the same desktop.* call the menus make — an agent has the same keyboard.")));
+  }
+
   // ── keyboard ──────────────────────────────────────────────────────────────
   //
   // An OS you can only drive with a mouse is a mock-up of one. Every shortcut
@@ -322,12 +402,15 @@ export function createScreen({ ctx = {} } = {}) {
   function onKey(e) {
     const mod = e.metaKey || e.ctrlKey;
     if (e.key === "Escape" && openOverlay) { hideOverlay(); return; }
+    // `?` on its own opens the cheat sheet, unless you are typing somewhere.
+    if (e.key === "?" && !e.target.closest("input, textarea, select, [contenteditable], .term-screen")) { e.preventDefault(); toggleOverlay("keys", cheatSheet); return; }
     if (!mod) return;
 
     const k = e.key.toLowerCase();
     const win = wm.focused();
 
     if (k === "k") { e.preventDefault(); showOverlay("spotlight", spotlight); return; }
+    if (e.key === "?" || (e.key === "/" && e.shiftKey)) { e.preventDefault(); toggleOverlay("keys", cheatSheet); return; }
 
     // ⌘1…⌘9 — workspaces. Left alone when the OS has fewer.
     if (/^[1-9]$/.test(e.key)) {
@@ -379,9 +462,19 @@ export function createScreen({ ctx = {} } = {}) {
 
   document.addEventListener("keydown", onKey);
 
+  // A viewer who asked their OS for less motion gets it, unless this document
+  // explicitly says the preset wins. Decided per viewer, written nowhere.
+  const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+  function applyMotionPreference() {
+    const calm = !!reduced?.matches && os.doc.animation?.reducedMotion !== "ignore";
+    document.documentElement.classList.toggle("os-calm", calm);
+  }
+  reduced?.addEventListener?.("change", () => { if (os.doc) applyMotionPreference(); });
+
   let lastTheme = null;
   function render() {
     if (!os.doc) return;
+    applyMotionPreference();
     renderMenubar();
     renderDock();
     wm.render();
