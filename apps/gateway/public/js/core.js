@@ -123,7 +123,7 @@ export const api = {
       body: JSON.stringify({ server, tool, args }),
     });
     const env = await json(res);
-    if (!env.ok) throw new ApiError(env.error ?? `${server}.${tool} failed`, 200);
+    if (!env.ok) throw Object.assign(new ApiError(env.error ?? `${server}.${tool} failed`, 200), { code: env.code ?? "error" });
     return env.result;
   },
 
@@ -219,7 +219,7 @@ export function toast(title, { body, kind = "", timeout = 4500 } = {}) {
 }
 
 export const toastError = (title, err) =>
-  toast(title, { body: err?.message ?? String(err ?? ""), kind: "err", timeout: 8000 });
+  (err?.silent ? null : toast(title, { body: err?.message ?? String(err ?? ""), kind: "err", timeout: 8000 }));
 
 // ── Overlays: dialogs, prompts, menus ────────────────────────────────────────
 

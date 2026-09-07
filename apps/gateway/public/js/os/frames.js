@@ -79,8 +79,18 @@ export function destroyFrame(frame) {
  * changes — which is how "the agent just rewrote my app" becomes something you
  * see rather than something you have to go and refresh.
  */
-export function reloadFramesFor(id) {
+export function reloadFramesFor(id, { path = null } = {}) {
   if (!id) return;
+  // A CSS-only write does not need a reload: the frame swaps the stylesheet in
+  // place and keeps whatever it was doing. Anything else is a full reload.
+  if (path && /\.css$/i.test(path)) {
+    for (const entry of frames) {
+      if (entry.id !== id) continue;
+      try { entry.el.contentWindow?.postMessage({ __sbx: 1, id: "event", type: "event", event: "css", detail: { path } }, "*"); }
+      catch { /* frame gone */ }
+    }
+    return;
+  }
   dropSession(id); // its permissions may have changed with its definition
   for (const entry of frames) {
     if (entry.id !== id) continue;

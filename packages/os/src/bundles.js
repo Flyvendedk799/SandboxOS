@@ -226,6 +226,65 @@ export function starterAppJs() {
   ].join("\n");
 }
 
+/** The companion server a "UI + tools" app starts with: real tools an agent can
+ *  call without opening the window. It runs out of process with no handle to
+ *  the machine — a pure function of its arguments — which is exactly why the
+ *  Kernel can host it without trusting it. */
+export function starterServerJs({ id = "app", name = "New App" } = {}) {
+  const title = String(name).replace(/[\\`$]/g, "");
+  return [
+    "// The tool half of this app. It runs in its own process with an empty deps",
+    "// object: no Cell, no Kernel, no secrets. Tools compute from their arguments.",
+    "// An agent (or the UI, through sbx.mcp) calls them as `" + id + ".<tool>`.",
+    "export default function createServer() {",
+    "  const notes = [];",
+    "  return {",
+    `    name: ${JSON.stringify(id)},`,
+    "    tools: {",
+    "      ping: {",
+    `        description: ${JSON.stringify(`Is ${title} alive?`)},`,
+    "        inputSchema: { type: 'object', properties: {} },",
+    "        async handler() { return { pong: true, at: Date.now() }; },",
+    "      },",
+    "      add: {",
+    "        description: 'Remember a line of text.',",
+    "        inputSchema: { type: 'object', required: ['text'], properties: { text: { type: 'string' } } },",
+    "        async handler(_ctx, { text }) { notes.push(String(text).slice(0, 500)); return { count: notes.length }; },",
+    "      },",
+    "      list: {",
+    "        description: 'Everything remembered so far.',",
+    "        inputSchema: { type: 'object', properties: {} },",
+    "        async handler() { return { notes }; },",
+    "      },",
+    "    },",
+    "  };",
+    "}",
+    "",
+  ].join("\n");
+}
+
+/** The UI half of a "UI + tools" app: it calls its own server through the broker. */
+export function starterAppToolsJs({ id = "app" } = {}) {
+  return [
+    "// This UI talks to its own tools the same way an agent does: through the",
+    "// Kernel. `sbx.mcp` is brokered by the shell, so the frame holds no token.",
+    "const out = document.getElementById('out');",
+    `const server = ${JSON.stringify(id)};`,
+    "document.getElementById('run').addEventListener('click', async () => {",
+    "  out.textContent = 'working…';",
+    "  try {",
+    "    await sbx.mcp(server, 'add', { text: 'clicked at ' + new Date().toLocaleTimeString() });",
+    "    const r = await sbx.mcp(server, 'list', {});",
+    "    out.textContent = r.notes.join('\\n') || '(nothing yet)';",
+    "  } catch (err) {",
+    "    out.textContent = 'error: ' + err.message;",
+    "  }",
+    "});",
+    "sbx.ready();",
+    "",
+  ].join("\n");
+}
+
 export function starterWidget({ name = "New Widget" } = {}) {
   const title = String(name).replace(/[<>&]/g, "");
   return [

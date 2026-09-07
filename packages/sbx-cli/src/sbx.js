@@ -275,10 +275,34 @@ async function cmdOs(args) {
       if (!args[1]) die("usage: sbx os motion <preset>");
       console.log(`motion → ${(await desktop("animationSet", { preset: args[1] })).animation.name}`);
       break;
-    case "layout":
-      if (!args[1]) die("usage: sbx os layout <floating|tiling>");
-      await desktop("layoutSet", { mode: args[1] });
-      console.log(`layout → ${args[1]}`);
+    case "layout": {
+      if (!args[1]) die("usage: sbx os layout <floating|tiling|master-stack|columns|rows|grid>");
+      const presets = ["master-stack", "columns", "rows", "grid"];
+      const r = presets.includes(args[1]) ? await desktop("layoutSet", { mode: "tiling", preset: args[1] }) : await desktop("layoutSet", { mode: args[1] });
+      console.log(`layout → ${args[1]}${r.tree ? `  ${r.tree}` : ""}`);
+      break;
+    }
+    case "tile": {
+      // sbx os tile <id> ratio <0.1-0.9> [with <id2>] · sbx os tile <id> swap <id2> · sbx os tile <id> flip
+      if (!args[1] || !args[2]) die("usage: sbx os tile <window-id> ratio <r> [with <id>] | swap <id> | flip");
+      const a = { id: args[1] };
+      if (args[2] === "ratio") { a.ratio = Number(args[3]); if (args[4] === "with") a.with = args[5]; }
+      else if (args[2] === "swap") a.swap = args[3];
+      else if (args[2] === "flip") a.dir = "col";
+      const r = await desktop("tile", a);
+      console.log(r.tree);
+      break;
+    }
+    case "map":
+      console.log((await desktop("summarize")).map);
+      break;
+    case "tui": {
+      const { runTui } = await import("./os-tui.js");
+      await runTui({ cfg, api, die });
+      break;
+    }
+    case "silhouette":
+      process.stdout.write((await desktop("silhouette", { width: Number(args[1]) || 640, height: Number(args[2]) || 400 })).svg);
       break;
     case "snap": {
       if (!args[1] || !args[2]) die("usage: sbx os snap <window-id> <left|right|full|topleft|…> [WxH]");
@@ -300,10 +324,24 @@ async function cmdOs(args) {
     }
     case "apps":
       for (const a of (await desktop("appList")).apps) {
-        console.log(`${a.id.padEnd(16)} ${a.kind.padEnd(8)} ${a.name}${a.permissions?.length ? `  [${a.permissions.join(",")}]` : ""}`);
+        const tools = a.mcp ? `  tools: ${a.mcp.name}.{${a.mcp.tools.join(",")}}${a.mcp.enabled ? (a.mcp.live ? "" : " (not live)") : " (off)"}` : "";
+        console.log(`${a.id.padEnd(16)} ${a.kind.padEnd(8)} ${a.name}${a.permissions?.length ? `  [${a.permissions.join(",")}]` : ""}${tools}`);
       }
       break;
+    case "tools": {
+      // sbx os tools <app> on|off
+      if (!args[1] || !["on", "off"].includes(args[2])) die("usage: sbx os tools <app> on|off");
+      const r = await desktop("appDefine", { id: args[1], mcp: { enabled: args[2] === "on" } });
+      console.log(r.server?.live ? `${r.server.name}.* is live` : r.server?.problem ?? `${r.server?.name ?? args[1]}.* is off`);
+      break;
+    }
     case "history":
+      if (args[1]) {
+        const r = await desktop("history", { rev: Number(args[1]) });
+        console.log(`r${r.rev} · ${r.label} · ${new Date(r.ts).toISOString()}`);
+        for (const [k, v] of Object.entries(r.diff)) console.log(`  ${k.padEnd(12)} ${typeof v === "object" && !Array.isArray(v) ? `+${v.added} −${v.removed} ~${v.changed}` : Array.isArray(v) ? (v.join(", ") || "—") : v}`);
+        break;
+      }
       for (const rev of (await desktop("history")).revisions) {
         console.log(`r${String(rev.rev).padEnd(5)} ${new Date(rev.ts).toISOString()}  ${rev.label}`);
       }
@@ -313,16 +351,34 @@ async function cmdOs(args) {
       console.log(`now at r${(await desktop("revert", { rev: Number(args[1]) })).rev}`);
       break;
     case "publish": {
-      if (!args[1]) die("usage: sbx os publish <name>");
-      const r = await desktop("distroPublish", { name: args[1], replace: true });
-      console.log(`published ${r.name} (${r.apps} custom apps)`);
+      // sbx os publish <name> [--public|--private] [--tags=a,b]
+      if (!args[1]) die("usage: sbx os publish <name> [--public|--private] [--tags=a,b]");
+      const visibility = args.includes("--public") ? "public" : args.includes("--private") ? "private" : "tenant";
+      const tags = (args.find((x) => x.startsWith("--tags=")) ?? "").slice(7).split(",").filter(Boolean);
+      const r = await desktop("distroPublish", { name: args[1], replace: true, visibility, tags });
+      console.log(`published ${r.name} (${r.visibility}; ${r.apps} custom apps, ${r.tools} with tools, ${r.servers} servers)`);
       break;
     }
-    case "fork":
-      if (!args[1]) die("usage: sbx os fork <distro>");
-      await desktop("distroFork", { id: args[1] });
-      console.log(`forked ${args[1]}`);
+    case "gallery": {
+      const scope = args.includes("--public") ? "public" : args.includes("--mine") ? "mine" : "all";
+      const q = args.slice(1).filter((x) => !x.startsWith("--")).join(" ");
+      for (const d of (await desktop("distroList", { q, scope })).distros) {
+        console.log(`${d.id.padEnd(18)} ${d.name.padEnd(22)} ${(d.builtin ? "seed" : d.visibility).padEnd(8)} ${d.forks ? `${d.forks} forks  ` : ""}${(d.tags ?? []).map((t) => `#${t}`).join(" ")}  ${d.description ?? ""}`);
+      }
       break;
+    }
+    case "visibility":
+      if (!args[1] || !args[2]) die("usage: sbx os visibility <distro-name> <private|tenant|public>");
+      await desktop("distroSet", { name: args[1], visibility: args[2] });
+      console.log(`${args[1]} → ${args[2]}`);
+      break;
+    case "fork": {
+      if (!args[1]) die("usage: sbx os fork <distro>");
+      const r = await desktop("distroFork", { id: args[1] });
+      const off = (r.tools ?? []).filter((t) => !t.enabled);
+      console.log(`forked ${args[1]}${off.length ? `  (${off.length} app server(s) off: ${off.map((t) => t.app).join(", ")} — sbx os tools <app> on)` : ""}`);
+      break;
+    }
     case "export":
       console.log(JSON.stringify((await desktop("distroExport")).payload, null, 2));
       break;
@@ -807,11 +863,15 @@ const HELP = `sbx — drive a SandboxOS machine from anywhere.
   ports       port list · port expose <port> [name] · port close <port> · port scan
   agents      agent <list|spawn|get|kill> …
 
-  desktop     os show · os open <app> · os close <id> · os widget <kind>
-              os theme [key] · os motion <preset> · os layout <floating|tiling>
+  desktop     os show · os map · os silhouette [W H] · os open <app> · os close <id>
+              os widget <kind> · os theme [key] · os motion <preset>
+              os layout <floating|tiling|master-stack|columns|rows|grid>
+              os tile <id> ratio <r> [with <id>] | swap <id> | flip
               os snap <id> <region> [WxH] · os assoc [.ext] [app]
-              os apps · os history · os revert <rev>
-              os publish <name> · os fork <distro> · os export · os notify "<title>"
+              os apps · os tools <app> on|off · os history [rev] · os revert <rev>
+              os publish <name> [--public] [--tags=a,b] · os gallery [q] [--public|--mine]
+              os visibility <name> <private|tenant|public> · os fork <distro>
+              os export · os notify "<title>" · os tui
 
   state       secret <list|set|rm|use> · app <list|install> · distro <list|create|delete|snapshot>
   observe     metrics · audit [n] · watch

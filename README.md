@@ -50,6 +50,7 @@ Node 22.13 or newer — the 22 LTS line included — and no dependencies to inst
 git clone https://github.com/Flyvendedk799/SandboxOS && cd SandboxOS
 SANDBOXOS_PASSWORD=letmein npm start          # → http://127.0.0.1:3939
 npm test                                       # the whole suite
+npm run smoke                                  # the OS and the Studio, in a headless browser
 ```
 
 Open the URL, sign in, and you land on your slug. Docker is used for real Cell
@@ -68,7 +69,10 @@ npx sbx ask "start a static server on 8080 and expose it"
 ## What ships today
 
 The spine is alive and has grown into a machine you can work in — and, since Phase 27,
-one you can live in. Roughly Phases 0–4 of the roadmap, plus Command Central and the OS.
+one you can live in: since Phases 28–30, one with a real tiling tree, a Studio that is
+an editor, apps that are also MCP servers, a distro gallery across tenants, a phone
+renderer, and a terminal renderer (`sbx os tui`). Roughly Phases 0–4 of the roadmap,
+plus Command Central and the OS.
 
 ### The Kernel
 
@@ -224,10 +228,11 @@ for await (const ev of sbx.assistant.ask("summarise today's changes")) {
 | 12 | [Roadmap](docs/12-roadmap.md) | Phase 0 → year 10 |
 | 13 | [Open questions & risks](docs/13-open-questions.md) | What we deliberately deferred |
 | 14 | [Surface map](docs/14-surface-map.md) | Every route, tool and command that exists today |
-| 15 | [The OS experience](docs/15-os-experience.md) | The desktop as a document, and the builder for it |
+| 15 | [The OS experience](docs/15-os-experience.md) | The desktop as a document, the builder for it, apps with two faces, distros, the second surface |
 
 Architecture Decision Records live in [`docs/adr/`](docs/adr). Each build phase has its
-own note: `PHASE0.md` … `PHASE27.md`.
+own note: `PHASE0.md` … `PHASE30.md`. [`heroplan.md`](heroplan.md) is the plan Phases
+28–30 implemented.
 
 ## Layout
 

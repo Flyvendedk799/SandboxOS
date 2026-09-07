@@ -58,7 +58,8 @@ All require a grant on that Sandbox.
 | `GET` | `/:slug/os` | the OS desktop, full screen (wakes the Cell) |
 | `GET` | `/:slug/studio` | the OS builder |
 | `GET` | `/:slug/os/doc` | the OS document + resolved theme/motion + catalogs |
-| `GET` | `/:slug/os/events` | SSE: every desktop change, with the new document |
+| `GET` | `/:slug/os/events` | SSE: every desktop change, with the new document; catalog and bundle changes too |
+| `GET` | `/static/js/os/lib/*.js` | the pure OS modules (layout, themes, animations, summary) served from `packages/os` |
 | `GET` | `/:slug/os/theme.css` | the active theme and motion, compiled |
 | `POST` | `/:slug/os/apps/:id/session` | open a capability session for an app frame |
 | `GET` | `/:slug/os/apps/:id/*` | a custom app's files (sandboxed frame, closed CSP) |
@@ -133,20 +134,32 @@ Exposure lives in the manifest, so it survives hibernate/wake and travels with a
 **`llm`** — `complete` `models`
 **`metrics`** — `snapshot` `history` `activity` `recent`
 **`apps`** — `list` `install` `remove` `launch` (launch mints a scoped token)
-**`desktop`** — the OS itself. Document: `get` `state` `set` `patch` `rename`
-`history` `revert` `reset`. Appearance: `themeList` `themeSet` `themeDefine`
-`themeRemove` `wallpaperSet` `animationList` `animationSet` `animationDefine`
-`animationRemove`. Chrome: `dockSet` `dockPin` `shellSet` `layoutSet` `associate`. Workspaces:
-`workspaceList` `workspaceAdd` `workspaceRemove` `workspaceRename` `workspaceSwitch`.
-Windows: `windowList` `open` `close` `move` `resize` `focus` `windowSet` `arrange`
-`snap` `cycleFocus` `minimizeAll`.
-Widgets: `widgetList` `widgetAdd` `widgetRemove` `widgetSet`. Apps: `appList`
-`appDefine` `appRemove` `appFiles` `appRead` `appWrite` `appDelete`. Widget kinds:
-`widgetDefine` `widgetKindRemove` `widgetFiles` `widgetRead` `widgetWrite`.
-Notifications: `notify` `notificationsRead` `notificationsClear`. Distros:
-`distroList` `distroPublish` `distroFork` `distroExport` `distroImport`.
+**`desktop`** — the OS itself. Document: `get` `state` `summarize` `silhouette` `set`
+`patch` `rename` `history` (with `rev` → a structural diff) `revert` `reset`.
+Appearance: `themeList` `themeSet` `themeDefine` `themeRemove` `wallpaperSet`
+`animationList` `animationSet` `animationDefine` `animationRemove`. Chrome: `dockSet`
+`dockPin` `shellSet` `layoutSet` (mode, gap, grid, and the tiling tree: `preset` or
+`tree`) `tile` (sash ratio, flip, swap) `associate`. Workspaces: `workspaceList`
+`workspaceAdd` `workspaceRemove` `workspaceRename` `workspaceSwitch`.
+Windows: `windowList` `open` (resolves aliases) `close` `move` `resize` (both take
+`items` for a batch) `focus` `windowSet` (`back` sends behind) `arrange` (grid, cascade,
+stack, center, master-stack, columns, rows, fullscreen-focus) `snap` `cycleFocus`
+`minimizeAll`. Geometry tools accept `expectRev`; a lost race returns `code: "stale_rev"`.
+Widgets: `widgetList` `widgetAdd` `widgetRemove` `widgetSet`. Apps: `appList` (with each
+app's live tools) `appDefine` (`mcp` for a tool face, `starter: "tools"` for a companion)
+`appRemove` `appFiles` `appRead` `appWrite` `appDelete`. Widget kinds: `widgetDefine`
+`widgetKindRemove` `widgetFiles` `widgetRead` `widgetWrite` `widgetDelete`.
+Notifications: `notify` (with an `action` deep link) `notificationsRead`
+`notificationsClear` (all, or `id`). Distros: `distroList` (the gallery: `q`, `scope`)
+`distroPublish` (`visibility`, `tags`, composition) `distroSet` `distroFork`
+`distroExport` `distroImport`.
 Every mutation normalizes the document, bumps its revision, pushes the previous version
 onto the undo history and announces itself on `/:slug/os/events`. See docs/15.
+
+**Apps' own servers** — a custom app with an `mcp` block appears as a server named after
+it (`port-monitor.list`): a façade over Kernel tools attenuated to the app's declared
+permissions, or a companion module from its bundle hosted out of process. Registered
+from the OS document, governed by the same authorize → route → audit path. ADR-0004.
 **`tide`** — `init` `listWorkspaces` `status` `mark` `log` `diff` `checkout` `refs` ·
 `putState` `getState` `listStates` · `fetchObjects` `receiveObjects` (the wire
 primitives a laptop daemon drives). Paths returned to callers are Sandbox-relative.
@@ -189,8 +202,11 @@ files       fs <ls|cat|tree|grep|mkdir|rm|get|put>
 processes   proc <list|start|logs|stop>
 ports       port <list|expose|close|scan>
 agents      agent <list|spawn|get|kill>
-desktop     os <show|open|close|widget|theme|motion|layout|apps|history|revert>
-            os <publish|fork|export|notify>
+desktop     os <show|map|silhouette|open|close|widget|theme|motion>
+            os layout <floating|tiling|master-stack|columns|rows|grid> · os tile <id> …
+            os <snap|assoc|apps|tools|history|revert>
+            os publish <name> [--public] [--tags=…] · os gallery [q] · os visibility
+            os <fork|export|notify> · os tui (the desktop, in this terminal)
 state       secret · app · distro
 observe     metrics · audit · watch
 admin       access <list|share|revoke> · quota · backup
@@ -211,8 +227,10 @@ const sbx = new SandboxClient({ url, slug, token });
 `sbx.call(server, tool, args)` is the escape hatch; the rest is sugar over it:
 `sbx.fs.*`, `sbx.proc.*` (with `wait()`), `sbx.ports.*` (with `url()`), `sbx.agents.*`
 (with `wait()`), `sbx.secrets.*`, `sbx.desktop.*` (the OS: open and close windows, place
-widgets, set the theme, define and write custom apps, publish and fork distros, revert a
-revision), and `sbx.assistant.ask()` which yields turn events as they stream. `sbx.stream()` and `sbx.events()` are async iterators.
+widgets, tile a workspace with `tile()`/`tileSet()`, set the theme, define and write
+custom apps, switch an app's tools on with `appTools()`, read the desktop as a map with
+`summary()`, publish, fork and browse distros, diff and revert revisions), and
+`sbx.assistant.ask()` which yields turn events as they stream. `sbx.stream()` and `sbx.events()` are async iterators.
 
 Errors are `SandboxError` and carry the Kernel's reason — `denied: proc.exec`, not
 `HTTP 200`.

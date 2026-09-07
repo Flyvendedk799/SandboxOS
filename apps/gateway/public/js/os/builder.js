@@ -7,9 +7,17 @@
 // tabs, or the agent can be building while you are, without either going stale.
 
 import { h, fill, icon, dialog, confirmDialog, menu, toast, toastError, fmtBytes } from "../core.js";
-import { os, call, select, loadOs, tint, onOs } from "./client.js";
+import { os, call, select, selected, loadOs, tint, onOs } from "./client.js";
 import { iconName, ICON_NAMES } from "./sprite.js";
 import { dropSession } from "./frames.js";
+import { createCodePane } from "./code.js";
+import { createThemeStudio } from "./theme-studio.js";
+import { createMotionStudio } from "./motion-studio.js";
+import { silhouetteSvg } from "./lib/summary.js";
+
+const TABS = [["library", "Library"], ["layers", "Layers"], ["theme", "Theme"], ["motion", "Motion"], ["code", "Code"]];
+const remember = (k, v) => { try { localStorage.setItem(`sbx.studio.${k}`, v); } catch { /* private mode */ } };
+const recall = (k, dflt) => { try { return localStorage.getItem(`sbx.studio.${k}`) ?? dflt; } catch { return dflt; } };
 
 const CATEGORIES = [
   { id: "apps", name: "Apps" },
@@ -21,17 +29,19 @@ const CATEGORIES = [
 
 const ICON_CHOICES = ICON_NAMES;
 
-const ACCENTS = ["#35d6c4", "#3ec8ff", "#b98cff", "#ff8f5e", "#43d17f", "#e8c98a", "#ff6b6b", "#e6edf3"];
-
 export function createBuilder({ onOpenCode } = {}) {
-  let tab = "library";
+  let tab = TABS.some(([id]) => id === recall("tab", "library")) ? recall("tab", "library") : "library";
   let cat = "apps";
 
   const tabs = h("div.stx-tabs");
   const pane = h("div.stx-pane");
   const el = h("aside.stx-builder", null, tabs, pane);
 
-  const setTab = (t) => { tab = t; render(); };
+  const codePane = createCodePane({ onTargetChange: (t) => { if (t) remember("code", `${t.kind}:${t.id}`); } });
+  const themeStudio = createThemeStudio();
+  const motionStudio = createMotionStudio();
+
+  const setTab = (t) => { tab = t; remember("tab", t); render(); };
   const setCat = (c) => { cat = c; render(); };
 
   // ── Library ───────────────────────────────────────────────────────────────
@@ -46,7 +56,8 @@ export function createBuilder({ onOpenCode } = {}) {
       },
         h("span.glyph", { style: { background: tint(a.hue, 0.14), color: a.hue } }, icon(iconName(a.icon), 18)),
         h("span.nm", a.name),
-        a.builtin ? null : h("span.sub", a.kind === "url" ? "url" : "custom"),
+        a.builtin ? null : h("span.sub", [a.kind === "url" ? "url" : a.kind === "alias" ? "alias" : "custom",
+          a.mcp ? ` · ${a.mcp.live ? `${a.mcp.tools.length} tool${a.mcp.tools.length === 1 ? "" : "s"}` : a.mcp.enabled ? "tools (not live)" : "tools off"}` : ""].join("")),
       ))),
       h("button.ghost.wide", { style: { marginTop: "10px" }, onclick: newApp }, "New app…"),
       h("div.note", null,
@@ -97,23 +108,90 @@ export function createBuilder({ onOpenCode } = {}) {
     )));
   }
 
+  // ── the gallery ───────────────────────────────────────────────────────────
+
+  let galleryQ = "";
+  let galleryScope = "all";   // all | mine | public
+  let galleryRows = null;
+
+  async function loadGallery() {
+    try {
+      const r = await call("distroList", { q: galleryQ, scope: galleryScope });
+      galleryRows = r.distros;
+    } catch { galleryRows = os.snap.distros ?? []; }
+    render();
+  }
+
+  function distroCard(d) {
+    const preview = d.preview ?? (d.builtin ? { theme: { accent: d.hue }, windows: d.apps.map((_, i) => ({ x: 60 + i * 120, y: 60 + i * 60, w: 420, h: 280 })), widgets: [], dock: "bottom" } : null);
+    const thumb = h("div.distro-thumb");
+    if (preview) thumb.innerHTML = silhouetteSvg({ ...preview, label: d.name }, { width: 280, height: 150 });
+    const vis = d.builtin ? "seed" : d.visibility ?? "tenant";
+    return h("div.distro-card", null,
+      thumb,
+      h("div.hd", null,
+        h("span.tag", { style: { background: d.hue ?? preview?.theme?.accent ?? "var(--stx-accent)" } }),
+        h("h4", d.name),
+        h("span.vis", { class: vis, title: d.builtin ? "Ships with SandboxOS" : d.mine ? `Published by your tenant · ${vis}` : "Published publicly by another tenant" }, vis),
+        d.forks ? h("span.sub", { style: { fontSize: "10px", color: "var(--stx-text-3)" } }, `${d.forks} fork${d.forks === 1 ? "" : "s"}`) : null),
+      h("p", d.description || "No description."),
+      d.tags?.length ? h("div.tag-row", ...d.tags.map((t) => h("button.tagchip", { onclick: () => { galleryQ = t; loadGallery(); } }, t))) : null,
+      preview && !d.builtin ? h("div.dim", { style: { fontSize: "10.5px", margin: "2px 0 8px" } },
+        `${preview.windows?.length ?? 0} windows · ${preview.widgets?.length ?? 0} widgets · ${preview.apps ?? 0} custom apps${preview.tools ? ` · ${preview.tools} with tools` : ""}`) : null,
+      h("div", { style: { display: "flex", gap: "6px" } },
+        h("button.ghost", { style: { flex: "1" }, onclick: () => fork(d) }, "Fork this distro"),
+        d.mine && !d.builtin ? h("button.ghost", { title: "Who can see it", onclick: () => visibilityMenu(d) }, icon("eye", 13)) : null),
+    );
+  }
+
+  async function visibilityMenu(d) {
+    const got = await dialog({
+      title: `${d.name} · visibility`,
+      fields: [{ name: "visibility", label: "Who can see and fork it", type: "select", value: d.visibility ?? "tenant",
+        options: [{ value: "private", label: "Only me" }, { value: "tenant", label: "Everyone in my tenant" }, { value: "public", label: "Every tenant on this host (public gallery)" }] }],
+      confirmLabel: "Save",
+    });
+    if (!got?.visibility) return;
+    try { await call("distroSet", { name: d.name, visibility: got.visibility }); toast(`${d.name} is now ${got.visibility}`, { kind: "ok" }); loadGallery(); }
+    catch (e) { toastError("Could not change visibility", e); }
+  }
+
   function libraryDistros() {
-    const list = os.snap.distros ?? [];
-    return h("div", { style: { display: "flex", flexDirection: "column", gap: "9px" } },
-      ...list.map((d) => h("div.distro-card", null,
-        h("div.hd", null,
-          h("span.tag", { style: { background: d.hue ?? "var(--stx-accent)" } }),
-          h("h4", d.name),
-          d.builtin ? null : h("span.sub", { style: { fontSize: "10px", color: "var(--stx-text-3)" } }, "yours")),
-        h("p", d.description || "No description."),
-        h("button.ghost", { onclick: () => fork(d) }, "Fork this distro"),
-      )),
+    if (galleryRows === null) { galleryRows = os.snap.distros ?? []; setTimeout(loadGallery, 0); }
+    const search = h("input", { value: galleryQ, placeholder: "Search the gallery — name, description, tag" });
+    let t = null;
+    search.addEventListener("input", () => { galleryQ = search.value; clearTimeout(t); t = setTimeout(loadGallery, 250); });
+    const chip = (id, label) => h("button.chip", { class: galleryScope === id ? "on" : "", onclick: () => { galleryScope = id; loadGallery(); } }, label);
+    const dropZone = h("div", { style: { display: "flex", flexDirection: "column", gap: "9px" } },
+      h("div.field", { style: { marginBottom: "4px" } }, search),
+      h("div.chip-row", { style: { padding: "0 0 6px" } }, chip("all", "All"), chip("mine", "Mine"), chip("public", "Public")),
+      ...(galleryRows.length ? galleryRows.map(distroCard) : [h("div.empty", null, icon("layers", 22), h("h3", "Nothing here"), h("p", galleryQ ? "No distro matches that." : "Publish this machine, and it appears here for your tenant — or publicly, if you choose."))]),
       h("button.ghost.wide", { style: { marginTop: "4px" }, onclick: publish }, "Publish this OS as a distro…"),
       h("div", { style: { display: "flex", gap: "8px", marginTop: "8px" } },
         h("button.ghost", { style: { flex: "1" }, onclick: exportFile }, "Export file"),
         h("button.ghost", { style: { flex: "1" }, onclick: importFile }, "Import file")),
-      h("div.note", "Publishing packages the document and the source of every custom app, so a fork gets your machine, not a screenshot of it. Export writes the same package to a file, which is how a distro leaves your tenant."),
+      h("div.note", "A distro is your whole machine: the desktop, the source and tools of every custom app, and which servers the Cell runs. Fork one and you get the machine, not a screenshot. Drop a .sandboxos.json file here to install it."),
     );
+    dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dropping"); });
+    dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dropping"));
+    dropZone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropZone.classList.remove("dropping");
+      const file = e.dataTransfer?.files?.[0];
+      if (file) installFile(file);
+    });
+    return dropZone;
+  }
+
+  /** The words a fork replaces: what you have now versus what you get. */
+  function forkSummary(d) {
+    const doc = os.doc;
+    const here = `${doc.windows.length} windows, ${doc.widgets.length} widgets, ${Object.keys(doc.apps).length} custom apps, theme ${doc.theme.base}`;
+    const p = d.preview;
+    const there = d.builtin
+      ? `${d.apps.length + (d.customApps?.length ?? 0)} windows, ${d.widgets.length} widgets, theme ${d.theme}`
+      : p ? `${p.windows?.length ?? 0} windows, ${p.widgets?.length ?? 0} widgets, ${p.apps ?? 0} custom apps${p.tools ? ` (${p.tools} with tools${d.mine ? "" : ", arriving switched off"})` : ""}, ${p.workspaces ?? 1} workspaces` : "another machine";
+    return `This replaces your OS. Now: ${here}. After: ${there}. It is one revision — undo it from Layers → History.`;
   }
 
   /** A distro as a file: the only way one travels between tenants today. */
@@ -131,46 +209,72 @@ export function createBuilder({ onOpenCode } = {}) {
 
   async function importFile() {
     const input = h("input", { type: "file", accept: ".json,application/json", style: { display: "none" } });
-    input.addEventListener("change", async () => {
-      const file = input.files?.[0];
-      input.remove();
-      if (!file) return;
-      if (!await confirmDialog(`Install ${file.name}?`, "It replaces your current desktop. The change is one revision — undo it from Layers → History.")) return;
-      try {
-        const payload = JSON.parse(await file.text());
-        const r = await call("distroImport", { payload });
-        await loadOs();
-        toast("Installed", { body: `${r.apps} custom apps came with it.`, kind: "ok" });
-      } catch (e) { toastError("Could not install that file", e); }
-    });
+    input.addEventListener("change", () => { const file = input.files?.[0]; input.remove(); if (file) installFile(file); });
     document.body.append(input);
     input.click();
   }
 
-  async function fork(d) {
-    if (!await confirmDialog("Fork this distro?", `Your current desktop is replaced by ${d.name}. The change is one revision — undo it from the History tab.`, { confirmLabel: "Fork", danger: false })) return;
+  async function installFile(file) {
+    let payload;
+    try { payload = JSON.parse(await file.text()); } catch (e) { toastError("Not a distro file", e); return; }
+    const p = payload?.os;
+    const there = p ? `${p.windows?.length ?? 0} windows, ${p.widgets?.length ?? 0} widgets, ${Object.keys(p.apps ?? {}).length} custom apps, theme ${p.theme?.base}` : "unknown contents";
+    const got = await dialog({
+      title: `Install ${file.name}?`,
+      message: `${forkSummary({ preview: null, builtin: false, name: file.name }).split(" After:")[0]} After: ${there}. ${payload.integrity ? "Its bundles are hashed and will be verified." : "It carries no integrity block (an older export)."} Any companion servers arrive switched off.`,
+      fields: [{ name: "manifest", label: "Cell composition", type: "select", value: "keep",
+        options: [{ value: "keep", label: "Keep my servers as they are" }, { value: "apply", label: "Apply the file's server composition too" }] }],
+      confirmLabel: "Install",
+    });
+    if (!got) return;
     try {
-      await call("distroFork", { id: d.id });
+      const r = await call("distroImport", { payload, applyManifest: got.manifest === "apply" });
       await loadOs();
-      toast(`Forked ${d.name}`, { kind: "ok" });
+      toast("Installed", { body: `${r.apps} custom apps came with it${r.verified ? ", verified" : ""}.${r.disabledServers?.length ? ` ${r.disabledServers.length} server(s) are off until you enable them.` : ""}`, kind: "ok" });
+    } catch (e) { toastError("Could not install that file", e); }
+  }
+
+  async function fork(d) {
+    if (!await confirmDialog(`Fork ${d.name}?`, forkSummary(d), { confirmLabel: "Fork", danger: false })) return;
+    try {
+      const r = await call("distroFork", { id: d.id });
+      await loadOs();
+      const off = (r.tools ?? []).filter((t) => !t.enabled);
+      toast(`Forked ${d.name}`, {
+        body: off.length ? `${off.length} app server${off.length > 1 ? "s" : ""} arrived switched off — right-click the app in the Library to turn it on.` : r.seeded?.length ? `${r.seeded.length} files seeded into the Cell.` : undefined,
+        kind: "ok",
+      });
+      loadGallery();
     } catch (e) { toastError("Could not fork that distro", e); }
   }
 
   async function publish() {
     const got = await dialog({
       title: "Publish this OS as a distro",
-      message: "Anyone in your tenant can fork it. The document and every custom app's source travel with it.",
+      message: "The desktop, the source and tools of every custom app, and the Cell's server composition travel together.",
       fields: [
         { name: "name", label: "Name", value: os.doc.name },
         { name: "description", label: "Description", placeholder: "What is this machine for?" },
+        { name: "tags", label: "Tags", placeholder: "dev, research", hint: "comma-separated, searchable in the gallery" },
+        { name: "visibility", label: "Who can see it", type: "select", value: "tenant",
+          options: [{ value: "private", label: "Only me" }, { value: "tenant", label: "Everyone in my tenant" }, { value: "public", label: "Every tenant on this host" }] },
+        { name: "notifications", label: "Notifications", type: "select", value: "strip",
+          options: [{ value: "strip", label: "Leave them out (default)" }, { value: "keep", label: "Include them" }] },
+        { name: "replace", label: "If the name exists", type: "select", value: "replace",
+          options: [{ value: "replace", label: "Replace it" }, { value: "fail", label: "Stop and tell me" }] },
       ],
       confirmLabel: "Publish",
     });
     if (!got?.name) return;
     try {
-      const r = await call("distroPublish", { name: got.name, description: got.description, replace: true });
+      const r = await call("distroPublish", {
+        name: got.name, description: got.description, visibility: got.visibility,
+        tags: String(got.tags ?? "").split(/[,\s]+/).filter(Boolean),
+        keepNotifications: got.notifications === "keep", replace: got.replace === "replace",
+      });
       await loadOs();
-      toast(`Published ${r.name}`, { body: `${r.apps} custom apps packaged.`, kind: "ok" });
+      toast(`Published ${r.name} (${r.visibility})`, { body: `${r.apps} custom apps, ${r.tools} with tools, ${r.servers} servers packaged.`, kind: "ok" });
+      loadGallery();
     } catch (e) { toastError("Could not publish", e); }
   }
 
@@ -181,26 +285,37 @@ export function createBuilder({ onOpenCode } = {}) {
   async function newApp() {
     const got = await dialog({
       title: "New app",
-      message: "You get a runnable starter — an index.html, a stylesheet and a script that already calls the machine. Edit it in Code.",
+      message: "An app is a window for you and, if you want, tools for the agent. Either way you get a runnable starter to edit in Code.",
       fields: [
         { name: "name", label: "Name", placeholder: "Port Monitor" },
-        { name: "id", label: "Id", placeholder: "port-monitor", hint: "lowercase, used in the URL" },
-        { name: "permissions", label: "Capabilities", placeholder: "fs.read, ports.list", hint: "MCP patterns this app may call" },
+        { name: "id", label: "Id", placeholder: "port-monitor", hint: "lowercase, used in the URL and as the server name" },
+        { name: "shape", label: "Shape", type: "select", value: "ui",
+          options: [
+            { value: "ui", label: "UI only — a window" },
+            { value: "tools", label: "UI + tools — a window and a companion server the agent can call" },
+          ] },
+        { name: "permissions", label: "Capabilities", placeholder: "fs.read, ports.list", hint: "MCP patterns this app may call from its window" },
       ],
       confirmLabel: "Create",
     });
     if (!got?.name) return;
     const id = slugify(got.id || got.name);
     try {
-      await call("appDefine", {
+      const r = await call("appDefine", {
         id, name: got.name,
         permissions: String(got.permissions ?? "").split(/[,\s]+/).filter(Boolean),
+        ...(got.shape === "tools" ? { starter: "tools" } : {}),
       });
       await loadOs();
       dropSession(id);
       await call("dockPin", { app: id, pinned: true });
-      onOpenCode?.("app", id);
-      toast(`${got.name} created`, { body: "Open it from the dock; edit its source in Code.", kind: "ok" });
+      onOpenCode?.("app", id, got.shape === "tools" ? "server.js" : null);
+      toast(`${got.name} created`, {
+        body: got.shape === "tools"
+          ? (r.server?.live ? `Its tools are live: ${id}.ping, ${id}.add, ${id}.list. Ask the agent to call one.` : r.server?.problem ?? "Its server did not start.")
+          : "Open it from the dock; edit its source in Code.",
+        kind: r.server?.problem ? "err" : "ok",
+      });
     } catch (e) { toastError("Could not create the app", e); }
   }
 
@@ -269,6 +384,14 @@ export function createBuilder({ onOpenCode } = {}) {
         { name: "permissions", label: "Capabilities", value: (a.permissions ?? []).join(", "),
           hint: "e.g. fs.read, ports.list" },
         { name: "size", label: "Default size", value: `${a.window.w}x${a.window.h}` },
+        { name: "singleton", label: "One window at a time", type: "select", value: a.window.singleton ? "yes" : "no",
+          options: [{ value: "no", label: "No" }, { value: "yes", label: "Yes" }] },
+        { name: "opens", label: "Opens file types", value: extsFor(a.id).join(", "), hint: "e.g. .csv, .log — Files and Spotlight will use it" },
+        ...(a.kind === "bundle" ? [
+          { name: "origin", label: "Source lives in", type: "select", value: a.source?.origin ?? "store",
+            options: [{ value: "store", label: "the OS store (edited in Code, travels with distros)" }, { value: "volume", label: "the Cell volume (edited in Files, versioned by Tide)" }] },
+          { name: "volumePath", label: "Volume path", value: a.source?.volumePath ?? `apps/${a.id}`, hint: "only for volume origin" },
+        ] : []),
       ],
       confirmLabel: "Save",
     });
@@ -281,12 +404,25 @@ export function createBuilder({ onOpenCode } = {}) {
         icon: got.icon,
         hue: got.hue,
         permissions: String(got.permissions ?? "").split(/[,\s]+/).filter(Boolean),
-        window: { w: w || a.window.w, h: hh || a.window.h },
+        window: { w: w || a.window.w, h: hh || a.window.h, singleton: got.singleton === "yes" },
+        ...(got.origin ? { origin: got.origin, volumePath: got.volumePath || undefined } : {}),
       });
+      await syncAssociations(a.id, got.opens);
       dropSession(a.id); // its capability set may have changed
       await loadOs();
       toast(`${got.name} updated`, { kind: "ok" });
     } catch (e) { toastError("Could not update the app", e); }
+  }
+
+  /** Extensions currently routed to an app. */
+  const extsFor = (id) => Object.entries(os.doc.shell.associations ?? {}).filter(([, app]) => app === id).map(([ext]) => ext);
+
+  /** Make `associations` say exactly `list` for this app: add the new, clear the old. */
+  async function syncAssociations(id, list) {
+    const want = new Set(String(list ?? "").split(/[,\s]+/).filter(Boolean).map((e) => (e.startsWith(".") ? e : `.${e}`).toLowerCase()));
+    const have = new Set(extsFor(id));
+    for (const ext of want) if (!have.has(ext)) await call("associate", { ext, app: id }).catch((e) => toastError(`Could not claim ${ext}`, e));
+    for (const ext of have) if (!want.has(ext)) await call("associate", { ext, app: null }).catch(() => {});
   }
 
   function appMenu(a, ev) {
@@ -294,6 +430,13 @@ export function createBuilder({ onOpenCode } = {}) {
       { label: "Open", icon: "window", run: () => call("open", { app: a.id }) },
       { label: "Settings…", icon: "settings", run: () => appSettings(a) },
       { label: "Edit source", icon: "code", disabled: a.kind !== "bundle", run: () => onOpenCode?.("app", a.id) },
+      a.mcp ? { label: a.mcp.enabled ? `Switch its tools off (${a.mcp.name}.*)` : `Switch its tools on (${a.mcp.name}.*)`, icon: "play",
+        run: async () => {
+          try { const r = await call("appDefine", { id: a.id, mcp: { enabled: !a.mcp.enabled } }); await loadOs();
+            toast(r.server?.live ? `${a.mcp.name}.* is live` : r.server?.problem ?? `${a.mcp.name}.* is off`, { kind: r.server?.problem ? "err" : "ok" }); }
+          catch (e) { toastError("Could not change the server", e); }
+        } } : null,
+      a.mcp?.live ? { label: `Tools: ${a.mcp.tools.join(", ")}`, icon: "apps", run: () => {} } : null,
       { label: os.doc.shell.dock.pinned.includes(a.id) ? "Remove from dock" : "Keep in dock", icon: "apps",
         run: () => call("dockPin", { app: a.id, pinned: !os.doc.shell.dock.pinned.includes(a.id) }) },
       "-",
@@ -302,7 +445,7 @@ export function createBuilder({ onOpenCode } = {}) {
         await call("appRemove", { id: a.id });
         await loadOs();
       } },
-    ]);
+    ].filter(Boolean));
   }
 
   function widgetMenu(w) {
@@ -326,10 +469,13 @@ export function createBuilder({ onOpenCode } = {}) {
   function layers() {
     const d = os.doc;
     const here = (list) => list.filter((x) => x.ws === d.activeWorkspace);
-    const row = (id, kind, name, sub, ic) => h("button.layer-row", {
-      class: os.sel.id === id ? "on" : "",
-      onclick: () => { select(id, kind); if (kind === "win") call("focus", { id }).catch(() => {}); },
-    }, icon(iconName(ic), 15), h("span.nm", name), h("span.sub", sub));
+    const row = (id, kind, name, sub, ic) => h("div.layer-line", null, h("button.layer-row", {
+      class: os.sel.ids?.includes(id) ? "on" : "",
+      onclick: (e) => { select(id, kind, { add: e.shiftKey }); if (kind === "win" && !e.shiftKey) call("focus", { id }).catch(() => {}); },
+    }, icon(iconName(ic), 15), h("span.nm", name), h("span.sub", sub)),
+    kind === "win" ? h("span.z-btns", null,
+      h("button", { title: "Bring to front", onclick: () => call("focus", { id }) }, "▲"),
+      h("button", { title: "Send to back", onclick: () => call("windowSet", { id, back: true }) }, "▼")) : null);
 
     const wins = here(d.windows).sort((a, b) => b.z - a.z);
     const gs = here(d.widgets);
@@ -346,158 +492,117 @@ export function createBuilder({ onOpenCode } = {}) {
     );
   }
 
+  const when = (ts) => {
+    const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+    if (s < 60) return "now";
+    if (s < 3600) return `${Math.round(s / 60)}m`;
+    if (s < 86_400) return `${Math.round(s / 3600)}h`;
+    return new Date(ts).toLocaleDateString();
+  };
+
+  /** "3 windows · theme · dock" — what a revision changed, in words. */
+  function diffSummary(diff) {
+    const parts = [];
+    const list = (name, d) => {
+      const n = (d?.added ?? 0) + (d?.removed ?? 0) + (d?.changed ?? 0);
+      if (n) parts.push(`${n} ${name}${n > 1 ? "s" : ""}`);
+    };
+    list("window", diff.windows);
+    list("widget", diff.widgets);
+    list("workspace", diff.workspaces);
+    if (diff.theme?.length) parts.push(`theme (${diff.theme.join(", ")})`);
+    if (diff.animation?.length) parts.push("motion");
+    if (diff.wm?.length) parts.push(`layout (${diff.wm.join(", ")})`);
+    if (diff.shell?.length) parts.push(`shell (${diff.shell.join(", ")})`);
+    if (diff.apps?.length) parts.push(`apps (${diff.apps.join(", ")})`);
+    if (diff.widgetKinds?.length) parts.push(`widget kinds (${diff.widgetKinds.join(", ")})`);
+    if (diff.name) parts.push("name");
+    return parts.length ? parts.join(" · ") : "identical to now";
+  }
+
+  async function revertTo(rev) {
+    let summary = "";
+    try { summary = diffSummary((await call("history", { rev: rev.rev })).diff); } catch { /* fine */ }
+    const ok = await confirmDialog(`Go back to revision ${rev.rev}?`,
+      `${rev.label || "unlabelled"} · ${when(rev.ts)}. Restoring changes: ${summary}. The restore is itself a new revision, so it can be undone.`,
+      { confirmLabel: "Revert", danger: false });
+    if (!ok) return;
+    try { await call("revert", { rev: rev.rev }); await loadOs(); toast(`Back at r${rev.rev}`, { kind: "ok" }); }
+    catch (e) { toastError("Could not revert", e); }
+  }
+
+  async function showDiff(rev, host) {
+    try {
+      const r = await call("history", { rev: rev.rev });
+      const d = r.diff;
+      const row = (k, v) => h("div.diff-row", null, h("span.k", k), h("span.v", v));
+      const listV = (x) => `+${x.added} −${x.removed} ~${x.changed}`;
+      fill(host,
+        row("windows", listV(d.windows)), row("widgets", listV(d.widgets)), row("workspaces", listV(d.workspaces)),
+        row("theme", d.theme.length ? d.theme.join(", ") : "—"),
+        row("motion", d.animation.length ? d.animation.join(", ") : "—"),
+        row("layout", d.wm.length ? d.wm.join(", ") : "—"),
+        row("shell", d.shell.length ? d.shell.join(", ") : "—"),
+        row("apps", d.apps.length ? d.apps.join(", ") : "—"),
+        h("div.dim", { style: { fontSize: "10.5px", padding: "4px 0" } }, "Counts are this revision → now: added, removed, changed."));
+    } catch (e) { fill(host, h("div.dim", e.message)); }
+  }
+
   async function paintHistory(host) {
     if (!host) return;
     try {
       const r = await call("history", {});
-      fill(host, ...(r.revisions.slice(0, 8).map((rev) => h("button.layer-row", {
-        onclick: async () => { await call("revert", { rev: rev.rev }); await loadOs(); },
-      }, icon("refresh", 14), h("span.nm", rev.label || `rev ${rev.rev}`), h("span.sub", `r${rev.rev}`)))
-        || [h("div.dim", "No history yet.")]));
+      const openDiff = new Set();
+      const paint = () => fill(host, ...(r.revisions.length ? r.revisions.map((rev) => {
+        const diffHost = h("div.diff-box", { hidden: !openDiff.has(rev.rev) });
+        if (openDiff.has(rev.rev)) showDiff(rev, diffHost);
+        return h("div.hist-item", null,
+          h("button.layer-row", {
+            title: `Revert to r${rev.rev}`,
+            onclick: () => revertTo(rev),
+            oncontextmenu: (e) => { e.preventDefault(); openDiff.has(rev.rev) ? openDiff.delete(rev.rev) : openDiff.add(rev.rev); paint(); },
+          }, icon("refresh", 14), h("span.nm", rev.label || `rev ${rev.rev}`), h("span.sub", `r${rev.rev} · ${when(rev.ts)}`)),
+          h("button.diff-toggle", {
+            title: "What changed since this revision",
+            onclick: () => { openDiff.has(rev.rev) ? openDiff.delete(rev.rev) : openDiff.add(rev.rev); paint(); },
+          }, openDiff.has(rev.rev) ? "hide" : "diff"),
+          diffHost);
+      }) : [h("div.dim", { style: { padding: "4px 8px", fontSize: "11px" } }, "No history yet. Every change to the desktop will appear here.")]),
+      h("div.dim", { style: { padding: "6px 8px", fontSize: "10.5px" } }, `${r.revisions.length} of ${os.snap?.limits?.history ?? 40} revisions kept · current r${r.current}`));
+      paint();
     } catch { /* history is a nicety */ }
-  }
-
-  // ── Theme tab ─────────────────────────────────────────────────────────────
-
-  function themeTab() {
-    const t = os.snap.theme;
-    const swatch = (c) => h("button.swatch-btn", {
-      class: c.toLowerCase() === String(t.accent).toLowerCase() ? "on" : "",
-      title: c, style: { background: c },
-      onclick: () => call("themeSet", { tokens: { accent: c } }),
-    });
-
-    const wallInput = h("input", { value: t.wall ?? "", placeholder: "linear-gradient(160deg,#06131d,#0a2233)" });
-    wallInput.addEventListener("change", () => call("wallpaperSet", { wallpaper: wallInput.value })
-      .catch((e) => toastError("That wallpaper was rejected", e)));
-
-    return h("div", null,
-      h("div.section-label", "Base theme"),
-      h("div.card-grid", { style: { marginBottom: "18px" } }, ...(os.snap.themes ?? []).map((th) =>
-        h("button.lib-row", {
-          class: th.key === os.doc.theme.base ? "on" : "",
-          style: { flexDirection: "column", alignItems: "stretch", gap: "7px", padding: "8px" },
-          onclick: () => call("themeSet", { theme: th.key }),
-        },
-          h("span", { style: { height: "34px", borderRadius: "7px", background: th.wall ?? th.accent, border: "1px solid var(--stx-line)" } }),
-          h("span.nm", { style: { fontSize: "11px" } }, th.name)))),
-      h("div.section-label", "Accent token"),
-      h("div.swatch-row", ...ACCENTS.map(swatch)),
-      h("div.field", { style: { marginTop: "18px" } }, h("label", "Wallpaper"), wallInput),
-      h("div.section-label", "Motion"),
-      h("div.card-grid", ...(os.snap.animations ?? []).map((a) => h("button.lib-row", {
-        class: a.key === os.doc.animation.preset ? "on" : "",
-        style: { justifyContent: "space-between" },
-        onclick: () => call("animationSet", { preset: a.key }),
-      }, h("span.nm", { style: { fontSize: "11px" } }, a.name)))),
-      h("div.note", null,
-        "Theme edits write ", h("code", "theme"), " tokens into the document and rebind every window, dock and widget live — including custom apps, which link the same compiled stylesheet."),
-    );
   }
 
   // ── Code tab ──────────────────────────────────────────────────────────────
 
-  let codeTarget = null; // {kind:'app'|'widget', id}
-  let codeFile = null;
-
-  function openCode(kind, id) { codeTarget = { kind, id }; codeFile = null; setTab("code"); }
+  /** Deep link from the Library, the agent panel or Spotlight: show this file. */
+  function openCode(kind, id, path = null) {
+    setTab("code");
+    codePane.setTarget({ kind, id }, { path });
+  }
 
   function codeTab() {
-    const custom = [
-      ...Object.values(os.doc.apps).map((a) => ({ kind: "app", id: a.id, name: a.name, icon: a.icon })),
-      ...Object.values(os.doc.widgetKinds).map((w) => ({ kind: "widget", id: w.kind, name: w.name, icon: w.icon })),
-    ];
-    if (!custom.length) {
+    const any = codePane.render();
+    if (!any) {
       return h("div.empty", null, icon("code", 26), h("h3", "Nothing custom yet"),
-        h("p", "Create an app or a widget in the Library and its source appears here — or ask the agent to write one."));
+        h("p", "An app is a folder of HTML, CSS and JS this machine serves into a sandboxed frame. Create one in the Library and its files appear here — or ask the agent to write one."));
     }
-    if (!codeTarget || !custom.some((c) => c.kind === codeTarget.kind && c.id === codeTarget.id)) {
-      codeTarget = { kind: custom[0].kind, id: custom[0].id };
-      codeFile = null;
+    if (!codePane.target) {
+      const [kind, id] = recall("code", "").split(":");
+      if (kind && id) codePane.setTarget({ kind, id });
     }
-
-    const picker = h("select", null, ...custom.map((c) =>
-      h("option", { value: `${c.kind}:${c.id}`, selected: c.kind === codeTarget.kind && c.id === codeTarget.id }, c.name)));
-    picker.addEventListener("change", () => {
-      const [kind, id] = picker.value.split(":");
-      codeTarget = { kind, id };
-      codeFile = null;
-      render();
-    });
-
-    const fileList = h("div", { style: { display: "flex", flexDirection: "column", gap: "2px", margin: "10px 0" } });
-    const editor = h("textarea", { spellcheck: "false", style: { minHeight: "220px", fontFamily: "var(--mono)", fontSize: "11px" } });
-    const saveBtn = h("button.ghost.wide", { onclick: saveFile }, "Save file");
-    const status = h("div.dim", { style: { fontSize: "10.5px", marginTop: "6px" } }, "");
-
-    const readTool = codeTarget.kind === "widget" ? "widgetRead" : "appRead";
-    const listTool = codeTarget.kind === "widget" ? "widgetFiles" : "appFiles";
-    const writeTool = codeTarget.kind === "widget" ? "widgetWrite" : "appWrite";
-    const key = codeTarget.kind === "widget" ? { kind: codeTarget.id } : { id: codeTarget.id };
-
-    async function loadFiles() {
-      try {
-        const r = await call(listTool, key);
-        codeFile ??= r.files[0]?.path ?? null;
-        fill(fileList, ...r.files.map((f) => h("button.layer-row", {
-          class: f.path === codeFile ? "on" : "",
-          onclick: () => { codeFile = f.path; loadFile(); paintFileList(r.files); },
-        }, icon("code", 14), h("span.nm", f.path), h("span.sub", fmtBytes(f.size)))));
-        if (codeFile) loadFile();
-      } catch (e) { status.textContent = e.message; }
-    }
-    function paintFileList(files) {
-      for (const btn of fileList.children) {
-        btn.classList.toggle("on", btn.querySelector(".nm")?.textContent === codeFile);
-      }
-      void files;
-    }
-    async function loadFile() {
-      if (!codeFile) return;
-      try {
-        const r = await call(readTool, { ...key, path: codeFile });
-        editor.value = r.content;
-        status.textContent = `${codeFile} · ${r.bytes} bytes`;
-      } catch (e) { status.textContent = e.message; }
-    }
-    async function saveFile() {
-      if (!codeFile) return;
-      try {
-        await call(writeTool, { ...key, path: codeFile, content: editor.value });
-        status.textContent = `saved ${codeFile}`;
-        toast("Saved", { body: `${codeFile} — reopen the app to see it.`, kind: "ok" });
-      } catch (e) { toastError("Could not save", e); }
-    }
-
-    async function addFile() {
-      const got = await dialog({ title: "New file", fields: [{ name: "path", label: "Path", placeholder: "panel.js" }], confirmLabel: "Create" });
-      if (!got?.path) return;
-      try {
-        await call(writeTool, { ...key, path: got.path, content: "" });
-        codeFile = got.path;
-        loadFiles();
-      } catch (e) { toastError("Could not create the file", e); }
-    }
-
-    loadFiles();
-
-    return h("div", null,
-      h("div.field", null, h("label", "Editing"), picker),
-      fileList,
-      h("button.ghost", { onclick: addFile }, "Add file"),
-      h("div.field", { style: { marginTop: "10px" } }, h("label", "Source"), editor),
-      saveBtn,
-      status,
-      h("div.note", "Ask the agent to write here too — ", h("code", "desktop.appWrite"), " is the same call this button makes."),
-    );
+    return codePane.el;
   }
 
   // ── render ────────────────────────────────────────────────────────────────
 
   function render() {
     if (!os.doc) return;
-    fill(tabs, ...[["library", "Library"], ["layers", "Layers"], ["theme", "Theme"], ["code", "Code"]].map(([id, label]) =>
-      h("button.seg", { class: tab === id ? "on" : "", onclick: () => setTab(id) }, label)));
+    fill(tabs, ...TABS.map(([id, label]) =>
+      h("button.seg", { class: tab === id ? "on" : "", onclick: () => setTab(id) }, label, id === "code" && codePane.hasDirty() ? h("span.dot") : null)));
+    el.classList.toggle("wide", tab === "code");
+    if (tab !== "theme") themeStudio.destroy();
+    if (tab !== "motion") motionStudio.destroy();
 
     if (tab === "library") {
       const body = cat === "apps" ? libraryApps()
@@ -514,13 +619,34 @@ export function createBuilder({ onOpenCode } = {}) {
       fill(pane, h("div.stx-scroll", { style: { paddingTop: "12px" } }, body));
       paintHistory(pane.querySelector("#os-history"));
     } else if (tab === "theme") {
-      fill(pane, h("div.stx-scroll", { style: { paddingTop: "14px" } }, themeTab()));
+      themeStudio.render();
+      fill(pane, h("div.stx-scroll", { style: { paddingTop: "14px" } }, themeStudio.el));
+    } else if (tab === "motion") {
+      motionStudio.render();
+      fill(pane, h("div.stx-scroll", { style: { paddingTop: "14px" } }, motionStudio.el));
     } else {
-      fill(pane, h("div.stx-scroll", { style: { paddingTop: "14px" } }, codeTab()));
+      const body = codeTab();
+      if (body === codePane.el) fill(pane, body);
+      else fill(pane, h("div.stx-scroll", { style: { paddingTop: "14px" } }, body));
     }
   }
 
-  return { el, render, setTab, openCode, get tab() { return tab; } };
+  /** Verbs the Studio's own palette (⌘⇧P) offers; each is a builder action. */
+  function paletteActions() {
+    return [
+      { name: "New app…", sub: "Library", icon: "plus", run: newApp },
+      { name: "New widget…", sub: "Library", icon: "plus", run: newWidget },
+      { name: "New theme…", sub: "Library", icon: "theme", run: newTheme },
+      { name: "Publish this OS as a distro…", sub: "Distros", icon: "layers", run: publish },
+      { name: "Export distro file", sub: "Distros", icon: "save", run: exportFile },
+      { name: "Import distro file…", sub: "Distros", icon: "files", run: importFile },
+      ...TABS.map(([id, label]) => ({ name: `Go to ${label}`, sub: "Studio", icon: "layers", run: () => setTab(id) })),
+      ...Object.values(os.doc.apps).filter((a) => a.kind === "bundle").map((a) => ({ name: `Edit ${a.name} source`, sub: "Code", icon: "code", run: () => openCode("app", a.id) })),
+      { name: "Save all open files", sub: "Code", icon: "save", run: () => codePane.saveAll() },
+    ];
+  }
+
+  return { el, render, setTab, openCode, paletteActions, get tab() { return tab; }, get dirty() { return codePane.hasDirty(); } };
 }
 
 // ── Inspector ───────────────────────────────────────────────────────────────
@@ -531,22 +657,89 @@ export function createInspector() {
     h("div.panel-head", h("h2", "Inspector")),
     body);
 
+  // ── several things selected: align and distribute ────────────────────────
+
+  function multi(items) {
+    const bounds = () => ({
+      l: Math.min(...items.map((i) => i.x)), r: Math.max(...items.map((i) => i.x + i.w)),
+      t: Math.min(...items.map((i) => i.y)), b: Math.max(...items.map((i) => i.y + i.h)),
+    });
+    const commit = (fn) => {
+      const b = bounds();
+      const moves = items.map((it) => { const n = { id: it.id, x: it.x, y: it.y }; fn(n, it, b); if (it.kind) n.pin = "none"; return n; })
+        .filter((n) => { const it = items.find((i) => i.id === n.id); return n.x !== it.x || n.y !== it.y; });
+      if (moves.length) call("move", { items: moves }).catch((e) => toastError("Could not align", e));
+    };
+    const size = (fn) => {
+      const sizes = items.map((it) => { const n = { id: it.id, w: it.w, h: it.h }; fn(n, it); return n; })
+        .filter((n) => { const it = items.find((i) => i.id === n.id); return n.w !== it.w || n.h !== it.h; });
+      if (sizes.length) call("resize", { items: sizes }).catch((e) => toastError("Could not resize", e));
+    };
+    const distribute = (axis) => {
+      const sorted = [...items].sort((p, q) => (axis === "x" ? p.x - q.x : p.y - q.y));
+      const b = bounds();
+      const total = axis === "x" ? b.r - b.l : b.b - b.t;
+      const used = sorted.reduce((n, it) => n + (axis === "x" ? it.w : it.h), 0);
+      const gap = sorted.length > 1 ? (total - used) / (sorted.length - 1) : 0;
+      let cursor = axis === "x" ? b.l : b.t;
+      const moves = sorted.map((it) => {
+        const n = { id: it.id, x: it.x, y: it.y, ...(it.kind ? { pin: "none" } : {}) };
+        if (axis === "x") { n.x = Math.round(cursor); cursor += it.w + gap; } else { n.y = Math.round(cursor); cursor += it.h + gap; }
+        return n;
+      });
+      call("move", { items: moves }).catch((e) => toastError("Could not distribute", e));
+    };
+    const btn = (label, title, run) => h("button.ghost", { title, onclick: run }, label);
+    return h("div", null,
+      h("div", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "14px" } },
+        h("span.kind-tag", `${items.length} selected`),
+        h("span.dim", { style: { fontSize: "11px" } }, "shift-click to add · arrows nudge")),
+      h("div.section-label", "Align"),
+      h("div.align-grid", null,
+        btn("⇤", "Left edges", () => commit((n, it, b) => { n.x = b.l; })),
+        btn("↔", "Horizontal centres", () => commit((n, it, b) => { n.x = Math.round((b.l + b.r) / 2 - it.w / 2); })),
+        btn("⇥", "Right edges", () => commit((n, it, b) => { n.x = b.r - it.w; })),
+        btn("⤒", "Top edges", () => commit((n, it, b) => { n.y = b.t; })),
+        btn("↕", "Vertical centres", () => commit((n, it, b) => { n.y = Math.round((b.t + b.b) / 2 - it.h / 2); })),
+        btn("⤓", "Bottom edges", () => commit((n, it, b) => { n.y = b.b - it.h; }))),
+      h("div.section-label.tight", "Distribute"),
+      h("div.align-grid.two", null,
+        btn("↔ evenly", "Equal horizontal gaps", () => distribute("x")),
+        btn("↕ evenly", "Equal vertical gaps", () => distribute("y"))),
+      h("div.section-label.tight", "Match size"),
+      h("div.align-grid.two", null,
+        btn("widths", "Match the widest", () => { const w = Math.max(...items.map((i) => i.w)); size((n) => { n.w = w; }); }),
+        btn("heights", "Match the tallest", () => { const hh = Math.max(...items.map((i) => i.h)); size((n) => { n.h = hh; }); })),
+      h("div.note", "One alignment is one revision: the whole selection moves in a single desktop.move with items, so undo brings it all back at once."),
+      h("button.ghost.wide.danger", { style: { marginTop: "12px" }, onclick: async () => {
+        if (!await confirmDialog(`Delete ${items.length} elements?`, "Windows close, widgets are removed.")) return;
+        for (const it of items) await call(it.kind ? "widgetRemove" : "close", { id: it.id }).catch(() => {});
+        select(null, null);
+      } }, "Delete selection"),
+    );
+  }
+
+  // ── one thing selected: the property sheet ───────────────────────────────
+
   function render() {
     const d = os.doc;
     if (!d) return;
+    const items = selected();
+    if (items.length > 1) { fill(body, multi(items)); return; }
     const { id, kind } = os.sel;
     const item = kind === "win" ? d.windows.find((w) => w.id === id) : d.widgets.find((g) => g.id === id);
     if (!item) {
       fill(body, h("div.empty", null,
         icon("window", 26),
         h("h3", "Nothing selected"),
-        h("p", "Click a window or widget in the live OS, or a layer on the left, to edit its properties here.")));
+        h("p", "Click a window or widget in the live OS, or a layer on the left. Shift-click to select several and align them.")));
       return;
     }
 
     const meta = kind === "win"
       ? (os.snap.apps ?? []).find((a) => a.id === item.app)
       : (os.snap.widgetKinds ?? []).find((w) => w.kind === item.kind);
+    const setTool = kind === "widget" ? "widgetSet" : "windowSet";
 
     const numField = (label, key, tool) => {
       const input = h("input", { type: "number", value: item[key] });
@@ -567,25 +760,58 @@ export function createInspector() {
 
     const wsSel = h("select", null, ...d.workspaces.map((w) =>
       h("option", { value: w.n, selected: w.n === item.ws }, w.name)));
-    wsSel.addEventListener("change", () => call(kind === "widget" ? "widgetSet" : "windowSet", { id, ws: Number(wsSel.value) }));
+    wsSel.addEventListener("change", () => call(setTool, { id, ws: Number(wsSel.value) }));
+
+    const pinSel = kind === "widget" ? h("select", null, ...["none", "left", "right"].map((p) => h("option", { value: p, selected: item.pin === p }, p === "none" ? "free" : `pinned ${p}`))) : null;
+    pinSel?.addEventListener("change", () => call("widgetSet", { id, pin: pinSel.value }));
+
+    // Props: the free-form part of an element, edited as JSON with the ceiling stated.
+    const propsTa = h("textarea", { rows: 5, spellcheck: "false" });
+    propsTa.value = JSON.stringify(item.props ?? {}, null, 2);
+    const propsNote = h("span.dim", { style: { fontSize: "10.5px" } }, `${JSON.stringify(item.props ?? {}).length} of 8192 bytes`);
+    const propsBtn = h("button.ghost", { onclick: async () => {
+      let parsed;
+      try { parsed = JSON.parse(propsTa.value || "{}"); } catch (e) { toastError("Not valid JSON", e); return; }
+      if (JSON.stringify(parsed).length > 8192) { toastError("Too big", new Error("props are capped at 8 KB; anything larger is dropped by the document")); return; }
+      // props merge, so clear what was removed by sending nulls is not possible; replace wholesale via patch-free set of keys.
+      const cleared = Object.fromEntries(Object.keys(item.props ?? {}).filter((k) => !(k in parsed)).map((k) => [k, null]));
+      try { await call(setTool, { id, props: { ...cleared, ...parsed } }); toast("Props saved", { kind: "ok" }); }
+      catch (e) { toastError("Could not save props", e); }
+    } }, "Save props");
+
+    const zRow = kind === "win" ? h("div.align-grid.two", { style: { marginBottom: "14px" } },
+      h("button.ghost", { onclick: () => call("focus", { id }) }, "Bring to front"),
+      h("button.ghost", { onclick: () => call("windowSet", { id, back: true }) }, "Send to back")) : null;
+
+    const winFlags = kind === "win" ? h("div.align-grid.two", { style: { marginBottom: "14px" } },
+      h("button.ghost", { class: item.min ? "on" : "", onclick: () => call("windowSet", { id, min: !item.min }) }, item.min ? "Restore" : "Minimise"),
+      h("button.ghost", { onclick: () => call("windowSet", { id, max: !item.max }) }, item.max ? "Unzoom" : "Zoom")) : null;
+
+    const appLine = meta && !meta.builtin ? h("div.note", { style: { marginTop: "0", marginBottom: "12px" } },
+      `${meta.kind} app · capabilities: ${meta.permissions?.join(", ") || "none"}`,
+      meta.window?.singleton ? " · one window at a time" : "",
+      h("div", { style: { marginTop: "6px" } },
+        h("button.ghost", { onclick: () => onOpenCodeGlobal?.("app", meta.id) }, "Edit source"))) : null;
 
     fill(body,
       h("div", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "16px" } },
         h("span.kind-tag", kind === "win" ? "Window" : "Widget"),
-        h("span", { style: { fontSize: "13px", fontWeight: "600" } }, kind === "win" ? item.app : item.kind)),
+        h("span", { style: { fontSize: "13px", fontWeight: "600" } }, kind === "win" ? item.app : item.kind),
+        h("span.dim.mono", { style: { fontSize: "10px", marginLeft: "auto" } }, id)),
       h("div.field", null, h("label", "Title"), title),
       h("div.grid-2", null, numField("X", "x", "move"), numField("Y", "y", "move"), numField("W", "w", "resize"), numField("H", "h", "resize")),
       h("div.field", null, h("label", "Workspace"), wsSel),
-      meta && !meta.builtin
-        ? h("div.note", { style: { marginTop: "0", marginBottom: "12px" } },
-          `Capabilities: ${meta.permissions?.join(", ") || "none"}`)
-        : null,
+      pinSel ? h("div.field", null, h("label", "Pin"), pinSel) : null,
+      zRow, winFlags, appLine,
+      h("div.field", null, h("label", "Props (JSON)"), propsTa, h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "4px" } }, propsNote, propsBtn)),
       h("button.ghost.wide.danger", {
         onclick: () => call(kind === "widget" ? "widgetRemove" : "close", { id }).catch((e) => toastError("Could not delete", e)),
-      }, "Delete element"),
+      }, kind === "widget" ? "Remove widget" : "Close window"),
     );
   }
 
   onOs(() => render());
-  return { el, render };
+  return { el, render, set onOpenCode(fn) { onOpenCodeGlobal = fn; } };
 }
+
+let onOpenCodeGlobal = null;

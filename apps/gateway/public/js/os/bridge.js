@@ -23,6 +23,20 @@
   const pending = new Map();
   let seq = 0;
 
+  // A stylesheet the Studio just saved is swapped in place rather than reloading
+  // the whole frame: same href, new cache-buster. State in the page survives.
+  function hotSwapCss(path) {
+    if (!path) return;
+    for (const l of document.querySelectorAll('link[rel="stylesheet"]')) {
+      const href = l.getAttribute("href") ?? "";
+      if (!href.split("?")[0].endsWith(path.replace(/^\.\//, ""))) continue;
+      const next = l.cloneNode();
+      next.href = `${href.split("?")[0]}?r=${Date.now()}`;
+      next.onload = () => l.remove();
+      l.after(next);
+    }
+  }
+
   function post(type, payload) {
     const id = `${appId}:${++seq}`;
     return new Promise((resolve, reject) => {
@@ -40,6 +54,8 @@
     const p = pending.get(m.id);
     if (!p) {
       if (m.type === "event") {
+        if (m.event === "visibility") window.sbx.visible = !!m.detail?.visible;
+        if (m.event === "css") hotSwapCss(m.detail?.path);
         for (const fn of subscribers) { try { fn(m.event, m.detail); } catch (err) { console.error(err); } }
       }
       return;
@@ -76,8 +92,12 @@
     /** Tell the shell the app has painted (it fades the frame in). */
     ready: () => { try { parent.postMessage({ __sbx: 1, app: appId, kind, type: "ready" }, "*"); } catch { /* detached */ } },
 
-    /** Subscribe to shell events ('theme', 'focus', 'blur'). */
+    /** Subscribe to shell events ('theme', 'tick', 'visibility', 'css', 'focus', 'blur'). */
     on: (fn) => { subscribers.add(fn); return () => subscribers.delete(fn); },
+    /** A widget's refresh clock, kept by the host: it stops when you are off-screen. */
+    onTick: (fn) => window.sbx.on((ev, detail) => { if (ev === "tick") fn(detail); }),
+    /** Whether the host currently shows this frame (a hidden workspace does not). */
+    visible: true,
   };
 
   // Ask the shell what we ended up with, so an app can degrade honestly rather

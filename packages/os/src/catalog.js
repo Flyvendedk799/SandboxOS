@@ -58,6 +58,53 @@ export const BUILTIN_DISTROS = [
     description: "One clock. One terminal. Nothing else.",
     apps: ["terminal"], widgets: ["clock"],
   },
+  {
+    // The Tide-native posture: the app's UI is ordinary files in the Cell tree,
+    // edited in Files, versioned by Tide, served through the same containment
+    // check as everything else. Fork it to see what `origin: "volume"` feels like.
+    id: "workshop", name: "Workshop", hue: "#7be3d0", theme: "tide",
+    description: "Files · Terminal · a Notebook app whose source lives in the volume",
+    apps: ["files", "terminal"], widgets: ["clock"],
+    customApps: [{
+      id: "notebook", name: "Notebook", icon: "notes", hue: "#7be3d0", kind: "bundle",
+      origin: "volume", volumePath: "apps/notebook", permissions: ["fs.read", "fs.write", "fs.list"],
+      window: { w: 520, h: 360 },
+      description: "A notebook that keeps its pages in notes/. Its own source is in apps/notebook — open it in Files.",
+    }],
+    seedFiles: {
+      "apps/notebook/index.html": [
+        "<!doctype html>", '<html lang="en"><head><meta charset="utf-8" /><title>Notebook</title>',
+        "<style>",
+        "  body { margin:0; padding:14px; font:13px/1.5 ui-sans-serif,-apple-system,'Segoe UI',Roboto,sans-serif; color:var(--os-text,#e6edf3); background:transparent; display:flex; flex-direction:column; height:100vh; box-sizing:border-box; }",
+        "  h1 { font-size:14px; margin:0 0 8px; } .dim { color:var(--os-text-3,#6b7f92); font-size:11px; margin:0 0 10px; }",
+        "  textarea { flex:1; border:1px solid var(--os-line,#1e2833); border-radius:8px; background:var(--os-chip,rgba(255,255,255,.05)); color:inherit; padding:10px; font:12px/1.6 inherit; outline:none; resize:none; }",
+        "  .bar { display:flex; gap:8px; margin-top:8px; align-items:center; } button { height:26px; padding:0 10px; border:0; border-radius:7px; background:var(--os-accent,#35d6c4); color:#04211e; font-weight:600; cursor:pointer; }",
+        "  #status { font-size:11px; color:var(--os-text-3,#6b7f92); }",
+        "</style></head><body>",
+        "<h1>Notebook</h1>",
+        '<p class="dim">This app is three files in <code>apps/notebook/</code> inside your machine. Edit them in Files; Tide keeps their history.</p>',
+        '<textarea id="page" placeholder="Write…"></textarea>',
+        '<div class="bar"><button id="save">Save to notes/notebook.md</button><span id="status"></span></div>',
+        '<script type="module" src="./app.js"></script>',
+        "</body></html>", "",
+      ].join("\n"),
+      "apps/notebook/app.js": [
+        "const page = document.getElementById('page');",
+        "const status = document.getElementById('status');",
+        "const PATH = 'notes/notebook.md';",
+        "async function load() {",
+        "  try { page.value = await sbx.read(PATH); status.textContent = 'loaded'; }",
+        "  catch { status.textContent = 'new page'; }",
+        "}",
+        "document.getElementById('save').addEventListener('click', async () => {",
+        "  try { await sbx.write(PATH, page.value); status.textContent = 'saved ' + new Date().toLocaleTimeString(); }",
+        "  catch (e) { status.textContent = 'error: ' + e.message; }",
+        "});",
+        "load(); sbx.ready();", "",
+      ].join("\n"),
+      "notes/notebook.md": "# Notebook\n\nThis page is written by the Notebook app — whose own source is in apps/notebook.\n",
+    },
+  },
 ];
 
 export const builtinApp = (id) => BUILTIN_APPS.find((a) => a.id === id) ?? null;

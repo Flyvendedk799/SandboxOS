@@ -19,19 +19,23 @@
 //     tool in the wrong layer.
 
 import {
-  loadOs, mutateOs, saveOs, resetOs, osHistory, revertOs, announce,
+  loadOs, mutateOs, saveOs, resetOs, osHistory, osHistoryEntry, revertOs, announce,
   normalizeDoc, normApp, normWidgetKind, cleanTokens, cleanAnimation, cleanPatterns,
-  isId, rid, LIMITS, DOCK_POSITIONS, WM_MODES,
+  isId, rid, LIMITS, DOCK_POSITIONS, WM_MODES, resolveAlias,
+  buildTree, treeBoxes, treeLeaves, splitFor, setRatio, setDir, swapLeaves, normalizeTree, describeTree, TREE_PRESETS,
   BUILTIN_THEMES, listThemes, resolveTheme,
   BUILTIN_ANIMATIONS, listAnimations, resolveAnimation,
   builtinApp, builtinWidget, appDescriptor, widgetDescriptor, listApps, listWidgetKinds,
   writeBundleFile, readBundleFile, listBundleFiles, removeBundleFile, removeBundle,
-  exportBundle, importBundle, starterApp, starterAppCss, starterAppJs, starterWidget,
-  exportPayload, importPayload, builtinDistroList, docFromDistroSpec,
+  exportBundle, importBundle, starterApp, starterAppCss, starterAppJs, starterWidget, starterServerJs, starterAppToolsJs,
+  exportPayload, importPayload, builtinDistroList, docFromDistroSpec, RESERVED_SERVER_NAMES,
+  summarizeDoc, silhouetteSvg,
 } from "../../../os/src/index.js";
+import { loadManifest, saveManifest } from "../../../manifest/src/manifest.js";
+import { CATALOG } from "../catalog.js";
 import { BUILTIN_DISTROS } from "../../../os/src/catalog.js";
 import {
-  createDistro, listDistros, getDistro, getDistroByName, deleteDistro,
+  createDistro, listDistros, getDistro, getDistroByName, deleteDistro, listGallery, setDistroVisibility, bumpDistroForks,
 } from "../../../control-db/src/registry.js";
 
 const S = { type: "string" };
@@ -48,6 +52,31 @@ function cascadeFor(doc, ws) {
 /** An imported distro is untrusted input; bound it before it becomes disk. */
 const MAX_PAYLOAD_BYTES = 8 * 1024 * 1024;
 
+/** What a gallery card needs to draw a machine without seeing its contents:
+ *  the palette, and the silhouettes of its windows and widgets. No titles, no
+ *  file paths, no props — a shape, not a screenshot. */
+function previewOf(d) {
+  const t = resolveTheme(d);
+  const ws = d.activeWorkspace;
+  return {
+    theme: { bg0: t.bg0, bg1: t.bg1, accent: t.accent, wall: t.wall, scheme: t.scheme },
+    windows: d.windows.filter((w) => w.ws === ws && !w.min).slice(0, 12).map((w) => ({ x: w.x, y: w.y, w: w.w, h: w.h, app: builtinApp(w.app) ? w.app : "custom" })),
+    widgets: d.widgets.filter((g) => g.ws === ws).slice(0, 12).map((g) => ({ x: g.x, y: g.y, w: g.w, h: g.h, pin: g.pin })),
+    dock: d.shell.dock.position,
+    workspaces: d.workspaces.length,
+    apps: Object.keys(d.apps).length,
+    tools: Object.values(d.apps).filter((x) => x.mcp).length,
+    wm: d.wm.mode,
+  };
+}
+
+/** Props merge shallowly; a null value removes the key (the same convention as `patch`). */
+function mergeProps(current, patch) {
+  const out = { ...(current ?? {}) };
+  for (const [k, v] of Object.entries(patch ?? {})) { if (v === null) delete out[k]; else out[k] = v; }
+  return out;
+}
+
 const findWindow = (doc, id) => doc.windows.find((w) => w.id === id);
 const findWidget = (doc, id) => doc.widgets.find((g) => g.id === id);
 
@@ -62,14 +91,26 @@ function mustWidget(doc, id) {
   return g;
 }
 
+/** App descriptors plus, for apps with a tool face, what that face serves now. */
+function annotatedApps(d, kernel) {
+  const live = kernel ? new Set(kernel.listTools().map((t) => t.name)) : new Set();
+  return listApps(d).map((a) => {
+    const m = d.apps[a.id]?.mcp;
+    if (!m) return a;
+    const declared = m.entrypoint ? [] : m.tools.map((t) => t.name);
+    const served = [...live].filter((n) => n.startsWith(`${m.name}.`)).map((n) => n.slice(m.name.length + 1));
+    return { ...a, mcp: { name: m.name, enabled: m.enabled, entrypoint: m.entrypoint ?? null, tools: served.length ? served : declared, live: served.length > 0 } };
+  });
+}
+
 /** The document plus everything a shell needs to paint it in one round trip. */
-function snapshot(doc) {
+function snapshot(doc, kernel = null) {
   return {
     doc,
     rev: doc.rev,
     theme: resolveTheme(doc),
     animation: resolveAnimation(doc),
-    apps: listApps(doc),
+    apps: annotatedApps(doc, kernel),
     widgetKinds: listWidgetKinds(doc),
     themes: listThemes(doc).map(({ key, name, scheme, builtin, tokens }) => ({
       key, name, scheme, builtin, accent: tokens.accent, wall: tokens.wall,
@@ -79,10 +120,88 @@ function snapshot(doc) {
   };
 }
 
+/** Which workspace a tool means: the one named, else the active one. */
+function wsOf(d, n) {
+  const ws = n != null ? Number(n) : d.activeWorkspace;
+  const found = d.workspaces.find((w) => w.n === ws);
+  if (!found) throw new Error(`no such workspace: ${ws}`);
+  return found;
+}
+
+/** Everything a revision changed against another, structurally — for a history UI
+ *  that can say "3 windows, the theme, the dock" rather than "rev 41". */
+function structuralDiff(from, to) {
+  const ids = (list) => new Map((list ?? []).map((x) => [x.id, x]));
+  const diffList = (a, b, keys) => {
+    const A = ids(a), B = ids(b);
+    let added = 0, removed = 0, changed = 0;
+    for (const id of B.keys()) if (!A.has(id)) added += 1;
+    for (const [id, x] of A) {
+      if (!B.has(id)) { removed += 1; continue; }
+      if (keys.some((k) => JSON.stringify(x[k]) !== JSON.stringify(B.get(id)[k]))) changed += 1;
+    }
+    return { added, removed, changed };
+  };
+  const keysChanged = (a, b) => [...new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})])]
+    .filter((k) => JSON.stringify(a?.[k]) !== JSON.stringify(b?.[k]));
+  return {
+    windows: diffList(from.windows, to.windows, ["app", "title", "x", "y", "w", "h", "ws", "min", "max", "props"]),
+    widgets: diffList(from.widgets, to.widgets, ["kind", "x", "y", "w", "h", "ws", "pin", "props"]),
+    workspaces: diffList(from.workspaces, to.workspaces, ["name", "wallpaper", "layout"]),
+    theme: keysChanged({ base: from.theme?.base, ...from.theme?.tokens }, { base: to.theme?.base, ...to.theme?.tokens }),
+    animation: from.animation?.preset !== to.animation?.preset ? [to.animation?.preset] : [],
+    wm: keysChanged(from.wm, to.wm),
+    shell: keysChanged(from.shell, to.shell),
+    apps: keysChanged(from.apps, to.apps),
+    widgetKinds: keysChanged(from.widgetKinds, to.widgetKinds),
+    name: from.name !== to.name,
+  };
+}
+
 export function desktopServer(deps) {
-  const { sandbox } = deps;
+  const { sandbox, kernel } = deps;
   const doc = () => loadOs(sandbox);
-  const mutate = (fn, op, label) => mutateOs(sandbox, fn, { op, label });
+  /** Register/deregister app servers now rather than waiting for the bus, so a
+   *  tool defined by this call is callable by the next one. */
+  const syncServers = async () => {
+    try {
+      const r = await kernel?.syncAppServers?.();
+      // The catalog changed after the document did; tell the shells to re-read it.
+      announce(sandbox.id, "appServers", { registered: r?.registered ?? [] });
+      return r;
+    } catch { return null; }
+  };
+
+  /** Apply a distro's portable manifest to this Cell: core servers and their
+   *  config. Marketplace servers are named, not installed — installing code is
+   *  a separate, explicit act (mcp-registry.install). */
+  function applyPortableManifest(portable) {
+    if (!portable?.servers || typeof portable.servers !== "object") return { applied: [], skipped: [] };
+    const m = loadManifest(sandbox);
+    const applied = [], skipped = [];
+    const next = {};
+    for (const [name, cfg] of Object.entries(portable.servers)) {
+      if (CATALOG[name]) { next[name] = cfg && typeof cfg === "object" ? cfg : {}; applied.push(name); }
+      else if (m.installed?.[name]) { next[name] = m.servers?.[name] ?? {}; applied.push(name); }
+      else skipped.push(name);
+    }
+    // Never let a distro lock the machine or remove its desktop.
+    for (const keep of ["kernel", "mcp-registry", "desktop"]) next[keep] ??= m.servers?.[keep] ?? {};
+    m.servers = next;
+    saveManifest(sandbox, m);
+    kernel?.rebuild?.();
+    return { applied, skipped: [...skipped, ...Object.keys(portable.installed ?? {}).filter((n) => !m.installed?.[n])] };
+  }
+  const mutate = (fn, op, label, expectRev = null) => mutateOs(sandbox, fn, { op, label, expectRev });
+
+  /** Gallery rows as the shell shows them: never the payload, always the preview. */
+  const galleryRows = (principalId, opts = {}) => listGallery(sandbox.tenant_id, { principalId, ...opts })
+    .filter((d) => d.has_os)
+    .map((d) => ({
+      id: d.id, name: d.name, description: d.description ?? "", builtin: false, createdAt: d.created_at,
+      visibility: d.visibility ?? "tenant", tags: d.tags ?? [], preview: d.preview ?? null, forks: d.forks ?? 0,
+      mine: !!d.mine, hue: d.preview?.theme?.accent ?? null,
+    }));
 
   /** Custom app/widget bundles this Sandbox holds, as a portable map. */
   const collectBundles = (d) => ({
@@ -99,11 +218,8 @@ export function desktopServer(deps) {
       get: {
         description: "The whole OS: document, resolved theme and motion, and the app/widget/distro catalogs.",
         inputSchema: obj({}),
-        async handler() {
-          const published = listDistros(sandbox.tenant_id)
-            .filter((d) => d.has_os)
-            .map((d) => ({ id: d.id, name: d.name, description: d.description ?? "", builtin: false, createdAt: d.created_at }));
-          return { ...snapshot(doc()), distros: [...builtinDistroList(), ...published] };
+        async handler(ctx) {
+          return { ...snapshot(doc(), kernel), distros: [...builtinDistroList(), ...galleryRows(ctx?.principalId)] };
         },
       },
 
@@ -111,6 +227,28 @@ export function desktopServer(deps) {
         description: "Just the OS document (no catalogs) — the cheap poll.",
         inputSchema: obj({}),
         async handler() { const d = doc(); return { doc: d, rev: d.rev }; },
+      },
+
+      summarize: {
+        description:
+          "The desktop as a short textual map sized for a model's context: workspaces, windows with app/title/geometry, " +
+          "the tiling tree, widgets, theme, custom apps and their tools, revision. Read this before rearranging a desktop you cannot see.",
+        inputSchema: obj({}),
+        async handler() {
+          const d = doc();
+          return { rev: d.rev, map: summarizeDoc(d, snapshot(d, kernel)) };
+        },
+      },
+
+      silhouette: {
+        description: "A semantic screenshot: an SVG of window and widget shapes in the theme's colours, drawn from the document — never a pixel of what is inside them.",
+        inputSchema: obj({ width: N, height: N }),
+        async handler(_ctx, a) {
+          const d = doc();
+          const width = Math.max(64, Math.min(1600, Number(a.width) || 320));
+          const height = Math.max(40, Math.min(1000, Number(a.height) || 200));
+          return { rev: d.rev, svg: silhouetteSvg({ ...previewOf(d), label: d.name }, { width, height }) };
+        },
       },
 
       set: {
@@ -143,9 +281,21 @@ export function desktopServer(deps) {
       },
 
       history: {
-        description: "Revisions available to revert to, newest first.",
-        inputSchema: obj({}),
-        async handler() { return { revisions: osHistory(sandbox), current: doc().rev }; },
+        description: "Revisions available to revert to, newest first. Pass rev to also get what that revision changed against the current document.",
+        inputSchema: obj({ rev: N }),
+        async handler(_ctx, a) {
+          const d = doc();
+          const out = { revisions: osHistory(sandbox), current: d.rev };
+          if (a.rev != null) {
+            const entry = osHistoryEntry(sandbox, a.rev);
+            if (!entry) throw new Error(`no such revision: ${a.rev}`);
+            out.rev = entry.rev;
+            out.label = entry.label;
+            out.ts = entry.ts;
+            out.diff = structuralDiff(entry.doc, d);
+          }
+          return out;
+        },
       },
 
       revert: {
@@ -352,16 +502,72 @@ export function desktopServer(deps) {
       },
 
       layoutSet: {
-        description: "Window management: floating or tiling, gap, snapping, grid size.",
-        inputSchema: obj({ mode: { type: "string", enum: WM_MODES }, gap: N, snap: B, gridSize: N }),
+        description:
+          "Window management: floating or tiling, gap, snapping, grid size — and the tiling tree itself. " +
+          "preset rebuilds a workspace's tree (master-stack, columns, rows, grid); tree sets one explicitly " +
+          "({type:'split',dir:'row'|'col',ratio,a,b} | {type:'leaf',id}). Pixels are the client's business.",
+        inputSchema: obj({
+          mode: { type: "string", enum: WM_MODES }, gap: N, snap: B, gridSize: N,
+          preset: { type: "string", enum: TREE_PRESETS }, ratio: N, ws: N, tree: { type: "object" },
+          expectRev: N,
+        }),
         async handler(_ctx, a) {
+          let ws = null;
           const next = mutate((d) => {
             if (a.mode != null) d.wm.mode = a.mode;
             if (a.gap != null) d.wm.gap = a.gap;
             if (a.snap != null) d.wm.snap = a.snap;
             if (a.gridSize != null) d.wm.gridSize = a.gridSize;
-          }, "layout", `layout → ${a.mode ?? "tuned"}`);
-          return { ok: true, wm: next.wm, rev: next.rev };
+            if (a.preset || a.tree) {
+              ws = wsOf(d, a.ws);
+              const here = d.windows.filter((w) => w.ws === ws.n);
+              if (a.tree) {
+                const cleaned = normalizeTree(a.tree, here.map((w) => w.id));
+                if (!cleaned && here.length) throw new Error("tree names no window on this workspace");
+                ws.layout = cleaned;
+              } else {
+                // Front-most first, so master-stack gives the master to the window in front.
+                const ordered = [...here].sort((x, y) => y.z - x.z).map((w) => w.id);
+                ws.layout = buildTree(ordered, a.preset, { ratio: a.ratio ?? 0.6 });
+              }
+            }
+          }, "layout", `layout → ${a.preset ?? a.mode ?? "tuned"}`, a.expectRev ?? null);
+          const at = ws ? next.workspaces.find((w) => w.n === ws.n) : null;
+          return { ok: true, wm: next.wm, ...(at ? { ws: at.n, layout: at.layout, tree: describeTree(at.layout) } : {}), rev: next.rev };
+        },
+      },
+
+      tile: {
+        description:
+          "Edit the tiling tree of a workspace in place: ratio sets the sash between window id and window with " +
+          "(their lowest common split; without `with`, the split holding id), dir flips that split, swap exchanges two leaves.",
+        inputSchema: obj({
+          ws: N, id: S, with: S, ratio: N, dir: { type: "string", enum: ["row", "col"] }, swap: S, expectRev: N,
+        }, ["id"]),
+        async handler(_ctx, a) {
+          let wsN;
+          const next = mutate((d) => {
+            const w = mustWindow(d, a.id);
+            const ws = wsOf(d, a.ws ?? w.ws);
+            wsN = ws.n;
+            let tree = ws.layout;
+            if (!tree || !treeLeaves(tree).includes(a.id)) throw new Error(`${a.id} is not on workspace ${ws.n}`);
+            if (a.swap) {
+              const other = mustWindow(d, a.swap);
+              if (other.ws !== ws.n) throw new Error(`${a.swap} is on another workspace`);
+              tree = swapLeaves(tree, a.id, a.swap);
+            }
+            if (a.ratio != null || a.dir) {
+              if (a.with) mustWindow(d, a.with);
+              const path = splitFor(tree, a.id, a.with ?? null);
+              if (path == null) throw new Error("no split between those windows");
+              if (a.ratio != null) tree = setRatio(tree, path, a.ratio);
+              if (a.dir) tree = setDir(tree, path, a.dir);
+            }
+            ws.layout = tree;
+          }, "tile", a.swap ? "swap tiles" : a.dir ? "flip split" : "resize split", a.expectRev ?? null);
+          const at = next.workspaces.find((w) => w.n === wsN);
+          return { ok: true, ws: wsN, layout: at.layout, tree: describeTree(at.layout), rev: next.rev };
         },
       },
 
@@ -466,14 +672,18 @@ export function desktopServer(deps) {
         async handler(_ctx, a) {
           let win;
           const next = mutate((d) => {
-            const desc = appDescriptor(d, a.app);
-            if (!desc) throw new Error(`no such app: ${a.app}`);
-            if (desc.kind === "alias") throw new Error(`${a.app} is an alias; open ${desc.source?.target ?? "its target"}`);
+            // An alias is a name for another app: the window runs the target,
+            // wears the alias's title, and the dock lights the alias's icon.
+            const alias = appDescriptor(d, a.app);
+            if (!alias) throw new Error(`no such app: ${a.app}`);
+            const targetId = alias.kind === "alias" ? resolveAlias(d, a.app) : a.app;
+            const desc = targetId ? appDescriptor(d, targetId) : null;
+            if (!desc || desc.kind === "alias") throw new Error(`${a.app} points at an app this machine does not have`);
             const ws = a.ws != null ? Number(a.ws) : d.activeWorkspace;
             if (!d.workspaces.some((x) => x.n === ws)) throw new Error(`no such workspace: ${ws}`);
 
             const existing = desc.window?.singleton
-              ? d.windows.find((x) => x.app === a.app && x.ws === ws) : null;
+              ? d.windows.find((x) => x.app === targetId && x.ws === ws) : null;
             if (existing) {
               existing.min = false;
               existing.z = ++d.zTop;
@@ -483,8 +693,8 @@ export function desktopServer(deps) {
             if (d.windows.length >= LIMITS.windows) throw new Error(`window limit reached (${LIMITS.windows})`);
             const at = cascadeFor(d, ws);
             win = {
-              id: rid("w"), app: a.app,
-              title: a.title ?? desc.name,
+              id: rid("w"), app: targetId,
+              title: a.title ?? alias.name,
               x: a.x ?? at.x, y: a.y ?? at.y,
               w: a.w ?? desc.window.w, h: a.h ?? desc.window.h,
               z: ++d.zTop, ws, min: false, max: false, props: a.props ?? {},
@@ -509,28 +719,37 @@ export function desktopServer(deps) {
       },
 
       move: {
-        description: "Move a window.",
-        inputSchema: obj({ id: S, x: N, y: N }, ["id"]),
+        description: "Move a window — or several windows and widgets at once with items:[{id,x,y}] (one revision, one audit row: an alignment is one intention).",
+        inputSchema: obj({ id: S, x: N, y: N, items: { type: "array", items: { type: "object" } }, expectRev: N }),
         async handler(_ctx, a) {
+          const items = Array.isArray(a.items) ? a.items : a.id ? [{ id: a.id, x: a.x, y: a.y }] : [];
+          if (!items.length) throw new Error("id or items required");
           const next = mutate((d) => {
-            const w = mustWindow(d, a.id);
-            if (a.x != null) w.x = Number(a.x);
-            if (a.y != null) w.y = Number(a.y);
-          }, "move", "move window");
-          return { ok: true, window: findWindow(next, a.id), rev: next.rev };
+            for (const it of items) {
+              const el = findWindow(d, it.id) ?? mustWidget(d, it.id);
+              if (it.x != null) el.x = Number(it.x);
+              if (it.y != null) el.y = Number(it.y);
+              if (it.pin != null && el.kind) el.pin = it.pin;
+            }
+          }, "move", items.length > 1 ? `move ${items.length} elements` : "move window", a.expectRev ?? null);
+          return { ok: true, window: a.id ? findWindow(next, a.id) ?? findWidget(next, a.id) : null, moved: items.length, rev: next.rev };
         },
       },
 
       resize: {
-        description: "Resize a window.",
-        inputSchema: obj({ id: S, w: N, h: N }, ["id"]),
+        description: "Resize a window — or several windows and widgets at once with items:[{id,w,h}].",
+        inputSchema: obj({ id: S, w: N, h: N, items: { type: "array", items: { type: "object" } }, expectRev: N }),
         async handler(_ctx, a) {
+          const items = Array.isArray(a.items) ? a.items : a.id ? [{ id: a.id, w: a.w, h: a.h }] : [];
+          if (!items.length) throw new Error("id or items required");
           const next = mutate((d) => {
-            const win = mustWindow(d, a.id);
-            if (a.w != null) win.w = Number(a.w);
-            if (a.h != null) win.h = Number(a.h);
-          }, "resize", "resize window");
-          return { ok: true, window: findWindow(next, a.id), rev: next.rev };
+            for (const it of items) {
+              const el = findWindow(d, it.id) ?? mustWidget(d, it.id);
+              if (it.w != null) el.w = Number(it.w);
+              if (it.h != null) el.h = Number(it.h);
+            }
+          }, "resize", items.length > 1 ? `resize ${items.length} elements` : "resize window", a.expectRev ?? null);
+          return { ok: true, window: a.id ? findWindow(next, a.id) ?? findWidget(next, a.id) : null, resized: items.length, rev: next.rev };
         },
       },
 
@@ -549,8 +768,8 @@ export function desktopServer(deps) {
       },
 
       windowSet: {
-        description: "Change a window: title, minimized, maximized, workspace, props.",
-        inputSchema: obj({ id: S, title: S, min: B, max: B, ws: N, props: { type: "object" } }, ["id"]),
+        description: "Change a window: title, minimized, maximized, workspace, props; back:true sends it behind everything.",
+        inputSchema: obj({ id: S, title: S, min: B, max: B, ws: N, props: { type: "object" }, back: B, expectRev: N }, ["id"]),
         async handler(_ctx, a) {
           const next = mutate((d) => {
             const w = mustWindow(d, a.id);
@@ -561,17 +780,25 @@ export function desktopServer(deps) {
               if (!d.workspaces.some((x) => x.n === Number(a.ws))) throw new Error(`no such workspace: ${a.ws}`);
               w.ws = Number(a.ws);
             }
-            if (a.props) w.props = { ...w.props, ...a.props };
-          }, "windowSet", "window");
+            if (a.props) w.props = mergeProps(w.props, a.props);
+            if (a.back) {
+              // Everything else steps up by one; this window takes the floor.
+              const floor = Math.min(...d.windows.map((x) => x.z));
+              w.z = Math.max(0, floor - 1);
+            }
+          }, "windowSet", a.back ? "send to back" : "window", a.expectRev ?? null);
           return { ok: true, window: findWindow(next, a.id), rev: next.rev };
         },
       },
 
       arrange: {
-        description: "Lay out a workspace's windows: grid, cascade, stack or centre.",
+        description:
+          "Lay out a workspace's windows: grid, cascade, stack, center, master-stack, columns, rows, or " +
+          "fullscreen-focus. In tiling mode the tree presets rebuild the tree; in floating mode they " +
+          "write geometry from the viewport you pass.",
         inputSchema: obj({
-          preset: { type: "string", enum: ["grid", "cascade", "stack", "center"] },
-          ws: N, viewport: { type: "object" },
+          preset: { type: "string", enum: ["grid", "cascade", "stack", "center", ...TREE_PRESETS, "fullscreen-focus"] },
+          ws: N, viewport: { type: "object" }, ratio: N, expectRev: N,
         }, ["preset"]),
         async handler(_ctx, a) {
           const vw = Math.max(320, Number(a.viewport?.w) || 1280);
@@ -581,6 +808,26 @@ export function desktopServer(deps) {
             const wins = d.windows.filter((w) => w.ws === ws && !w.min);
             if (!wins.length) return;
             const gap = d.wm.gap;
+            if (a.preset === "fullscreen-focus") {
+              const top = [...wins].sort((x, y) => y.z - x.z)[0];
+              for (const w of wins) w.max = w.id === top.id;
+              return;
+            }
+            if (TREE_PRESETS.includes(a.preset) && a.preset !== "grid" || (a.preset === "grid" && d.wm.mode === "tiling")) {
+              const ordered = [...wins].sort((x, y) => y.z - x.z).map((w) => w.id);
+              const tree = buildTree(ordered, a.preset, { ratio: a.ratio ?? 0.6 });
+              const here = wsOf(d, ws);
+              here.layout = normalizeTree(tree, d.windows.filter((w) => w.ws === ws).map((w) => w.id));
+              if (d.wm.mode !== "tiling") {
+                // Floating: the tree is the recipe, the viewport makes it pixels.
+                const boxes = treeBoxes(tree, { x: 0, y: 0, w: vw, h: vh }, gap);
+                for (const w of wins) {
+                  const b = boxes.get(w.id);
+                  if (b) Object.assign(w, b, { max: false });
+                }
+              }
+              return;
+            }
             if (a.preset === "grid") {
               const cols = Math.ceil(Math.sqrt(wins.length));
               const rows = Math.ceil(wins.length / cols);
@@ -608,8 +855,10 @@ export function desktopServer(deps) {
                 w.y = Math.max(gap, Math.round((vh - w.h) / 2));
               });
             }
-          }, "arrange", `arrange ${a.preset}`);
-          return { ok: true, windows: next.windows.filter((w) => w.ws === (a.ws ?? next.activeWorkspace)), rev: next.rev };
+          }, "arrange", `arrange ${a.preset}`, a.expectRev ?? null);
+          const wsN = a.ws != null ? Number(a.ws) : next.activeWorkspace;
+          const layout = next.workspaces.find((w) => w.n === wsN)?.layout ?? null;
+          return { ok: true, windows: next.windows.filter((w) => w.ws === wsN), layout, rev: next.rev };
         },
       },
 
@@ -623,7 +872,7 @@ export function desktopServer(deps) {
             type: "string",
             enum: ["left", "right", "top", "bottom", "topleft", "topright", "bottomleft", "bottomright", "full", "center"],
           },
-          viewport: { type: "object" },
+          viewport: { type: "object" }, expectRev: N,
         }, ["id", "region"]),
         async handler(_ctx, a) {
           const vw = Math.max(320, Number(a.viewport?.w) || 1280);
@@ -646,7 +895,7 @@ export function desktopServer(deps) {
               center: { x: Math.round((vw - w.w) / 2), y: Math.round((vh - w.h) / 2), w: w.w, h: w.h },
             }[a.region];
             Object.assign(w, box, { min: false, max: false, z: ++d.zTop });
-          }, "snap", `snap ${a.region}`);
+          }, "snap", `snap ${a.region}`, a.expectRev ?? null);
           return { ok: true, window: findWindow(next, a.id), rev: next.rev };
         },
       },
@@ -748,7 +997,7 @@ export function desktopServer(deps) {
 
       widgetSet: {
         description: "Move, resize, re-home or reconfigure a placed widget.",
-        inputSchema: obj({ id: S, x: N, y: N, w: N, h: N, ws: N, pin: S, props: { type: "object" } }, ["id"]),
+        inputSchema: obj({ id: S, x: N, y: N, w: N, h: N, ws: N, pin: S, props: { type: "object" }, expectRev: N }, ["id"]),
         async handler(_ctx, a) {
           const next = mutate((d) => {
             const g = mustWidget(d, a.id);
@@ -758,8 +1007,8 @@ export function desktopServer(deps) {
               if (!d.workspaces.some((x) => x.n === Number(a.ws))) throw new Error(`no such workspace: ${a.ws}`);
               g.ws = Number(a.ws);
             }
-            if (a.props) g.props = { ...g.props, ...a.props };
-          }, "widgetSet", "widget");
+            if (a.props) g.props = mergeProps(g.props, a.props);
+          }, "widgetSet", "widget", a.expectRev ?? null);
           return { ok: true, widget: findWidget(next, a.id), rev: next.rev };
         },
       },
@@ -767,9 +1016,9 @@ export function desktopServer(deps) {
       // ── apps: definitions and their source ──────────────────────────────
 
       appList: {
-        description: "Every app this machine can launch — built-in, custom bundle, or URL.",
+        description: "Every app this machine can launch — built-in, custom bundle, or URL — and, for apps with a tool face, the tools it currently serves.",
         inputSchema: obj({}),
-        async handler() { return { apps: listApps(doc()) }; },
+        async handler() { return { apps: annotatedApps(doc(), kernel) }; },
       },
 
       appDefine: {
@@ -784,19 +1033,37 @@ export function desktopServer(deps) {
           permissions: { type: "array", items: S },
           window: { type: "object" },
           files: { type: "object" },
-          starter: B,
+          starter: { type: ["boolean", "string"], description: "false: no starter; 'tools': a UI + companion server starter" },
+          mcp: { type: ["object", "null"], description: "The app's tool face: { name, enabled, entrypoint } or { tools: [{ name, description, inputSchema, proxy: { server, tool, args } }] }. null removes it." },
         }, ["id"]),
         async handler(_ctx, a) {
           if (!isId(a.id)) throw new Error("id must be lowercase letters, digits, - or _");
           if (builtinApp(a.id)) throw new Error(`${a.id} is a built-in app`);
+          const wantsTools = a.starter === "tools";
           let seeded = false;
           const next = mutate((d) => {
             const prior = d.apps[a.id];
             if (!prior && Object.keys(d.apps).length >= LIMITS.apps) throw new Error(`app limit reached (${LIMITS.apps})`);
-            const app = normApp({ ...(prior ?? {}), ...a, id: a.id, createdAt: prior?.createdAt, updatedAt: Date.now() });
+            // The tool face merges rather than replaces, so `{ mcp: { enabled: true } }`
+            // flips a switch without restating the tools. null removes it.
+            let mcp = a.mcp === null ? undefined : a.mcp ? { ...(prior?.mcp ?? {}), ...a.mcp } : prior?.mcp;
+            if (!prior && wantsTools && !mcp) mcp = { entrypoint: "server.js", enabled: true };
+            if (mcp) {
+              const name = isId(mcp.name) ? mcp.name : a.id;
+              if (RESERVED_SERVER_NAMES.has(name)) throw new Error(`${name} is a reserved server name`);
+              if (kernel?.isCoreServer?.(name)) throw new Error(`${name} is already a server on this machine`);
+              if (Object.values(d.apps).some((x) => x.id !== a.id && x.mcp?.name === name)) throw new Error(`another app already serves as ${name}`);
+            }
+            const permissions = a.permissions ?? prior?.permissions ?? [];
+            const app = normApp({
+              ...(prior ?? {}), ...a, id: a.id, createdAt: prior?.createdAt, updatedAt: Date.now(),
+              mcp, permissions: wantsTools && !prior ? [...new Set([...permissions, `${a.id}.*`])] : permissions,
+            });
             if (!app) throw new Error("invalid app definition");
+            if (mcp && !app.mcp) throw new Error("the mcp block needs an entrypoint (a .js file in the bundle) or at least one proxy tool");
             if (app.kind === "url" && !app.url) throw new Error("kind='url' needs a http(s) url");
             d.apps[a.id] = app;
+            if (app.kind === "alias" && !resolveAlias(d, a.id)) throw new Error(`${a.id} would point at itself, round a loop, or through too many aliases`);
             seeded = !prior && app.kind === "bundle" && app.origin === "store";
           }, "appDefine", `app ${a.id}`);
 
@@ -809,13 +1076,19 @@ export function desktopServer(deps) {
                 written.push(writeBundleFile(sandbox, "app", a.id, rel, entry?.content ?? "", { base64: !!entry?.base64 }));
               }
             } else if (seeded && a.starter !== false) {
-              written.push(writeBundleFile(sandbox, "app", a.id, app.entry, starterApp({ name: app.name })));
+              written.push(writeBundleFile(sandbox, "app", a.id, app.entry, starterApp({ name: app.name, kind: wantsTools ? "UI + tools app" : "app" })));
               written.push(writeBundleFile(sandbox, "app", a.id, "app.css", starterAppCss()));
-              written.push(writeBundleFile(sandbox, "app", a.id, "app.js", starterAppJs()));
+              written.push(writeBundleFile(sandbox, "app", a.id, "app.js", wantsTools ? starterAppToolsJs({ id: a.id }) : starterAppJs()));
+              if (wantsTools) written.push(writeBundleFile(sandbox, "app", a.id, "server.js", starterServerJs({ id: app.mcp?.name ?? a.id, name: app.name })));
             }
             if (written.length) announce(sandbox.id, "appFiles", { app: a.id });
           }
-          return { ok: true, app: appDescriptor(next, a.id), files: written, rev: next.rev };
+          const servers = app.mcp ? await syncServers() : null;
+          const skipped = servers?.skipped?.find((x) => x.app === a.id) ?? null;
+          return {
+            ok: true, app: appDescriptor(next, a.id), files: written, rev: next.rev,
+            ...(app.mcp ? { server: { name: app.mcp.name, enabled: app.mcp.enabled, live: !!servers?.registered?.includes(app.mcp.name), ...(skipped ? { problem: skipped.reason } : {}) } } : {}),
+          };
         },
       },
 
@@ -829,6 +1102,7 @@ export function desktopServer(deps) {
             d.windows = d.windows.filter((w) => w.app !== a.id);
             d.shell.dock.pinned = d.shell.dock.pinned.filter((x) => x !== a.id);
           }, "appRemove", `app ${a.id} removed`);
+          await syncServers(); // its server, if any, goes with it — before its files do
           const filesRemoved = a.keepFiles ? false : removeBundle(sandbox, "app", a.id);
           return { ok: true, filesRemoved, rev: next.rev };
         },
@@ -862,6 +1136,8 @@ export function desktopServer(deps) {
           const w = writeBundleFile(sandbox, "app", a.id, a.path, a.content, { base64: !!a.base64 });
           mutate((x) => { x.apps[a.id].updatedAt = Date.now(); }, "appWrite", `app ${a.id} · ${w.path}`);
           announce(sandbox.id, "appFiles", { app: a.id, path: w.path });
+          // Rewriting the companion's source restarts it: the signature includes updatedAt.
+          if (d.apps[a.id].mcp?.entrypoint === w.path) await syncServers();
           return { ok: true, ...w };
         },
       },
@@ -965,6 +1241,17 @@ export function desktopServer(deps) {
         },
       },
 
+      widgetDelete: {
+        description: "Delete one file from a custom widget's source.",
+        inputSchema: obj({ kind: S, path: S }, ["kind", "path"]),
+        async handler(_ctx, a) {
+          if (!doc().widgetKinds[a.kind]) throw new Error(`no such custom widget kind: ${a.kind}`);
+          const r = removeBundleFile(sandbox, "widget", a.kind, a.path);
+          announce(sandbox.id, "widgetFiles", { kind: a.kind, path: r.path });
+          return { ok: true, ...r };
+        },
+      },
+
       // ── notifications ───────────────────────────────────────────────────
 
       notify: {
@@ -972,6 +1259,7 @@ export function desktopServer(deps) {
         inputSchema: obj({
           title: S, body: S, app: S,
           kind: { type: "string", enum: ["ok", "warn", "err", "info", "accent"] },
+          action: { type: "object" },
         }, ["title"]),
         async handler(_ctx, a) {
           let note;
@@ -979,6 +1267,7 @@ export function desktopServer(deps) {
             note = {
               id: rid("n"), app: a.app ?? "system", title: a.title,
               body: a.body ?? "", kind: a.kind ?? "info", ts: Date.now(), read: false,
+              ...(a.action ? { action: a.action } : {}),
             };
             d.notifications.push(note);
             while (d.notifications.length > LIMITS.notifications) d.notifications.shift();
@@ -999,52 +1288,79 @@ export function desktopServer(deps) {
       },
 
       notificationsClear: {
-        description: "Empty the notification centre.",
-        inputSchema: obj({}),
-        async handler() {
-          const next = mutate((d) => { d.notifications = []; }, "notificationsClear", "notifications cleared");
-          return { ok: true, rev: next.rev };
+        description: "Empty the notification centre, or dismiss one by id.",
+        inputSchema: obj({ id: S }),
+        async handler(_ctx, a) {
+          const next = mutate((d) => {
+            d.notifications = a.id ? d.notifications.filter((n) => n.id !== a.id) : [];
+          }, "notificationsClear", a.id ? "notification dismissed" : "notifications cleared");
+          return { ok: true, remaining: next.notifications.length, rev: next.rev };
         },
       },
 
       // ── distros: a whole machine, packaged ──────────────────────────────
 
       distroList: {
-        description: "Distros available to fork: the built-in seeds plus any this tenant published.",
-        inputSchema: obj({}),
-        async handler() {
-          const published = listDistros(sandbox.tenant_id).map((d) => ({
-            id: d.id, name: d.name, description: d.description ?? "", builtin: false, createdAt: d.created_at,
-          }));
-          return { distros: [...builtinDistroList(), ...published] };
+        description: "The gallery: built-in seeds, your tenant's distros, and every public one. q searches name, description and tags.",
+        inputSchema: obj({ q: S, scope: { type: "string", enum: ["all", "mine", "public"] } }),
+        async handler(ctx, a) {
+          const rows = galleryRows(ctx?.principalId, { q: a.q ?? "", publicOnly: a.scope === "public" })
+            .filter((d) => a.scope !== "mine" || d.mine);
+          return { distros: [...(a.scope === "public" || a.q ? [] : builtinDistroList()), ...rows] };
+        },
+      },
+
+      distroSet: {
+        description: "Change who can see a distro you published: private, tenant or public.",
+        inputSchema: obj({ name: S, visibility: { type: "string", enum: ["private", "tenant", "public"] } }, ["name", "visibility"]),
+        async handler(_ctx, a) {
+          const r = setDistroVisibility(sandbox.tenant_id, a.name, a.visibility);
+          if (!r.updated) throw new Error(`no such distro: ${a.name}`);
+          return { ok: true, name: a.name, visibility: a.visibility };
         },
       },
 
       distroPublish: {
-        description: "Publish this whole OS — document plus every custom app's source — as a forkable distro.",
-        inputSchema: obj({ name: S, description: S, replace: B }, ["name"]),
-        async handler(_ctx, a) {
+        description:
+          "Publish this whole machine as a forkable distro: the OS document, every custom app's source (and tools), " +
+          "and the Cell's composition (which servers are enabled). visibility: private (you), tenant (default), public (every tenant).",
+        inputSchema: obj({
+          name: S, description: S, replace: B, tags: { type: "array", items: S },
+          visibility: { type: "string", enum: ["private", "tenant", "public"] }, keepNotifications: B, includeManifest: B,
+        }, ["name"]),
+        async handler(ctx, a) {
           const d = doc();
-          const payload = exportPayload(d, { ...collectBundles(d), name: a.name, description: a.description });
+          const manifest = a.includeManifest === false ? null : loadManifest(sandbox);
+          const payload = exportPayload(d, {
+            ...collectBundles(d), name: a.name, description: a.description, manifest, tags: a.tags, keepNotifications: !!a.keepNotifications,
+          });
           if (a.replace) deleteDistro(sandbox.tenant_id, a.name);
           const created = createDistro(sandbox.tenant_id, {
             name: a.name,
             description: a.description ?? `${d.name} · ${d.windows.length} windows, ${Object.keys(d.apps).length} custom apps`,
-            manifest: { from: "desktop", os: true },
+            // The row's manifest is a real Sandboxfile shape so POST /api/sandboxes
+            // can instantiate the Cell from it; the OS payload carries the desktop.
+            manifest: { ...(manifest ? { servers: manifest.servers } : {}), installed: {}, from: "desktop", os: true },
             os: payload,
+            visibility: a.visibility ?? "tenant",
+            tags: payload.tags,
+            preview: previewOf(d),
+            publisher: ctx?.principalId ?? null,
           });
           return {
-            ok: true, id: created.id, name: created.name,
+            ok: true, id: created.id, name: created.name, visibility: created.visibility ?? "tenant",
             apps: Object.keys(payload.bundles.apps).length,
             widgets: Object.keys(payload.bundles.widgets).length,
+            tools: Object.values(d.apps).filter((x) => x.mcp).length,
+            servers: manifest ? Object.keys(manifest.servers).length : 0,
           };
         },
       },
 
       distroFork: {
         description: "Replace this machine's OS with a distro — built-in by id, or one published by this tenant.",
-        inputSchema: obj({ id: S, name: S, keepName: B }),
-        async handler(_ctx, a) {
+        inputSchema: obj({ id: S, name: S, keepName: B, applyManifest: B }),
+        async handler(ctx, a) {
           const key = a.id ?? a.name;
           if (!key) throw new Error("id or name required");
           const builtin = BUILTIN_DISTROS.find((x) => x.id === key || x.name === key);
@@ -1054,24 +1370,43 @@ export function desktopServer(deps) {
             const next = saveOs(sandbox, docFromDistroSpec(builtin, {
               name: a.keepName ? current.name : builtin.name,
             }), { label: `fork ${builtin.name}` });
-            return { ok: true, distro: { id: builtin.id, name: builtin.name, builtin: true }, rev: next.rev };
+            // A seed's volume-origin app needs its files in the Cell. They are
+            // written through fs.write as the caller — audited, and refused if
+            // the caller cannot write files, in which case the app simply says so.
+            const seeded = [];
+            for (const [rel, content] of Object.entries(builtin.seedFiles ?? {})) {
+              const r = await kernel?.call({ principalId: ctx?.principalId, heldPatterns: ctx?.heldPatterns ?? [], onBehalfOf: `distro:${builtin.id}`, server: "fs", tool: "write", args: { path: rel, content } });
+              if (r?.ok) seeded.push(rel);
+            }
+            await syncServers();
+            return { ok: true, distro: { id: builtin.id, name: builtin.name, builtin: true }, seeded, rev: next.rev };
           }
 
           const row = getDistroByName(sandbox.tenant_id, key) ?? getDistro(key);
-          if (!row || row.tenant_id !== sandbox.tenant_id) throw new Error(`no such distro: ${key}`);
+          // Yours, your tenant's, or anyone's if they published it publicly.
+          const mine = row && row.tenant_id === sandbox.tenant_id;
+          if (!row || !(mine || row.visibility === "public")) throw new Error(`no such distro: ${key}`);
           if (!row.os) throw new Error(`${row.name} is a manifest-only distro and has no OS to fork`);
 
-          const { doc: forked, bundles } = importPayload(row.os, {
+          // Your own distro is trusted: its companion servers come back enabled.
+          const { doc: forked, bundles, manifest } = importPayload(row.os, {
             name: a.keepName ? current.name : row.name,
-            distro: { id: row.id, name: row.name },
+            distro: { id: row.id, name: row.name, tenant: row.tenant_id, visibility: row.visibility ?? "tenant" },
+            trusted: mine,
           });
           for (const [id, files] of Object.entries(bundles.apps ?? {})) importBundle(sandbox, "app", id, files);
           for (const [kind, files] of Object.entries(bundles.widgets ?? {})) importBundle(sandbox, "widget", kind, files);
+          const composition = a.applyManifest === false ? null : applyPortableManifest(manifest);
           const next = saveOs(sandbox, forked, { label: `fork ${row.name}` });
+          const servers = await syncServers();
+          if (!mine) bumpDistroForks(row.id);
           return {
             ok: true,
-            distro: { id: row.id, name: row.name, builtin: false },
+            distro: { id: row.id, name: row.name, builtin: false, tenant: row.tenant_id, visibility: row.visibility ?? "tenant" },
             apps: Object.keys(bundles.apps ?? {}).length,
+            tools: Object.values(next.apps).filter((x) => x.mcp).map((x) => ({ app: x.id, server: x.mcp.name, enabled: x.mcp.enabled })),
+            ...(composition ? { composition } : {}),
+            ...(servers ? { servers } : {}),
             rev: next.rev,
           };
         },
@@ -1088,7 +1423,7 @@ export function desktopServer(deps) {
 
       distroImport: {
         description: "Install a portable payload over this machine's OS.",
-        inputSchema: obj({ payload: { type: "object" }, name: S }, ["payload"]),
+        inputSchema: obj({ payload: { type: "object" }, name: S, applyManifest: B }, ["payload"]),
         async handler(_ctx, a) {
           // A payload arrives from outside — a file someone was sent, a registry we
           // do not control. Bound it before it becomes disk.
@@ -1096,11 +1431,18 @@ export function desktopServer(deps) {
           if (size > MAX_PAYLOAD_BYTES) {
             throw new Error(`distro payload too large: ${size} bytes (max ${MAX_PAYLOAD_BYTES})`);
           }
-          const { doc: imported, bundles } = importPayload(a.payload, { name: a.name });
+          const { doc: imported, bundles, manifest } = importPayload(a.payload, { name: a.name });
           for (const [id, files] of Object.entries(bundles.apps ?? {})) importBundle(sandbox, "app", id, files);
           for (const [kind, files] of Object.entries(bundles.widgets ?? {})) importBundle(sandbox, "widget", kind, files);
+          const composition = a.applyManifest ? applyPortableManifest(manifest) : null;
           const next = saveOs(sandbox, imported, { label: "import" });
-          return { ok: true, rev: next.rev, apps: Object.keys(bundles.apps ?? {}).length };
+          await syncServers();
+          return {
+            ok: true, rev: next.rev, apps: Object.keys(bundles.apps ?? {}).length,
+            verified: !!a.payload?.integrity,
+            disabledServers: Object.values(next.apps).filter((x) => x.mcp?.entrypoint && !x.mcp.enabled).map((x) => x.id),
+            ...(composition ? { composition } : {}),
+          };
         },
       },
     },

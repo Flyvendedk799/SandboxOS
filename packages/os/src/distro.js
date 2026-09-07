@@ -9,11 +9,51 @@
 // payloads and payloads back into documents; `store.js` does the I/O and the
 // `desktop` MCP server does the authorization.
 
+import crypto from "node:crypto";
 import { normalizeDoc, defaultDoc, rid, LIMITS } from "./schema.js";
 import { BUILTIN_DISTROS, builtinApp, builtinWidget } from "./catalog.js";
 import { BUILTIN_THEMES } from "./themes.js";
 
-export const DISTRO_PAYLOAD_VERSION = 1;
+export const DISTRO_PAYLOAD_VERSION = 2;
+
+/** A content hash of one bundle — every path and every byte, in path order. */
+export function bundleHash(files) {
+  const h = crypto.createHash("sha256");
+  for (const rel of Object.keys(files ?? {}).sort()) {
+    const f = files[rel] ?? {};
+    h.update(rel).update("\0").update(f.base64 ? "b64:" : "utf8:").update(String(f.content ?? "")).update("\0");
+  }
+  return h.digest("hex");
+}
+
+/** The integrity manifest of a payload: sha256 per bundle. Verified on import,
+ *  so a distro that was edited in transit is refused rather than installed. A
+ *  stub of the Phase-6 signing story — hashes now, signatures later. */
+export function integrityOf(bundles) {
+  return {
+    algorithm: "sha256",
+    apps: Object.fromEntries(Object.entries(bundles?.apps ?? {}).map(([id, f]) => [id, bundleHash(f)])),
+    widgets: Object.fromEntries(Object.entries(bundles?.widgets ?? {}).map(([k, f]) => [k, bundleHash(f)])),
+  };
+}
+
+/** Throws when a payload's integrity block disagrees with its bundles. A payload
+ *  with no block (version 1) passes: it predates the check. */
+export function verifyIntegrity(payload) {
+  const want = payload?.integrity;
+  if (!want) return { verified: false, reason: "no integrity block" };
+  if (want.algorithm !== "sha256") throw new Error(`unsupported integrity algorithm: ${want.algorithm}`);
+  const have = integrityOf(payload.bundles);
+  for (const kind of ["apps", "widgets"]) {
+    for (const [id, hash] of Object.entries(want[kind] ?? {})) {
+      if (have[kind][id] !== hash) throw new Error(`integrity check failed for ${kind.slice(0, -1)} ${id}: bundle was modified after publish`);
+    }
+    for (const id of Object.keys(have[kind])) {
+      if (!(id in (want[kind] ?? {}))) throw new Error(`integrity check failed: ${kind.slice(0, -1)} ${id} is not in the manifest`);
+    }
+  }
+  return { verified: true };
+}
 
 /** Lay windows out in a readable cascade rather than stacking them at one point. */
 function cascade(i) {
@@ -35,6 +75,18 @@ export function docFromDistroSpec(spec, { name } = {}) {
       w: meta.window.w, h: meta.window.h, z: ++z, ws: 1, min: false, max: false, props: {},
     };
   });
+  // Custom apps a seed ships with (Workshop's volume-origin Notebook). Their
+  // files are the forker's job — see desktop.distroFork — because writing into
+  // a Cell is an authorized act, and this module holds no authority.
+  for (const a of spec.customApps ?? []) {
+    doc.apps[a.id] = { ...a, createdAt: Date.now(), updatedAt: Date.now() };
+    const meta = a.window ?? {};
+    doc.windows.push({
+      id: rid("w"), app: a.id, title: a.name, ...cascade(doc.windows.length),
+      w: meta.w ?? 420, h: meta.h ?? 300, z: ++z, ws: 1, min: false, max: false, props: {},
+    });
+    doc.shell.dock.pinned = [...new Set([...doc.shell.dock.pinned, a.id])];
+  }
   doc.zTop = z;
 
   let gy = 20;
@@ -67,18 +119,34 @@ export function firstRunDoc(name) {
  * workspace) is deliberately KEPT: a distro should hand you a machine that is
  * already arranged, not an empty desktop with the right colours.
  */
-export function exportPayload(doc, { apps = {}, widgets = {}, name, description } = {}) {
+export function exportPayload(doc, { apps = {}, widgets = {}, name, description, manifest = null, tags = [], keepNotifications = false } = {}) {
   const clean = normalizeDoc(doc);
+  const bundles = {
+    apps: pickBundles(apps, Object.keys(clean.apps)),
+    widgets: pickBundles(widgets, Object.keys(clean.widgetKinds)),
+  };
   return {
     payloadVersion: DISTRO_PAYLOAD_VERSION,
     name: name ?? clean.name,
     description: description ?? "",
+    tags: (Array.isArray(tags) ? tags : []).map((t) => String(t).toLowerCase().slice(0, 24)).filter(Boolean).slice(0, 12),
     exportedAt: Date.now(),
-    os: { ...clean, notifications: [], rev: 0 },
-    bundles: {
-      apps: pickBundles(apps, Object.keys(clean.apps)),
-      widgets: pickBundles(widgets, Object.keys(clean.widgetKinds)),
-    },
+    os: { ...clean, notifications: keepNotifications ? clean.notifications : [], rev: 0 },
+    bundles,
+    integrity: integrityOf(bundles),
+    // The Cell's composition travels beside the desktop (Wave D1): which servers
+    // are enabled and how they are configured. Secrets never do; neither do the
+    // resolved file URLs of installed marketplace servers — only their names.
+    ...(manifest ? { manifest: portableManifest(manifest) } : {}),
+  };
+}
+
+/** The part of a Sandboxfile that makes sense on another machine. */
+export function portableManifest(m) {
+  if (!m || typeof m !== "object") return null;
+  return {
+    servers: Object.fromEntries(Object.entries(m.servers ?? {}).map(([k, v]) => [k, v && typeof v === "object" ? v : {}])),
+    installed: Object.fromEntries(Object.entries(m.installedMeta ?? {}).map(([k, v]) => [k, { source: v?.source ?? null }])),
   };
 }
 
@@ -93,13 +161,22 @@ function pickBundles(map, ids) {
  * ids so two forks of the same distro never collide, and the lineage is recorded
  * so the machine can always say what it grew from.
  */
-export function importPayload(payload, { name, distro } = {}) {
+export function importPayload(payload, { name, distro, trusted = false } = {}) {
+  verifyIntegrity(payload);
   const src = payload?.os ?? payload;
   const doc = normalizeDoc(src, { name: name ?? payload?.name });
+  // Someone else's companion servers arrive switched off. A distro is a
+  // document, not a grant: the person forking it turns each server on once
+  // they have read what it does. Façades carry no code, so they stay on.
+  if (!trusted) {
+    for (const app of Object.values(doc.apps)) {
+      if (app.mcp?.entrypoint) app.mcp.enabled = false;
+    }
+  }
   doc.id = rid("os");
   doc.rev = 0;
   doc.name = (name ?? payload?.name ?? doc.name).slice(0, LIMITS.nameLen);
-  doc.distro = distro ? { id: distro.id, name: distro.name, forkedAt: Date.now() } : doc.distro;
+  doc.distro = distro ? { id: distro.id, name: distro.name, forkedAt: Date.now(), ...(distro.tenant ? { tenant: distro.tenant } : {}), ...(distro.visibility ? { visibility: distro.visibility } : {}) } : doc.distro;
   for (const w of doc.windows) w.id = rid("w");
   for (const g of doc.widgets) g.id = rid("g");
   for (const ws of doc.workspaces) ws.id = rid("ws");
@@ -109,6 +186,7 @@ export function importPayload(payload, { name, distro } = {}) {
       apps: payload?.bundles?.apps ?? {},
       widgets: payload?.bundles?.widgets ?? {},
     },
+    manifest: payload?.manifest ?? null,
   };
 }
 
@@ -117,5 +195,7 @@ export function builtinDistroList() {
   return BUILTIN_DISTROS.map((d) => ({
     id: d.id, name: d.name, description: d.description, hue: d.hue,
     theme: d.theme, apps: d.apps, widgets: d.widgets, builtin: true,
+    customApps: (d.customApps ?? []).map((a) => a.id), seedFiles: Object.keys(d.seedFiles ?? {}).length,
+    tags: ["seed"],
   }));
 }

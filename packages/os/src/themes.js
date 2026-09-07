@@ -10,6 +10,9 @@
 export const THEME_TOKENS = [
   "bg0", "bg1", "bg2", "bg3", "line", "lineLoud",
   "text", "text2", "text3", "accent", "accent2", "sand", "wall",
+  // `grain` is a number 0–0.4: how much film grain the wallpaper wears. It is
+  // compiled into `--os-grain` and painted from CSS gradients, never an image.
+  "grain",
 ];
 
 export const BUILTIN_THEMES = {
@@ -20,6 +23,7 @@ export const BUILTIN_THEMES = {
     text: "#e6edf3", text2: "#9fb0c0", text3: "#6b7f92",
     accent: "#35d6c4", accent2: "#1fb5a6", sand: "#e8c98a",
     wall: "radial-gradient(1100px 620px at 72% -12%, rgba(53,214,196,.16), transparent 60%), radial-gradient(800px 500px at 8% 108%, rgba(232,201,138,.10), transparent 60%), #070a0e",
+    grain: 0.08,
   },
   tide: {
     name: "Tide", scheme: "dark",
@@ -36,6 +40,7 @@ export const BUILTIN_THEMES = {
     text: "#f1ecfb", text2: "#c0b0d8", text3: "#8a78a6",
     accent: "#b98cff", accent2: "#8a5cf0", sand: "#5ce0b0",
     wall: "radial-gradient(900px 560px at 78% -8%, rgba(185,140,255,.24), transparent 58%), radial-gradient(760px 520px at 10% 110%, rgba(92,224,176,.16), transparent 60%), #0a0713",
+    grain: 0.12,
   },
   sunset: {
     name: "Sunset", scheme: "dark",
@@ -44,6 +49,7 @@ export const BUILTIN_THEMES = {
     text: "#fbeee8", text2: "#dcb6a6", text3: "#a97e6c",
     accent: "#ff8f5e", accent2: "#f06a3a", sand: "#ffcf7b",
     wall: "radial-gradient(1000px 600px at 74% -10%, rgba(255,143,94,.22), transparent 58%), radial-gradient(800px 520px at 6% 108%, rgba(255,207,123,.16), transparent 60%), #140a0c",
+    grain: 0.1,
   },
   sand: {
     name: "Dry Sand", scheme: "light",
@@ -90,6 +96,7 @@ export function cleanTokens(input) {
     const v = input?.[k];
     if (v == null) continue;
     if (k === "wall") { if (isWallpaper(v)) out.wall = String(v).trim(); }
+    else if (k === "grain") { const n = Number(v); if (Number.isFinite(n)) out.grain = Math.min(0.4, Math.max(0, Math.round(n * 100) / 100)); }
     else if (isColor(v)) out[k] = String(v).trim();
   }
   return out;
@@ -145,6 +152,7 @@ export function themeCss(theme, selector = ":root") {
     "--os-panel": rgba(theme.bg1, 0.97),
     "--os-chip": rgba(theme.bg3, 0.7),
     "--os-track": theme.bg3,
+    "--os-grain": String(Math.min(0.4, Math.max(0, Number(theme.grain) || 0))),
     "--os-scheme": theme.scheme === "light" ? "light" : "dark",
   };
   const body = Object.entries(v).map(([k, val]) => `  ${k}: ${val};`).join("\n");
