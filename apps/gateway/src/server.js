@@ -5,11 +5,12 @@
 // built-in http (zero deps); the documented target is Fastify/Express.
 
 import http from "node:http";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import config from "../../../packages/config/src/config.js";
+import config, { buildInfo } from "../../../packages/config/src/config.js";
 import {
   getSandboxBySlug, getPrincipal, grantsFor, resolveSession,
   createSession, revokeSession, ensureSeed, recentAudit, queryAudit,
@@ -98,10 +99,18 @@ const MIME = {
   ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf",
 };
 const mimeFor = (name) => MIME[path.extname(name).toLowerCase()] ?? "application/octet-stream";
-function sendFile(res, file) {
+/** Static assets and the OS/Studio pages: a browser may keep them, but must ask
+ *  again every time (no-cache + ETag), so a redeploy is never hidden behind a
+ *  cached module graph. Unchanged files cost a 304, not a download. */
+function sendFile(res, file, req = null) {
   try {
     const body = fs.readFileSync(file);
-    res.writeHead(200, { "Content-Type": TYPES[path.extname(file)] ?? "application/octet-stream" });
+    const etag = `"${crypto.createHash("sha1").update(body).digest("hex").slice(0, 20)}"`;
+    if (req?.headers?.["if-none-match"] === etag) { res.writeHead(304, { ETag: etag, "Cache-Control": "no-cache" }); return res.end(); }
+    res.writeHead(200, {
+      "Content-Type": TYPES[path.extname(file)] ?? "application/octet-stream",
+      "Cache-Control": "no-cache", ETag: etag, "Content-Length": body.length,
+    });
     res.end(body);
   } catch {
     res.writeHead(404).end("not found");
@@ -280,9 +289,9 @@ async function handle(req, res) {
   // browser from the same file the Kernel imports is how the shell and the server
   // can never disagree about what a tree or a preset means.
   if (top === "static" && segments[2] === "js" && segments[3] === "os" && segments[4] === "lib" && OS_SHARED.has(segments[5])) {
-    return sendFile(res, path.join(OS_SRC, segments[5]));
+    return sendFile(res, path.join(OS_SRC, segments[5]), req);
   }
-  if (top === "static") return sendFile(res, path.join(PUBLIC, ...segments.slice(2)));
+  if (top === "static") return sendFile(res, path.join(PUBLIC, ...segments.slice(2)), req);
   if (top === "favicon.ico") return sendFile(res, path.join(PUBLIC, "favicon.svg"));
 
   // Auth endpoints. Rate-limited per-IP (backlog #10) before any credential work.
@@ -346,6 +355,7 @@ async function handle(req, res) {
       tunnel: !!process.env.SANDBOXOS_TUNNEL_TOKEN,
       cellBackend: cellBackend(),
       isolationEnforced: requireIsolation(),
+      build: buildInfo(),
     });
   }
 
@@ -1200,11 +1210,11 @@ async function handle(req, res) {
   // GET /:slug/os — the full-screen OS. GET /:slug/studio — the builder.
   if (action === "os" && !segments[3] && req.method === "GET") {
     scheduler.wake(sandbox, getQuota(principal.tenant_id)).catch(() => {});
-    return sendFile(res, path.join(PUBLIC, "os.html"));
+    return sendFile(res, path.join(PUBLIC, "os.html"), req);
   }
   if (action === "studio" && !segments[3] && req.method === "GET") {
     scheduler.wake(sandbox, getQuota(principal.tenant_id)).catch(() => {});
-    return sendFile(res, path.join(PUBLIC, "studio.html"));
+    return sendFile(res, path.join(PUBLIC, "studio.html"), req);
   }
 
   // GET /:slug/os/doc — the document plus catalogs, in one round trip.
