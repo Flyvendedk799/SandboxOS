@@ -106,6 +106,36 @@ try {
   check((await page.textContent(".os-spotlight .results")).includes("Master and stack"), "spotlight offers the tree presets");
   await page.keyboard.press("Escape");
 
+  // A real shell in the Terminal window: a prompt on a pty, no tty complaint.
+  await desktop("open", { app: "terminal" });
+  await page.waitForSelector(".term-screen", { timeout: 8_000 });
+  await page.waitForTimeout(1500);
+  const termText = await page.$eval(".term-screen", (el) => el.textContent);
+  check(!/can't access tty/.test(termText), "the shell does not complain about a missing tty");
+  check(/[$#] ?$/m.test(termText.trim()) || /\$|#/.test(termText), `the shell shows a prompt (${JSON.stringify(termText.slice(-60))})`);
+  check(await page.$(".term-tab"), "the Terminal has tabs");
+
+  // Browser quick access: a service that is merely listening shows up, and one click opens it.
+  const http = await import("node:http");
+  const svc = http.createServer((_req, r) => { r.writeHead(200, { "Content-Type": "text/html" }); r.end("<h1 id=hello>hello from the cell</h1>"); });
+  await new Promise((r) => svc.listen(0, "127.0.0.1", r));
+  const svcPort = svc.address().port;
+  await desktop("open", { app: "browser" });
+  await page.waitForSelector(".browser-empty", { timeout: 8_000 });
+  await page.waitForFunction((p) => [...document.querySelectorAll(".browser-empty .app-btn")].some((b) => b.textContent.includes(`:${p}`)), svcPort, { timeout: 10_000 });
+  check(true, "a listening port appears in quick access without being exposed first");
+  await page.click(`.browser-empty .app-btn:has-text(":${svcPort} — open")`);
+  await page.waitForSelector(`.os-window iframe[title="port ${svcPort}"]`, { timeout: 8_000 });
+  await page.waitForTimeout(800);
+  const exposedNow = (await page.evaluate(async () => (await fetch(`/${location.pathname.split("/")[1]}/mcp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server: "ports", tool: "list", args: {} }) }).then((r) => r.json())).result.ports.map((p) => p.port)));
+  check(exposedNow.includes(svcPort), "one click exposed the port through ports.expose");
+  const frameOk = await page.frames().some((f) => f.url().includes(`/p/${svcPort}/`));
+  check(frameOk, "and the window shows the service through the Gateway proxy");
+  // Tidy: the service goes away, so the window pointing at it goes too.
+  for (const w of (await desktop("state")).doc.windows.filter((x) => x.app === "browser" || x.app === "terminal")) await desktop("close", { id: w.id });
+  await kernel.call({ principalId: owner.id, heldPatterns: held, server: "ports", tool: "unexpose", args: { port: svcPort } });
+  svc.close();
+
   // The terminal screen: cursor addressing, an alternate buffer, scroll regions.
   const term = await page.evaluate(async () => {
     const { createScreen } = await import("/static/js/os/ansi.js");
@@ -182,6 +212,7 @@ try {
   await studio.waitForSelector(".code-pane .ed-input", { timeout: 8_000 });
   check((await studio.$$(".code-file")).length >= 3, "the Code tab lists the starter's files");
   await studio.click(".code-file:has-text('app.css')");
+  await studio.waitForSelector(".code-tab.on .name:has-text('app.css')", { timeout: 5_000 });
   await studio.waitForTimeout(300);
   await studio.focus(".code-pane .ed-input");
   await studio.keyboard.press("Control+End");

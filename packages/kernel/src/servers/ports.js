@@ -148,7 +148,10 @@ export function portsServer(deps) {
         inputSchema: { type: "object", properties: {} },
         async handler() {
           await cell.ensureRunning();
-          // `ss` on modern distros, `netstat` on older/busybox images.
+          // `ss` on modern distros, `netstat` on older/busybox images — and when
+          // neither is installed (a minimal image, a bare container), the kernel's
+          // own table in /proc/net/tcp*, which is always there on Linux. State 0A
+          // is LISTEN; the local port is hex after the colon.
           const r = await cell.exec("ss -ltnH 2>/dev/null || netstat -ltn 2>/dev/null || true");
           const found = new Set();
           for (const line of (r.stdout ?? "").split("\n")) {
@@ -157,6 +160,16 @@ export function portsServer(deps) {
             if (m) {
               const port = Number(m[1]);
               if (port >= MIN_PORT && port <= MAX_PORT) found.add(port);
+            }
+          }
+          if (!found.size) {
+            const p = await cell.exec("cat /proc/net/tcp /proc/net/tcp6 2>/dev/null || true");
+            for (const line of (p.stdout ?? "").split("\n")) {
+              const m = line.match(/^\s*\d+:\s+[0-9A-Fa-f]+:([0-9A-Fa-f]{4})\s+[0-9A-Fa-f]+:[0-9A-Fa-f]{4}\s+0A\s/);
+              if (m) {
+                const port = parseInt(m[1], 16);
+                if (port >= MIN_PORT && port <= MAX_PORT) found.add(port);
+              }
             }
           }
           const exposed = new Set(Object.keys(exposedPorts(sandbox)).map(Number));

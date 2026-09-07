@@ -622,20 +622,38 @@ const browser = {
     let history = Array.isArray(win.props?.history) ? win.props.history.slice(-20) : [];
     const persist = () => call("windowSet", { id: win.id, props: { port, path, history } }).catch(() => {});
 
+    // Quick access: what is *listening* right now, exposed or not. One click
+    // exposes it (the same ports.expose the Console would run) and opens it —
+    // nobody should have to know what "expose" means to see their dev server.
+    let listening = [];
     async function scan() {
-      const r = await api.tryMcp("ports", "list", {});
+      const [r, sc] = await Promise.all([api.tryMcp("ports", "list", {}), api.tryMcp("ports", "scan", {})]);
       ports = r?.ports ?? [];
+      listening = (sc?.listening ?? []).filter((l) => !ports.some((p) => Number(p.port) === Number(l.port)));
       paintBar();
-      if (port && !ports.some((p) => String(p.port) === port)) note(`Port ${port} is not exposed any more. Expose it again and it comes back.`);
+      if (port && !ports.some((p) => String(p.port) === port)) note(`Port ${port} is not exposed any more. Pick it below and it comes back.`);
       else if (port) show(port, path, { record: false });
       else empty();
     }
 
+    async function quickOpen(p) {
+      const already = ports.some((x) => String(x.port) === String(p));
+      if (!already) {
+        try { await api.mcp("ports", "expose", { port: Number(p), name: `port-${p}` }); }
+        catch (e) { toastError(`Could not open port ${p}`, e); return; }
+        const r = await api.tryMcp("ports", "list", {});
+        ports = r?.ports ?? [];
+        listening = listening.filter((l) => Number(l.port) !== Number(p));
+      }
+      show(String(p), "/");
+    }
+
     function paintBar() {
       const select = h("select", null,
-        h("option", { value: "" }, ports.length ? "choose a port…" : "no ports exposed"),
-        ...ports.map((p) => h("option", { value: String(p.port), selected: String(p.port) === port }, `${p.port}${p.name ? ` · ${p.name}` : ""}`)));
-      select.addEventListener("change", () => show(select.value, "/"));
+        h("option", { value: "" }, ports.length || listening.length ? "choose a port…" : "nothing listening"),
+        ...ports.map((p) => h("option", { value: String(p.port), selected: String(p.port) === port }, `${p.port}${p.name ? ` · ${p.name}` : ""}`)),
+        ...listening.map((l) => h("option", { value: `new:${l.port}` }, `${l.port} · running now — open it`)));
+      select.addEventListener("change", () => (select.value.startsWith("new:") ? quickOpen(select.value.slice(4)) : show(select.value, "/")));
       const pathEl = h("input", { value: path, placeholder: "/", style: { flex: "1", fontFamily: "var(--mono)" }, title: "Path on the service" });
       pathEl.addEventListener("keydown", (e) => { if (e.key === "Enter") show(port, pathEl.value.trim() || "/"); });
       const hist = h("select.hist", { title: "History" }, h("option", { value: "" }, "history"),
@@ -644,16 +662,24 @@ const browser = {
       fill(bar, select, pathEl, history.length ? hist : null,
         h("button.app-btn", { onclick: () => show(port, path, { record: false }), title: "Reload" }, icon("refresh", 12)),
         h("button.app-btn", { onclick: () => port && window.open(`/${slug}/p/${port}${path}`, "_blank"), title: "Open in a tab", disabled: !port }, icon("browser", 12)),
-        h("button.app-btn", { onclick: scan, title: "Rescan ports" }, "Ports"));
+        h("button.app-btn", { onclick: scan, title: "Look for running services again" }, "Rescan"));
     }
 
     function empty() {
+      const any = ports.length || listening.length;
       fill(body, h("div.browser-empty", null,
         icon("browser", 26),
-        h("h3", ports.length ? "Pick a port" : "No ports exposed"),
-        h("p", null, "A service inside this machine is reachable once ", h("code", "ports.expose"), " declares it — in the Console: ",
-          h("code", "port expose 8080 web"), ". Then it appears here, proxied through the Gateway, WebSockets included."),
-        ports.length ? h("div.port-list", ...ports.map((p) => h("button.app-btn", { onclick: () => show(String(p.port), "/") }, `:${p.port}${p.name ? ` ${p.name}` : ""}`))) : null));
+        h("h3", any ? "Quick access" : "Nothing is listening yet"),
+        listening.length ? h("div.port-list", null,
+          h("span.dim", { style: { width: "100%", fontSize: "10.5px" } }, "Running inside this machine right now — one click opens it:"),
+          ...listening.map((l) => h("button.app-btn.primary", { onclick: () => quickOpen(l.port) }, `:${l.port} — open`))) : null,
+        ports.length ? h("div.port-list", null,
+          h("span.dim", { style: { width: "100%", fontSize: "10.5px" } }, "Already reachable:"),
+          ...ports.map((p) => h("button.app-btn", { onclick: () => show(String(p.port), "/") }, `:${p.port}${p.name ? ` ${p.name}` : ""}`))) : null,
+        h("p", null, any
+          ? "Opening a port here makes it reachable through the Gateway at this machine's address — WebSockets included, so a dev server's hot reload works."
+          : "Start something that listens on a port — a dev server, a notebook, a preview — and it shows up here as soon as it does. Nothing to configure."),
+        h("button.app-btn", { onclick: scan }, "Look again")));
     }
     function note(text) { fill(body, h("div.browser-empty", null, icon("browser", 26), h("p", text))); }
 
@@ -668,7 +694,10 @@ const browser = {
     }
 
     scan();
-    return () => {};
+    // A dev server started after the window opened should appear without a
+    // click: rescan quietly while nothing is shown.
+    const rescan = setInterval(() => { if (!port && !document.hidden) scan(); }, 6000);
+    return () => clearInterval(rescan);
   },
 };
 

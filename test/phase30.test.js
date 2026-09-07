@@ -166,3 +166,59 @@ test("an out-of-order event can never rewind the desktop (the client rule, pinne
   for (let i = 1; i < revs.length; i += 1) assert.ok(revs[i] > revs[i - 1]);
   await ok("layoutSet", { gap: 12 });
 });
+
+// ── The terminal is a terminal ──────────────────────────────────────────────
+
+import net from "node:net";
+import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
+
+const hasScript = (() => { try { execFileSync("sh", ["-c", "command -v script"], { stdio: "ignore" }); return true; } catch { return false; } })();
+
+/** A raw WebSocket client: handshake, masked frames out, unmasked frames in. */
+function wsOpen(path) {
+  const key = crypto.randomBytes(16).toString("base64");
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(port, "127.0.0.1", () => {
+      socket.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+    });
+    let buf = Buffer.alloc(0), up = false;
+    const out = [];
+    const send = (payload) => {
+      const data = Buffer.from(payload);
+      const mask = crypto.randomBytes(4);
+      const hdr = data.length < 126 ? Buffer.from([0x82, 0x80 | data.length]) : Buffer.concat([Buffer.from([0x82, 0x80 | 126]), Buffer.from([data.length >> 8, data.length & 255])]);
+      const masked = Buffer.from(data.map((b, i) => b ^ mask[i % 4]));
+      socket.write(Buffer.concat([hdr, mask, masked]));
+    };
+    socket.on("data", (c) => {
+      buf = Buffer.concat([buf, c]);
+      if (!up) { const i = buf.indexOf("\r\n\r\n"); if (i === -1) return; up = true; buf = buf.slice(i + 4); resolve({ send, text: () => Buffer.concat(out).toString("utf8"), close: () => socket.destroy() }); }
+      for (;;) {
+        if (buf.length < 2) break;
+        let len = buf[1] & 0x7f, off = 2;
+        if (len === 126) { if (buf.length < 4) break; len = buf.readUInt16BE(2); off = 4; }
+        else if (len === 127) { if (buf.length < 10) break; len = Number(buf.readBigUInt64BE(2)); off = 10; }
+        if (buf.length < off + len) break;
+        if ((buf[0] & 0x0f) === 0x2 || (buf[0] & 0x0f) === 0x1) out.push(buf.slice(off, off + len));
+        buf = buf.slice(off + len);
+      }
+    });
+    socket.on("error", reject);
+  });
+}
+
+test("the interactive shell runs on a real pty: job control on, no tty warning, resizable", { skip: !hasScript && "script(1) not installed" }, async () => {
+  const ws = await wsOpen(`/${sandbox.slug}/pty?token=${token}`);
+  await new Promise((r) => setTimeout(r, 700));
+  ws.send(Buffer.concat([Buffer.from([0x01]), Buffer.from(JSON.stringify({ type: "resize", cols: 133, rows: 41 }))]));
+  await new Promise((r) => setTimeout(r, 400));
+  ws.send("tty; stty size; echo JOBS=$-\n");
+  await new Promise((r) => setTimeout(r, 900));
+  const text = ws.text();
+  ws.close();
+  assert.ok(!/can't access tty/.test(text), `no busybox/dash tty complaint: ${JSON.stringify(text.slice(0, 200))}`);
+  assert.match(text, /\/dev\/(pts\/\d+|ttys?\d+)/, `tty(1) names a pseudo-terminal: ${JSON.stringify(text.slice(0, 300))}`);
+  assert.match(text, /41 133/, `stty size reflects the resize the client asked for: ${JSON.stringify(text.slice(-200))}`);
+  assert.match(text, /JOBS=[a-zA-Z]*m/, "the shell has job control (m in $-)");
+});

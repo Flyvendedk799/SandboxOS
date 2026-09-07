@@ -6,6 +6,7 @@
 // the Phase-0 form of the hibernate/wake lifecycle in docs/04-execution-substrate.md.
 
 import fs from "node:fs";
+import { newMarker as ptyMarker, ptyWrapper, resizeScript, cleanupScript } from "./pty.js";
 import { execFile, spawn } from "node:child_process";
 import config from "../../config/src/config.js";
 import { remoteHandle, newMarker, recordingScript } from "./handles.js";
@@ -121,20 +122,32 @@ export class DockerBackend {
   }
 
   /** Spawn an interactive shell in the container and bridge stdio via callbacks. */
+  /** Spawn an interactive shell in the container under a real pty (pty.js:
+   *  `script` inside the image; `docker exec -t` would need a TTY on our side)
+   *  and bridge stdio via callbacks. Resize is `stty` on the recorded tty. */
   async execInteractive(onData, onClose, { env = {}, cols = 80, rows = 24 } = {}) {
     await this.ensureRunning();
     const envFlags = Object.entries({ ...env, TERM: "xterm-256color", COLUMNS: String(cols), LINES: String(rows) })
       .flatMap(([k, v]) => ["-e", `${k}=${v}`]);
-    const proc = spawn("docker", ["exec", "-i", ...envFlags, this.container, "/bin/sh", "-i"], {
+    const marker = ptyMarker();
+    const proc = spawn("docker", ["exec", "-i", "-w", WORKDIR, ...envFlags, this.container, "/bin/sh", "-c", ptyWrapper("/bin/sh -i"), "sh", marker], {
       stdio: ["pipe", "pipe", "pipe"],
     });
     proc.stdout.on("data", onData);
     proc.stderr.on("data", onData);
-    proc.on("close", onClose);
+    const container = this.container;
+    const resize = (c, r) => { try { spawn("docker", ["exec", container, "/bin/sh", "-c", resizeScript(marker, c, r)], { stdio: "ignore" }); } catch { /* best effort */ } };
+    const first = setTimeout(() => resize(cols, rows), 400);
+    // Killing `docker exec` locally leaves the shell alive in the container:
+    // the cleanup script kills the recorded shell's process group in there.
+    const cleanup = () => { try { spawn("docker", ["exec", container, "/bin/sh", "-c", cleanupScript(marker)], { stdio: "ignore", detached: true }).unref(); } catch {} };
+    let closed = false;
+    proc.on("exit", () => { clearTimeout(first); cleanup(); if (!closed) { closed = true; onClose(); } });
+    proc.on("error", () => { if (!closed) { closed = true; onClose(); } });
     return {
       write(data) { try { proc.stdin.write(data); } catch {} },
-      kill()      { try { proc.kill("SIGKILL"); } catch {} },
-      resize()    { /* no-op without a real PTY */ },
+      kill()      { cleanup(); try { proc.kill("SIGKILL"); } catch {} },
+      resize,
     };
   }
 

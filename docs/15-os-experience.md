@@ -269,15 +269,20 @@ we shipped the code; delete one from the dock, write your own, and the OS does n
 notice the difference.
 
 The built-ins earned their pins in Phase 30. **Terminal** is a real PTY over the
-Gateway's `/:slug/pty` socket rendered by our own `ansi.js`, which is now a proper
-grid — cursor addressing, scroll regions, an alternate buffer — so `vim`, `htop` and
-a TUI you wrote paint; tabs are window props. **Files** has an optional second pane,
+Gateway's `/:slug/pty` socket — really a pty now: the shell runs under `script(1)`
+inside the Cell (`packages/cell/src/pty.js`), so job control is on, `docker exec`
+needs no TTY on our side, and resize is `stty` on the recorded tty. The renderer is
+our own `ansi.js`, a proper grid — cursor addressing, scroll regions, an alternate
+buffer — so `vim`, `htop` and a TUI you wrote paint; tabs are window props. An open
+terminal counts as activity, so the idle reaper does not hibernate the Cell under it. **Files** has an optional second pane,
 Tide status badges when the machine has a workspace, "Open with…" and drag-and-drop
 upload. **Notes** is a folder of notes with a Markdown preview, still nothing but
 `fs.*`. **Media** is a grid with a lightbox, plays audio and video the browser can
 play (and says when it cannot), and notices when the folder changes. **Browser**
-picks an exposed port, remembers paths in its props, and says clearly what to do when
-no port is exposed. **Console** keeps a transcript. **Observability** has load and
+has **quick access**: it scans what is listening inside the machine and opens any
+of it with one click (that click is `ports.expose` — nobody has to know the word),
+remembers ports and paths in its props, and says clearly what to do when nothing is
+listening. **Console** keeps a transcript. **Observability** has load and
 memory sparklines, recent calls, and a link into the audit explorer. **Settings** has
 a whole Desktop section — theme, motion, reduced motion, layout and tiling presets,
 gap and grid, dock, menu bar, notifications, associations — so a machine can be

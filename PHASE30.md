@@ -17,7 +17,12 @@ is written when you rotate.
 
 ## The built-ins earn their pins
 
-`ansi.js` is a real screen now: a grid with cursor addressing, scroll regions, insert
+The shell is a real pty now: it runs under `script(1)` inside the Cell, so job
+control is on and `docker exec` needs no TTY on our side; resize is `stty` on the
+recorded tty. (Before, every closed terminal tab also left its shell alive behind a
+half-open socket — fixed in the WebSocket codec.) The Browser has quick access: it
+scans what is listening inside the machine and opens it in one click, exposing the
+port on your behalf. `ansi.js` is a real screen now: a grid with cursor addressing, scroll regions, insert
 and delete, an alternate buffer, 256-colour folded to sixteen, reverse video. `vim`,
 `htop`, `less` and a TUI you wrote paint, with no dependency and no CDN. The Terminal
 grew tabs, kept in the window's props so a re-opened window has the tabs you had
