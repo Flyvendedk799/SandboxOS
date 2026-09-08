@@ -119,9 +119,15 @@ Namespaced `server.tool`. A capability pattern is `*`, `server.*`, or `server.to
 Every path is canonicalized and asserted to stay inside the Cell volume; an in-volume
 symlink pointing out is rejected, and the root cannot be deleted.
 
-**`proc`** — `exec` `list` · `start` `logs` `jobs` `stop` `forget` `signal`
+**`proc`** — `exec` `list` · `start` `logs` `jobs` `stop` `forget` `signal` ·
+`sessions` `sessionRename` `sessionKill`
 `start` supervises a process that outlives the request, with a bounded, line-buffered
-log ring. The job table is keyed per Sandbox and survives Kernel rebuilds.
+log ring. The job table is keyed per Sandbox and survives Kernel rebuilds. A command
+that could not *start* — no shell on the host — fails with `unsupported_host` and the
+missing binary named, rather than an empty stdout and exit code 1.
+The `session*` tools are the terminal sessions: a shell outlives the window it was
+opened in, so closing a Terminal detaches and `/:slug/pty?session=<id>` reattaches with
+the scrollback. Creating one needs a socket, so it happens there; ending one is a tool.
 
 **`ports`** — `expose` `unexpose` `list` `check` `scan`
 Exposure lives in the manifest, so it survives hibernate/wake and travels with a distro.
@@ -164,7 +170,13 @@ from the OS document, governed by the same authorize → route → audit path. A
 `putState` `getState` `listStates` · `fetchObjects` `receiveObjects` (the wire
 primitives a laptop daemon drives). Paths returned to callers are Sandbox-relative.
 **`mcp-registry`** — `list` `enable` `disable` `configure` `install` `uninstall`
-**`kernel`** — `whoami` `capabilities` `tools` `auditQuery` `manifestGet` `manifestSet`
+**`access`** — `list` `share` `revoke` `tokens` `mint`
+Who can reach this machine, as tools rather than as Gateway-only routes, so the desktop
+and an agent can do what Command Central and the CLI could. Sharing and minting are
+attenuated against the caller's own grants; revoking yourself is refused.
+**`kernel`** — `whoami` `capabilities` `tools` `auditQuery` (filtered: `server`,
+`tool`, `principalId`, `resultKind`, `after`, `cursor`) `auditVerify` (the hash chain)
+`manifestGet` `manifestSet`
 
 Marketplace servers appear under the name they were installed as. Their code runs
 **out of process** with no handle to the control plane; the Kernel registers a proxy, so

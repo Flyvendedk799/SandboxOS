@@ -56,20 +56,34 @@ const GIT_BASH_CANDIDATES = [
  */
 function describe(bin, kind, { source = "found" } = {}) {
   const posix = kind === "posix";
+  // A pseudo-terminal needs `script(1)` (pty.js explains why), and it has to be
+  // a *real* check: Git for Windows ships bash without script, and assuming
+  // otherwise produced a wrapper that exec'd a grandchild we could no longer
+  // reach — a shell that outlived every attempt to kill it.
+  const scriptBin = posix ? (exists(path.join(path.dirname(bin), "script")) ? path.join(path.dirname(bin), "script")
+    : exists(path.join(path.dirname(bin), "script.exe")) ? path.join(path.dirname(bin), "script.exe")
+    : which("script")) : null;
   return {
     ok: true,
     kind,
     bin,
     posix,
     source,
+    scriptBin,
     label: `${path.basename(bin)} (${kind})`,
     argv: (command) =>
       kind === "posix" ? ["-c", command]
       : kind === "powershell" ? ["-NoLogo", "-NonInteractive", "-NoProfile", "-Command", command]
       : ["/d", "/s", "/c", command],
-    // Only a POSIX shell can run the `script(1)` wrapper in pty.js. Everything
-    // else gets a line-mode terminal, and says so instead of pretending.
-    pty: posix,
+    /** The argv for an interactive shell, with or without a pty. */
+    interactiveArgv: (wrapper, marker) => (
+      posix
+        ? (scriptBin ? ["-c", wrapper, "sh", marker] : ["-i"])
+        : kind === "powershell" ? ["-NoLogo", "-NoExit", "-Command", "-"] : ["/d", "/q", "/k"]
+    ),
+    // Everything without a pty gets a line-mode terminal, and says so instead of
+    // pretending: full-screen programs and job control are not available there.
+    pty: posix && !!scriptBin,
   };
 }
 

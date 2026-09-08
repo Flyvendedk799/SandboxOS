@@ -8,6 +8,7 @@
 // is deferred to Phase 5 with a different volume strategy — see PHASE1.md.)
 
 import { getCell } from "../../cell/src/cell.js";
+import { killAllSessions } from "../../kernel/src/pty-sessions.js";
 import { getSandbox, setSandboxState, runningCountForTenant } from "../../control-db/src/registry.js";
 
 const nowMs = () => Date.now();
@@ -52,6 +53,9 @@ export class Scheduler {
   }
 
   async hibernate(sandbox) {
+    // The shells live in this process but their processes live in the Cell, so a
+    // hibernate ends both — a session pointing at a stopped Cell is a lie.
+    killAllSessions(sandbox.id);
     await getCell(sandbox).stop();
     setSandboxState(sandbox.id, "stopped");
     this.running.delete(sandbox.id);

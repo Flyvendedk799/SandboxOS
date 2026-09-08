@@ -12,6 +12,7 @@
 
 import { notifyJobEnded } from "../../../os/src/notify.js";
 import { raiseFailure } from "../../../cell/src/shell.js";
+import { listSessions, killSession, renameSession, killAllSessions } from "../pty-sessions.js";
 
 // Supervised processes, keyed by Sandbox id → job id → record. Module-level (not
 // per-server-instance) because the Kernel rebuilds its server set whenever the
@@ -72,6 +73,7 @@ export function stopAllProcs(sandboxId) {
     if (rec.state === "running") { try { rec.handle?.kill?.("SIGKILL"); killed += 1; } catch { /* already gone */ } }
   }
   _jobs.delete(sandboxId);
+  killed += killAllSessions(sandboxId);
   return killed;
 }
 
@@ -220,6 +222,43 @@ export function procServer(cell, sandbox) {
           if (rec.state === "running") throw new Error("process is still running — stop it first");
           m.delete(args.id);
           return { id: args.id, forgotten: true };
+        },
+      },
+
+      // ── terminal sessions ─────────────────────────────────────────────────
+      //
+      // A pty is a process, so it belongs here beside the supervised ones. The
+      // shell itself is created by the WebSocket that attaches to it (a terminal
+      // needs a socket); these are the tools for seeing and ending one, so an
+      // agent can answer "what shells are open on my machine" and a window can
+      // reattach to the session it left.
+
+      sessions: {
+        description: "List the terminal sessions on this Sandbox — shells that outlive the windows they were opened in.",
+        inputSchema: { type: "object", properties: {} },
+        async handler() {
+          return { sessions: listSessions(sandboxId) };
+        },
+      },
+
+      sessionRename: {
+        description: "Name a terminal session, so it is findable a day later.",
+        inputSchema: {
+          type: "object", required: ["id", "name"],
+          properties: { id: { type: "string" }, name: { type: "string" } },
+        },
+        async handler(_ctx, args) {
+          const s = renameSession(sandboxId, args.id, args.name);
+          if (!s) throw new Error(`no such session: ${args.id}`);
+          return { session: s };
+        },
+      },
+
+      sessionKill: {
+        description: "End a terminal session and the shell inside it. Closing a window does not do this.",
+        inputSchema: { type: "object", required: ["id"], properties: { id: { type: "string" } } },
+        async handler(_ctx, args) {
+          return { id: args.id, killed: killSession(sandboxId, args.id) };
         },
       },
 

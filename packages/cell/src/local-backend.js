@@ -126,9 +126,11 @@ export class LocalBackend {
     // interpolated into is shell text, and a Windows path full of backslashes
     // would be eaten by it one escape at a time.
     const interactive = toShellPath(process.env.SHELL && !isWin ? process.env.SHELL : sh.bin, sh);
-    const argv = sh.pty
-      ? ["-c", ptyWrapper(`"${interactive}" -i`, tmp), "sh", marker]
-      : sh.kind === "powershell" ? ["-NoLogo", "-NoExit", "-Command", "-"] : ["/d", "/q", "/k"];
+    // With a pty the shell runs under `script` (pty.js); without one it is our
+    // direct child in line mode — which is also the only way we can reliably end
+    // it, because a wrapper that exec's a grandchild leaves an orphan holding the
+    // pipes open long after the process we spawned is gone.
+    const argv = sh.interactiveArgv(ptyWrapper(`"${interactive}" -i`, tmp), marker);
 
     const proc = safeSpawn(sh.bin, argv, {
       cwd: this.root,
@@ -144,7 +146,7 @@ export class LocalBackend {
 
     if (!sh.pty) {
       queueMicrotask(() => onData(
-        `\x1b[2m(line mode: ${sh.label} has no pseudo-terminal — full-screen programs and job control are unavailable)\x1b[0m\r\n`,
+        `\x1b[2m(line mode: ${sh.label} has no \`script\` for a pseudo-terminal — full-screen programs and job control are unavailable)\x1b[0m\r\n`,
       ));
     }
 

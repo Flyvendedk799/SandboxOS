@@ -31,9 +31,25 @@ export function createDesktop({ root, ctx = {} }) {
 
   const design = () => !!os.design;
   const doc = () => os.doc;
-  const viewport = () => {
+
+  // The desktop may be painted smaller than it is: the Studio renders a 1440×900
+  // machine inside a 500px pane by scaling the whole screen. So there are two
+  // sizes here and they must not be confused — the *layout* size, which is the
+  // viewport the document is arranged for, and the *painted* size, which is what
+  // a pointer moves through. `offsetWidth` is the first; the bounding rect is the
+  // second; their ratio is the scale a gesture has to divide by. Deciding the
+  // phone fold on the painted size is what made the Studio show a phone.
+  const viewport = () => ({ w: Math.round(root.offsetWidth), h: Math.round(root.offsetHeight) });
+  const scaleOf = () => {
     const r = root.getBoundingClientRect();
-    return { w: Math.round(r.width), h: Math.round(r.height) };
+    const w = root.offsetWidth;
+    return w > 0 && r.width > 0 ? r.width / w : 1;
+  };
+  /** A client point in the desktop's own coordinates. */
+  const localPoint = (x, y) => {
+    const r = root.getBoundingClientRect();
+    const k = scaleOf();
+    return { x: (x - r.left) / k, y: (y - r.top) / k };
   };
 
   const snapGhost = h("div.os-snap-ghost", { hidden: true });
@@ -74,15 +90,15 @@ export function createDesktop({ root, ctx = {} }) {
   function tileBoxes(list) {
     const d = doc();
     const gap = d.wm.gap ?? 12;
-    const rect = root.getBoundingClientRect();
+    const rect = viewport();
     const ws = d.workspaces.find((w) => w.n === d.activeWorkspace);
     const tree = pruneTree(ws?.layout, list.map((w) => w.id));
-    const boxes = treeBoxes(tree, { x: 0, y: 0, w: rect.width, h: rect.height }, gap);
+    const boxes = treeBoxes(tree, { x: 0, y: 0, w: rect.w, h: rect.h }, gap);
     const out = new Map();
     for (const [id, b] of boxes) {
       out.set(id, { left: b.x, top: b.y, width: Math.max(160, b.w), height: Math.max(100, b.h) });
     }
-    return { boxes: out, sashes: treeSashes(tree, { x: 0, y: 0, w: rect.width, h: rect.height }, gap) };
+    return { boxes: out, sashes: treeSashes(tree, { x: 0, y: 0, w: rect.w, h: rect.h }, gap) };
   }
 
   // ── sashes: the grab bars between tiled siblings ───────────────────────────
@@ -104,11 +120,12 @@ export function createDesktop({ root, ctx = {} }) {
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
-    sashGesture = { s, sx: e.clientX, sy: e.clientY, ratio: s.ratio };
+    sashGesture = { s, sx: e.clientX, sy: e.clientY, ratio: s.ratio, rev: doc().rev };
     root.classList.add("sashing");
     const onMove = (ev) => {
       if (!sashGesture) return;
-      const delta = s.dir === "row" ? ev.clientX - sashGesture.sx : ev.clientY - sashGesture.sy;
+      const k = scaleOf();
+      const delta = (s.dir === "row" ? ev.clientX - sashGesture.sx : ev.clientY - sashGesture.sy) / k;
       const ratio = Math.min(0.9, Math.max(0.1, s.ratio + delta / Math.max(1, s.span)));
       sashGesture.ratio = ratio;
       // Paint locally against the document's tree: the split that separates the
@@ -124,8 +141,8 @@ export function createDesktop({ root, ctx = {} }) {
       const g = sashGesture;
       sashGesture = null;
       if (!g || Math.abs(g.ratio - s.ratio) < 0.002) return;
-      call("tile", { id: s.a, with: s.b, ratio: Math.round(g.ratio * 1000) / 1000 })
-        .catch((err) => toastError("Could not resize the split", err));
+      call("tile", { id: s.a, with: s.b, ratio: Math.round(g.ratio * 1000) / 1000, expectRev: g.rev })
+        .catch((err) => { if (err?.code !== "stale_rev") toastError("Could not resize the split", err); });
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp, { once: true });
@@ -145,7 +162,10 @@ export function createDesktop({ root, ctx = {} }) {
     return walk(tree);
   }
 
-  const isCompact = () => root.getBoundingClientRect().width < COMPACT_WIDTH;
+  // The fold is a property of the viewport the document is arranged for — not of
+  // the box the pixels landed in. A 1440px desktop scaled into a Studio pane is
+  // still a desktop (goal.md T2.1).
+  const isCompact = () => viewport().w < COMPACT_WIDTH;
 
   // ── phone chrome ───────────────────────────────────────────────────────────
   // Same document. On a narrow screen the renderer changes, the model does not:
@@ -216,12 +236,12 @@ export function createDesktop({ root, ctx = {} }) {
   root.addEventListener("touchmove", () => clearTimeout(press), { passive: true });
 
   function placeWindow(el, w, tiles, front) {
-    const rect = root.getBoundingClientRect();
+    const rect = viewport();
     // On a phone, "floating windows" is the wrong answer to a real question. The
     // document does not change — the same desktop, the same revision — but only
     // the front window is shown, full-bleed, and the dock becomes the switcher.
     if (isCompact()) {
-      Object.assign(el.style, { left: "0px", top: "0px", width: `${rect.width}px`, height: `${rect.height}px` });
+      Object.assign(el.style, { left: "0px", top: "0px", width: `${rect.w}px`, height: `${rect.h}px` });
       // Only the front window is shown, so its document z is moot here — and
       // the phone chrome (dots, shelf) must sit above it.
       el.style.zIndex = "2";
@@ -229,7 +249,7 @@ export function createDesktop({ root, ctx = {} }) {
       return;
     }
     if (w.max) {
-      Object.assign(el.style, { left: "8px", top: "8px", width: `${rect.width - 16}px`, height: `${rect.height - 16}px` });
+      Object.assign(el.style, { left: "8px", top: "8px", width: `${rect.w - 16}px`, height: `${rect.h - 16}px` });
     } else if (tiles?.has(w.id)) {
       const b = tiles.get(w.id);
       Object.assign(el.style, { left: `${b.left}px`, top: `${b.top}px`, width: `${b.width}px`, height: `${b.height}px` });
@@ -242,11 +262,12 @@ export function createDesktop({ root, ctx = {} }) {
 
   /** Which snap region a pointer at (x,y) inside the desktop is asking for. */
   function regionAt(x, y) {
-    const r = root.getBoundingClientRect();
-    const nearL = x - r.left < SNAP_EDGE;
-    const nearR = r.right - x < SNAP_EDGE;
-    const nearT = y - r.top < SNAP_EDGE;
-    const nearB = r.bottom - y < SNAP_EDGE;
+    const p = localPoint(x, y);
+    const v = viewport();
+    const nearL = p.x < SNAP_EDGE;
+    const nearR = v.w - p.x < SNAP_EDGE;
+    const nearT = p.y < SNAP_EDGE;
+    const nearB = v.h - p.y < SNAP_EDGE;
     if (nearT && nearL) return "topleft";
     if (nearT && nearR) return "topright";
     if (nearB && nearL) return "bottomleft";
@@ -436,7 +457,7 @@ export function createDesktop({ root, ctx = {} }) {
   }
 
   function placeWidget(el, g, entry) {
-    const rect = root.getBoundingClientRect();
+    const rect = viewport();
     if (isCompact()) {
       // The shelf: same element, same widget instance, stacked instead of placed.
       if (el.parentElement !== shelfBody) shelfBody.append(el);
@@ -457,7 +478,7 @@ export function createDesktop({ root, ctx = {} }) {
       try { entry?.frame?.contentWindow?.postMessage({ __sbx: 1, id: "event", type: "event", event: "visibility", detail: { visible: !hidden } }, "*"); }
       catch { /* frame gone */ }
     }
-    if (g.x > rect.width) el.style.left = `${Math.max(0, rect.width - g.w - 20)}px`;
+    if (g.x > rect.w) el.style.left = `${Math.max(0, rect.w - g.w - 20)}px`;
   }
 
   // ── gestures ──────────────────────────────────────────────────────────────
@@ -471,7 +492,11 @@ export function createDesktop({ root, ctx = {} }) {
     if (!item || (kind === "win" && item.max)) return;
     if (e.target.closest("input, textarea, select, button, a, iframe, .os-resize")) return;
 
-    gesture = { type: "move", id, kind, sx: e.clientX, sy: e.clientY, ox: item.x, oy: item.y, region: null };
+    // The gesture holds its own painted geometry and the revision it started
+    // from. Reading them back off the document at commit time meant an agent's
+    // write arriving mid-drag replaced the drag — and the shell then wrote the
+    // agent's own position back and called it a success (goal.md invariant 12).
+    gesture = { type: "move", id, kind, sx: e.clientX, sy: e.clientY, ox: item.x, oy: item.y, region: null, rev: doc().rev, at: { x: item.x, y: item.y } };
     (kind === "win" ? wins : widgets).get(id)?.el.classList.add("dragging");
     e.preventDefault();
     window.addEventListener("pointermove", onMove);
@@ -484,7 +509,7 @@ export function createDesktop({ root, ctx = {} }) {
       ? doc().windows.find((x) => x.id === id)
       : doc().widgets.find((x) => x.id === id);
     if (!item) return;
-    gesture = { type: "resize", id, kind, sx: e.clientX, sy: e.clientY, ow: item.w, oh: item.h };
+    gesture = { type: "resize", id, kind, sx: e.clientX, sy: e.clientY, ow: item.w, oh: item.h, rev: doc().rev, at: { w: item.w, h: item.h } };
     (kind === "win" ? wins : widgets).get(id)?.el.classList.add("dragging");
     e.stopPropagation();
     e.preventDefault();
@@ -499,8 +524,9 @@ export function createDesktop({ root, ctx = {} }) {
 
   function onMove(e) {
     if (!gesture) return;
-    const dx = e.clientX - gesture.sx;
-    const dy = e.clientY - gesture.sy;
+    const k = scaleOf();
+    const dx = (e.clientX - gesture.sx) / k;
+    const dy = (e.clientY - gesture.sy) / k;
 
     if (gesture.type === "move" && gesture.kind === "win") {
       gesture.region = regionAt(e.clientX, e.clientY);
@@ -516,10 +542,12 @@ export function createDesktop({ root, ctx = {} }) {
         item.y = Math.max(0, snap(gesture.oy + dy));
         if (gesture.kind === "widget") item.pin = "none";
         magnetize(item, gesture.kind);
+        gesture.at = { x: item.x, y: item.y };
       } else {
         const min = gesture.kind === "win" ? { w: 200, h: 120 } : { w: 120, h: 80 };
         item.w = Math.max(min.w, snap(gesture.ow + dx));
         item.h = Math.max(min.h, snap(gesture.oh + dy));
+        gesture.at = { w: item.w, h: item.h };
       }
     });
   }
@@ -542,18 +570,22 @@ export function createDesktop({ root, ctx = {} }) {
     }
 
     const list = g.kind === "win" ? doc().windows : doc().widgets;
-    const item = list.find((x) => x.id === g.id);
-    if (!item) return;
+    if (!list.some((x) => x.id === g.id)) return; // it was closed mid-drag
     const moved = g.type === "move"
-      ? item.x !== g.ox || item.y !== g.oy
-      : item.w !== g.ow || item.h !== g.oh;
+      ? g.at.x !== g.ox || g.at.y !== g.oy
+      : g.at.w !== g.ow || g.at.h !== g.oh;
     if (!moved) return;
 
     const tool = g.kind === "widget" ? "widgetSet" : g.type === "move" ? "move" : "resize";
     const args = g.type === "move"
-      ? { id: g.id, x: item.x, y: item.y, ...(g.kind === "widget" ? { pin: "none" } : {}) }
-      : { id: g.id, w: item.w, h: item.h };
-    call(tool, args).catch((e) => toastError("Could not save the layout", e));
+      ? { id: g.id, x: g.at.x, y: g.at.y, ...(g.kind === "widget" ? { pin: "none" } : {}) }
+      : { id: g.id, w: g.at.w, h: g.at.h };
+    // Conditional on where the gesture *began*: if the document moved under it,
+    // the Kernel refuses and the shell says so, rather than either edit
+    // disappearing quietly.
+    call(tool, { ...args, expectRev: g.rev }).catch((e) => {
+      if (e?.code !== "stale_rev") toastError("Could not save the layout", e);
+    });
   }
 
   // ── render ────────────────────────────────────────────────────────────────
@@ -561,6 +593,13 @@ export function createDesktop({ root, ctx = {} }) {
   function render() {
     const d = doc();
     if (!d) return;
+    // A document arriving mid-gesture must not erase what the pointer is doing.
+    // The gesture owns its element's geometry until it commits; the rest of the
+    // document is adopted as usual, so an agent's other changes still appear.
+    if (gesture?.at) {
+      const item = (gesture.kind === "win" ? d.windows : d.widgets).find((x) => x.id === gesture.id);
+      if (item) Object.assign(item, gesture.at);
+    }
     root.classList.toggle("design", design());
     root.classList.toggle("tiling", d.wm.mode === "tiling");
 

@@ -15,6 +15,7 @@ import {
 } from "../core.js";
 import { call, os } from "./client.js";
 import { mountTerminal } from "./terminal.js";
+import { OPS_APPS } from "./ops.js";
 
 const IMAGE = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".ico"]);
 const fileUrl = (p, download) => `/${slug}/file?path=${encodeURIComponent(p)}${download ? "&download=1" : ""}`;
@@ -809,7 +810,13 @@ const settings = {
   },
 };
 
-export const APPS = { files, terminal, console: consoleApp, notes, metrics, media, browser, settings };
+export const APPS = {
+  files, terminal, console: consoleApp, notes, metrics, media, browser, settings,
+  // The machine's own work — processes, ports, agents, secrets, sync, access, the
+  // audit log — lives in ops.js, so this file stays about the desk and that one
+  // stays about the machine.
+  ...OPS_APPS,
+};
 
 /** Mount a built-in app into a window body. Returns a stopper, or null when the
  *  id is not built in (a bundle or URL app — the window manager handles those). */

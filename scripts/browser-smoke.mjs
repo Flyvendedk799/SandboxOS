@@ -64,6 +64,22 @@ try {
   check(await page.$(".os-menubar .status"), "menubar carries real status readings");
   check(await page.$(".os-dock .dock-app"), "the dock is there");
 
+  // A window move costs a window move (goal.md T0.5). The stylesheet is linked by
+  // appearance, so ten agent moves ask for nothing; a theme change asks once.
+  let cssAsks = 0;
+  page.on("request", (r) => { if (r.url().includes("/os/theme.css")) cssAsks += 1; });
+  await page.waitForTimeout(400);
+  const movee = (await desktop("state")).doc.windows[0].id;
+  cssAsks = 0;
+  for (let i = 0; i < 10; i += 1) await desktop("move", { id: movee, x: 60 + i * 4, y: 60 });
+  await page.waitForTimeout(900);
+  check(cssAsks === 0, `ten agent moves cost no stylesheet requests (${cssAsks})`);
+  await desktop("themeSet", { theme: "aurora" });
+  await page.waitForTimeout(900);
+  check(cssAsks === 1, `and a theme change costs exactly one (${cssAsks})`);
+  await desktop("themeSet", { theme: "midnight" });
+  await page.waitForTimeout(500);
+
   await desktop("layoutSet", { mode: "tiling", preset: "master-stack" });
   await page.waitForSelector(".os-sash", { timeout: 8_000 });
   const sashes = await page.$$(".os-sash");
@@ -208,6 +224,25 @@ try {
   await studio.waitForSelector(".stx-viewport .os-window", { timeout: 10_000 });
   check(true, "the Studio boots with the live OS as its stage");
 
+  // The stage renders a *machine*, not the pane it happens to sit in: a narrow
+  // split view used to fold the desktop into a phone, which is the wrong answer
+  // to "design my desktop" (goal.md T2.1).
+  const staged = await studio.$eval(".stx-viewport .os-screen", (el) => ({
+    w: el.offsetWidth, painted: Math.round(el.getBoundingClientRect().width),
+  }));
+  check(staged.w >= 1440, `the stage is a desktop-sized viewport (${staged.w}px)`);
+  check(staged.painted < staged.w, `and it is scaled to fit the pane (${staged.painted}px painted)`);
+  check(!(await studio.$eval(".stx-viewport .os-desktop", (el) => el.classList.contains("compact"))),
+    "so the builder is not showing a phone");
+  check((await studio.$$(".stx-viewport .os-window:not([hidden])")).length >= 2,
+    "every window on the workspace is visible on the stage");
+  await studio.click(".stx-stage-bar .seg:has-text('Phone')");
+  await studio.waitForTimeout(600);
+  check(await studio.$eval(".stx-viewport .os-desktop", (el) => el.classList.contains("compact")),
+    "and the Phone preset renders the fold on purpose");
+  await studio.click(".stx-stage-bar .seg:has-text('Desktop')");
+  await studio.waitForTimeout(600);
+
   await studio.click(".stx-tabs .seg:has-text('Code')");
   await studio.waitForSelector(".code-pane .ed-input", { timeout: 8_000 });
   check((await studio.$$(".code-file")).length >= 3, "the Code tab lists the starter's files");
@@ -234,7 +269,12 @@ try {
 
   await studio.click(".stx-tabs .seg:has-text('Theme')");
   await studio.waitForSelector(".token-row", { timeout: 5_000 });
-  check((await studio.$$(".token-row")).length === 12, "the theme studio edits every colour token");
+  // Every colour token the compiler emits, including the status colours a job
+  // list and an audit row are painted with — the panel follows THEME_TOKENS
+  // rather than a hardcoded list, so this counts what the grammar has.
+  const tokenRows = await studio.$$eval(".token-row", (els) => els.map((e) => e.textContent.trim().split(/\s+/)[0]));
+  check(tokenRows.length >= 15, `the theme studio edits every colour token (${tokenRows.length})`);
+  check(["ok", "warn", "err"].every((t) => tokenRows.some((r) => r.startsWith(t))), "including the status colours");
   check(await studio.$(".wall-builder"), "and has a wallpaper builder");
 
   await studio.click(".stx-tabs .seg:has-text('Motion')");

@@ -52,6 +52,7 @@ import { runCommand } from "../../../packages/command-central/src/console.js";
 import { runTurn, renderTranscript } from "../../../packages/assistant/src/assistant.js";
 import { Scheduler } from "../../../packages/scheduler/src/scheduler.js";
 import { upgradeWebSocket } from "../../../packages/pty/src/index.js";
+import { attachSession } from "../../../packages/kernel/src/pty-sessions.js";
 
 /** The host's single Cell Scheduler (wake/hibernate/budget). Exported for the
  *  Gateway's background loops (idle reaper + cron tick) in index.js. */
@@ -1530,11 +1531,22 @@ async function handleUpgrade(req, socket, head) {
   const kernel = await getKernel(sandbox);
   scheduler.wake(sandbox, getQuota(principal.tenant_id)).catch(() => {});
 
-  const shell = await kernel.cell.execInteractive(
+  // A terminal is a session, not a socket: this attaches (replaying the
+  // scrollback) or creates, and closing the tab detaches rather than kills.
+  const want = {
+    id: url.searchParams.get("session") || null,
+    name: url.searchParams.get("name") || null,
+    cols: Number(url.searchParams.get("cols")) || 80,
+    rows: Number(url.searchParams.get("rows")) || 24,
+  };
+  const shell = attachSession(
+    kernel.cell, sandbox.id, want,
     (data) => ws.send(Buffer.isBuffer(data) ? data : Buffer.from(data)),
     () => ws.close(),
-    { cols: 80, rows: 24 },
   );
+  // Tell the client which session it is looking at, so a reopened window can ask
+  // for the same one. SOH-prefixed JSON, the same channel resize arrives on.
+  ws.send(Buffer.concat([Buffer.from([0x01]), Buffer.from(JSON.stringify({ type: "session", id: shell.id, name: shell.name }))]));
 
   // An open terminal is activity. Without this the idle reaper hibernates the
   // Cell under a shell someone is looking at, and the session "just ends".
@@ -1549,13 +1561,15 @@ async function handleUpgrade(req, socket, head) {
       try {
         const ctrl = JSON.parse(buf.slice(1).toString("utf8"));
         if (ctrl.type === "resize") shell.resize(ctrl.cols || 80, ctrl.rows || 24);
+        // "Kill" is a decision, and it is not the same as closing a window.
+        if (ctrl.type === "kill") shell.kill();
       } catch {}
       return;
     }
     shell.write(buf);
   });
 
-  ws.on("close", () => { clearInterval(keepAwake); shell.kill(); });
+  ws.on("close", () => { clearInterval(keepAwake); shell.detach(); });
 }
 
 export function createServer() {

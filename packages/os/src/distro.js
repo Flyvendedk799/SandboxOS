@@ -65,7 +65,9 @@ export function docFromDistroSpec(spec, { name } = {}) {
   const doc = defaultDoc(name ?? spec.name ?? "untitled-os");
   doc.theme.base = BUILTIN_THEMES[spec.theme] ? spec.theme : doc.theme.base;
   doc.distro = { id: spec.id, name: spec.name, forkedAt: Date.now() };
-  doc.shell.dock.pinned = [...new Set([...(spec.apps ?? []), "settings"])];
+  // A seed can pin more than it opens: the machine's own tools belong within
+  // reach whether or not a window for them is on screen at first run.
+  doc.shell.dock.pinned = [...new Set([...(spec.dock ?? spec.apps ?? []), "settings"])];
 
   let z = 10;
   doc.windows = (spec.apps ?? []).filter(builtinApp).map((appId, i) => {

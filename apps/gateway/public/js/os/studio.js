@@ -137,6 +137,11 @@ const palette = createStudioPalette({
     ...builder.paletteActions(),
     { name: "Design mode", sub: "Stage", icon: "layers", run: () => { stageMode = "design"; os.design = true; paint(); } },
     { name: "Preview mode", sub: "Stage", icon: "eye", run: () => { stageMode = "preview"; os.design = false; select(null, null); paint(); } },
+    ...DEVICES.map((dev) => ({
+      name: dev.w ? `Render at ${dev.name} (${dev.w}×${dev.h})` : "Render at pane size",
+      sub: "Stage", icon: "window",
+      run: () => { device = dev.id; persist(); applyDevice(); paint(); },
+    })),
     { name: "Split view", sub: "Studio", icon: "window", run: () => { view = "split"; persist(); layout(); } },
     { name: "Builder only", sub: "Studio", icon: "window", run: () => { view = "builder"; persist(); layout(); } },
     { name: "OS only", sub: "Studio", icon: "window", run: () => { view = "os"; persist(); layout(); } },
@@ -166,14 +171,64 @@ function renderStageBar() {
       onclick: () => call("workspaceSwitch", { n: w.n }),
     }, String(w.n))),
     h("button.ws-add", { title: "New workspace", onclick: () => call("workspaceAdd", {}) }, icon("plus", 12)),
+    h("span.stx-div"),
+    h("div.seg-group", null, ...DEVICES.map((dev) => seg(dev.name, device === dev.id, () => {
+      device = dev.id;
+      persist();
+      applyDevice();
+      paint();
+    }))),
     h("span.spacer"),
     h("button.seg", { title: "Arrange in a grid", onclick: () => call("arrange", { preset: "grid", viewport: screen.viewport() }) }, "Arrange"),
     stageBadge,
   );
-  stageBadge.textContent = `${stageMode} · ${d.wm.mode} · ws ${d.activeWorkspace} · r${d.rev}`;
+  const dev = deviceOf();
+  const size = dev.w ? `${dev.w}×${dev.h}${stageScale < 0.995 ? ` · ${Math.round(stageScale * 100)}%` : ""}` : "fit";
+  stageBadge.textContent = `${stageMode} · ${size} · ${d.wm.mode} · ws ${d.activeWorkspace} · r${d.rev}`;
 }
 
 /** Rebuild the row of panels for the current view. */
+// ── the stage renders a machine, not a pane ─────────────────────────────────
+//
+// The fold to a phone belongs to the viewport a document is arranged for, and the
+// Studio's stage is a few hundred pixels wide on a laptop. Rendering the desktop
+// at pane size meant the builder showed a phone — one window, a widget shelf, no
+// sashes — which is the wrong answer to "design my desktop" (goal.md T2.1). So
+// the stage picks a device, renders the screen at that size, and scales the whole
+// thing down to fit. The document does not change; the pixels do.
+
+const DEVICES = [
+  { id: "desktop", name: "Desktop", w: 1440, h: 900 },
+  { id: "tablet", name: "Tablet", w: 1024, h: 768 },
+  { id: "phone", name: "Phone", w: 390, h: 780 },
+  { id: "fit", name: "Fit", w: null, h: null }, // the pane itself, whatever it is
+];
+let device = localStorage.getItem("sbx.studio.device") ?? "desktop";
+const deviceOf = () => DEVICES.find((d) => d.id === device) ?? DEVICES[0];
+let stageScale = 1;
+
+function applyDevice() {
+  const dev = deviceOf();
+  const el = screen.el;
+  if (!dev.w) {
+    el.classList.remove("staged");
+    el.style.width = el.style.height = el.style.transform = "";
+    stageScale = 1;
+  } else {
+    const pane = viewport.getBoundingClientRect();
+    const pad = 28; // the viewport's own padding, both sides
+    stageScale = Math.min(1, Math.min((pane.width - pad) / dev.w, (pane.height - pad) / dev.h));
+    el.classList.add("staged");
+    el.style.width = `${dev.w}px`;
+    el.style.height = `${dev.h}px`;
+    el.style.transform = `translate(-50%, -50%) scale(${stageScale})`;
+  }
+  if (stageBadge.isConnected) renderStageBar();
+}
+
+// The pane changes size when the builder's sash moves and when the window does.
+new ResizeObserver(() => applyDevice()).observe(viewport);
+
 function layout() {
   fill(body,
     rail,
@@ -183,6 +238,7 @@ function layout() {
     view !== "os" ? inspector.el : null,
     agentOpen ? agent.el : null,
   );
+  applyDevice();
   paint();
 }
 
@@ -199,6 +255,7 @@ function paint() {
 function persist() {
   localStorage.setItem("sbx.studio.view", view);
   localStorage.setItem("sbx.studio.agent", agentOpen ? "1" : "0");
+  localStorage.setItem("sbx.studio.device", device);
 }
 
 async function publish() {

@@ -101,7 +101,7 @@ renderer, not the document.
 ### Where it lives, and why it is not in the volume
 
 `<home>/sandboxes/<id>/os/os.json`, a **sibling** of the Cell volume — with
-`history.json` and the app bundles beside it. Deliberately outside the volume: the
+`history/` (one file per revision plus a small index) and the app bundles beside it. Deliberately outside the volume: the
 volume is the Cell's own filesystem, and anything a process inside the sandbox can
 rewrite at will is the wrong place to keep the code that renders the *trusted*
 desktop. (An app can opt into the other posture — `origin: "volume"` — and the
@@ -279,7 +279,7 @@ An app id resolves to one descriptor shape whatever kind it is:
 
 | kind | what it is |
 |---|---|
-| `builtin` | drawn by code we shipped — Files, Terminal, Console, Notes, Assistant, Observability, Media, Browser, Settings, Studio |
+| `builtin` | drawn by code we shipped — Files, Terminal, Console, Notes, Assistant, Observability, Media, Browser, Settings, Studio, and the machine's own work: Jobs, Ports, Agents, Secrets, Sync, Access, Audit |
 | `bundle` | HTML/CSS/JS the user or their agent wrote, served by this machine |
 | `url` | a service somewhere else (typically an exposed port) |
 | `alias` | another app under a different name — `open` resolves it, the window wears the alias's title |
@@ -316,6 +316,48 @@ hidden.
 document. Files honours it on double-click, "Open with…" can change it, Spotlight
 uses it, the Studio's app settings can claim extensions, and `desktop.associate` is
 the tool.
+
+### The machine's own work (Phase 32)
+
+Until Phase 32 the desktop could not do half of what Command Central could: starting a
+dev server, exposing it, watching its logs, sharing the machine and reading the audit
+trail all meant leaving the OS for a console. Seven built-ins close that, and they are
+ordinary apps — same descriptor, same `needs`, same Kernel, no private channel
+(`apps/gateway/public/js/os/ops.js`):
+
+| app | what it is a client of |
+|---|---|
+| **Jobs** | `proc.*` and `cron.*`: supervised processes, a live log tail you can filter, restart, stop, forget; the shells on the machine; and the schedule of tool calls the scheduler will make on your behalf |
+| **Ports** | `ports.*`: what is listening inside the machine, what the Gateway serves, expose/unexpose, preview, copy the URL, check |
+| **Agents** | `agents.*`: spawn with an explicit capability set, watch the transcript, inspect the result, kill |
+| **Secrets** | `secrets.*`: reference-only handling, and "use in a command" that returns the output but never the value |
+| **Sync** | `tide.*`: workspaces, working-tree changes, marks, per-mark diffs, restore |
+| **Access** | `access.*`: who can reach this machine, sharing attenuated against your own grants, machine tokens shown exactly once |
+| **Audit** | `kernel.auditQuery` / `auditVerify`: every call in order, filtered by server, tool and result, with the hash chain checkable from the window |
+
+They all wear one shape — a list of things on the left, the thing you picked on the
+right — because they answer the same kind of question, and each one says when a reading
+is *unavailable* rather than showing a plausible zero: a port scan that could not look
+says so, a job whose shell never started says "never started" instead of "failed".
+
+### A terminal is a session, not a socket
+
+A pty used to belong to a WebSocket: closing the window killed the shell, so "close this"
+and "kill my build" were the same gesture. Sessions live in
+`packages/kernel/src/pty-sessions.js` now — the Cell holds the process, the host holds a
+bounded scrollback (256 KB) and the list of watchers, and a socket is one of them
+arriving and leaving:
+
+- `/:slug/pty?session=<id>` attaches to an existing session and replays its scrollback;
+  without one it creates a session and tells the client its id on the control channel.
+- A Terminal tab remembers its session id in the window's props, so a reopened window
+  reattaches: same shell, same output, the build still running.
+- Closing a tab or a window **detaches**. Ending a shell is a named gesture (the tab's
+  menu, or `proc.sessionKill`), and it asks first.
+- `proc.sessions` lists them for anyone — you, another window, an agent — and Jobs shows
+  them beside the supervised processes, because a shell is a process too.
+- Sessions end when the Cell hibernates, when the host shuts down, or after six hours
+  with nobody watching. A session pointing at a stopped Cell would be a lie.
 
 ### Writing an app
 
@@ -431,6 +473,17 @@ Design mode adds selection (shift-click for several), alignment guides, arrow-ke
 nudges and the grid; Preview mode takes them away. `⌘⇧P` is the Studio's own palette.
 The builder's width, tab and code target persist in the browser — chrome, not desktop
 truth.
+
+**The stage renders a machine, not a pane.** The phone fold is a property of the
+viewport a document is arranged *for*, and the split view's stage is a few hundred
+pixels wide on a laptop — so until Phase 32 the builder showed a phone: one window, a
+widget shelf, no sashes, which is the wrong answer to "design my desktop". The stage
+now picks a device (Desktop 1440×900, Tablet, Phone, or Fit-the-pane), renders the
+screen at that size and scales it to fit, with the scale shown in the badge. Nothing
+about the document changes; the window manager reads its *layout* size (`offsetWidth`)
+and divides pointer deltas by the paint scale, so sashes, snapping, multi-select and
+design mode all work at 35% as well as at 100% — and switching to Phone renders the
+fold on purpose, which is how you check it.
 
 ---
 

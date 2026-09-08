@@ -15,6 +15,12 @@
    stands alone so the OS can be served without Command Central's stylesheet.
    ========================================================================== */
 
+/* `hidden` means hidden. Several components here set `display` on a class, which
+   out-specifies the attribute's default rule — and a shelf that is hidden in the
+   document but painted on screen is exactly the kind of quiet lie this OS is not
+   supposed to tell. */
+[hidden] { display: none !important; }
+
 :root {
   /* Studio chrome — fixed */
   --stx-bg-0: #080b0f;
@@ -256,7 +262,14 @@ a { color: var(--stx-accent); }
 .stx-stage-bar {
   display: flex; align-items: center; gap: 10px; height: 40px; flex: none; padding: 0 12px;
   background: #0b0f14; border-bottom: 1px solid var(--stx-line);
+  /* The bar carries more than a narrow stage can hold; it scrolls inside itself
+     rather than spilling its controls under the inspector, where they were
+     visible but unclickable. */
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
 }
+.stx-stage-bar::-webkit-scrollbar { height: 0; }
+.stx-stage-bar > * { flex: none; }
+.stx-stage-bar > .spacer { flex: 1 1 auto; min-width: 8px; }
 .ws-btn {
   width: 26px; height: 24px; border: 0; border-radius: 6px;
   font-size: 11px; font-weight: 600; background: transparent; color: var(--stx-text-2);
@@ -269,10 +282,16 @@ a { color: var(--stx-accent); }
 }
 .stage-badge { font-size: 11px; color: var(--stx-text-3); font-family: var(--mono); }
 
-.stx-viewport { flex: 1; min-height: 0; padding: 14px; overflow: hidden; display: flex; }
+.stx-viewport { flex: 1; min-height: 0; padding: 14px; overflow: hidden; display: flex; position: relative; }
 .stx-viewport > .os-screen {
   border-radius: 14px; border: 1px solid var(--stx-line);
   box-shadow: 0 30px 80px rgba(0, 0, 0, .5);
+}
+/* A staged screen renders at the device's size and is scaled to fit the pane, so
+   the window manager is arranging a real viewport rather than a narrow column. */
+.stx-viewport > .os-screen.staged {
+  position: absolute; left: 50%; top: 50%; transform-origin: center center;
+  flex: none;
 }
 
 /* ── Inspector ───────────────────────────────────────────────────────────── */
@@ -1182,3 +1201,64 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
 .spark-label a { color: var(--os-accent); text-decoration: none; text-transform: none; letter-spacing: 0; font-weight: 600; }
 .spark.mem i { background: var(--os-sand); }
 .metrics-foot { padding: 6px 12px 10px; font-size: 11px; color: var(--os-text-3); }
+
+/* ── Ops apps: Jobs, Ports, Agents, Secrets, Sync, Access, Audit ─────────────
+   The machine's own work (ops.js). One shape for all seven — a list of things on
+   the left, the thing you picked on the right — because they answer the same kind
+   of question and should not each invent a layout. */
+
+.app-body.ops-split { display: flex; overflow: hidden; }
+.ops-list { width: 260px; flex: none; border-right: 1px solid var(--os-line); overflow: auto; padding-bottom: 8px; }
+.ops-list.wide { width: 320px; }
+.ops-pane { flex: 1; min-width: 0; overflow: auto; display: flex; flex-direction: column; }
+
+.ops-head {
+  padding: 9px 10px 4px; font-size: 9.5px; font-weight: 700; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--os-text-3);
+}
+.ops-none { padding: 4px 10px 8px; font-size: 11px; }
+
+.ops-pane-head {
+  display: flex; align-items: center; gap: 9px; padding: 8px 12px; flex: none;
+  border-bottom: 1px solid var(--os-line); font-size: 11.5px;
+}
+.ops-pane-head .spacer { flex: 1; }
+
+.ops-pill {
+  padding: 1px 6px; border-radius: 999px; font-size: 9.5px; font-weight: 700;
+  background: var(--os-chip); color: var(--os-text-3); white-space: nowrap;
+}
+.ops-pill.ok { background: color-mix(in srgb, var(--os-ok) 22%, transparent); color: var(--os-ok); }
+.ops-pill.warn { background: var(--os-accent-dim); color: var(--os-accent); }
+.ops-pill.err { background: color-mix(in srgb, var(--os-err) 22%, transparent); color: var(--os-err); }
+
+.ops-search {
+  height: 22px; min-width: 90px; padding: 0 7px; border: 1px solid var(--os-line);
+  border-radius: 6px; background: var(--os-bg-1); color: var(--os-text);
+  font-size: 11px; font-family: inherit;
+}
+
+.ops-log { flex: 1; min-height: 0; overflow: auto; padding: 6px 0 10px; }
+.ops-line { display: flex; gap: 8px; padding: 1px 12px; font-family: var(--mono); font-size: 11px; line-height: 1.55; }
+.ops-line .t { color: var(--os-text-3); flex: none; }
+.ops-line .m { color: var(--os-text-2); white-space: pre-wrap; word-break: break-word; }
+.ops-line.err .m { color: var(--os-err); }
+
+.ops-out {
+  margin: 0; padding: 10px 12px; overflow: auto; font-family: var(--mono); font-size: 11px;
+  line-height: 1.6; color: var(--os-text-2); white-space: pre-wrap; word-break: break-word;
+}
+.ops-out.select { user-select: all; color: var(--os-text); }
+
+.ops-error {
+  display: flex; align-items: flex-start; gap: 8px; margin: 8px 10px; padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--os-err) 40%, var(--os-line));
+  border-radius: 8px; background: color-mix(in srgb, var(--os-err) 12%, transparent);
+  color: var(--os-err); font-size: 11px; line-height: 1.5;
+}
+.ops-error svg { flex: none; margin-top: 1px; }
+
+@media (max-width: 720px) {
+  .app-body.ops-split { flex-direction: column; }
+  .ops-list, .ops-list.wide { width: auto; max-height: 45%; border-right: 0; border-bottom: 1px solid var(--os-line); }
+}

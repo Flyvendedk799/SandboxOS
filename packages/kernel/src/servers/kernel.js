@@ -5,7 +5,7 @@
 // own machine within its capabilities. Tool names are dotless (whoami, capabilities,
 // auditQuery, manifestGet, manifestSet) to fit the "<server>.<tool>" address grammar.
 
-import { getPrincipal, grantsFor, recentAudit } from "../../../control-db/src/registry.js";
+import { getPrincipal, grantsFor, queryAudit, verifyAuditChain } from "../../../control-db/src/registry.js";
 import { loadManifest, saveManifest } from "../../../manifest/src/manifest.js";
 
 export function kernelServer(deps) {
@@ -36,15 +36,40 @@ export function kernelServer(deps) {
         },
       },
       auditQuery: {
-        description: "Recent audit events for this Sandbox.",
+        description: "Audit events for this Sandbox, filtered. Every call the machine has served — by whom, with what capability, and what it answered.",
         inputSchema: {
           type: "object",
-          properties: { limit: { type: "number" }, resultKind: { type: "string" } },
+          properties: {
+            limit: { type: "number" },
+            resultKind: { type: "string", description: "ok | error | denied" },
+            server: { type: "string" },
+            tool: { type: "string" },
+            principalId: { type: "string" },
+            after: { type: "number", description: "Only events newer than this epoch-ms." },
+            cursor: { type: "number", description: "Forward pagination from an event id." },
+          },
         },
         async handler(_ctx, a) {
-          let rows = recentAudit(sandbox.id, a.limit ?? 50);
-          if (a.resultKind) rows = rows.filter((r) => r.result_kind === a.resultKind);
-          return { events: rows };
+          // The store can filter in SQL; doing it here would page in a whole log
+          // to throw most of it away, and would silently cap what a filter finds.
+          const events = queryAudit(sandbox.id, {
+            server: a.server || undefined,
+            tool: a.tool || undefined,
+            principalId: a.principalId || undefined,
+            resultKind: a.resultKind || undefined,
+            after: a.after != null ? Number(a.after) : undefined,
+            cursor: a.cursor != null ? Number(a.cursor) : undefined,
+            limit: a.limit ?? 50,
+          });
+          return { events, nextCursor: events.length ? events.at(-1).id : null };
+        },
+      },
+
+      auditVerify: {
+        description: "Verify the audit log's hash chain. Tamper-evidence is only assurance if it is actually checked.",
+        inputSchema: { type: "object", properties: {} },
+        async handler() {
+          return verifyAuditChain();
         },
       },
       manifestGet: {

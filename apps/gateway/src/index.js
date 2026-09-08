@@ -11,6 +11,7 @@ import { seedVolume } from "../../../packages/cell/src/seed.js";
 import { cronTick } from "../../../packages/scheduler/src/cron-runner.js";
 import { createServer, scheduler } from "./server.js";
 import { stopAllProcsEverywhere } from "../../../packages/kernel/src/servers/proc.js";
+import { killAllSessionsEverywhere, reapIdleSessions } from "../../../packages/kernel/src/pty-sessions.js";
 import { killAllHosted } from "../../../packages/kernel/src/marketplace-pool.js";
 
 // Say what is wrong at the top, once, before anything else can fail obscurely.
@@ -63,6 +64,7 @@ try {
 // and purge expired session/machine tokens so stale credential rows don't accumulate (backlog #2).
 setInterval(() => cronTick().catch((e) => console.error("cron:", e.message)), 1000).unref();
 setInterval(() => scheduler.reapIdle().catch((e) => console.error("reaper:", e.message)), 30_000).unref();
+setInterval(() => { try { reapIdleSessions(); } catch (e) { console.error("pty reaper:", e.message); } }, 5 * 60_000).unref();
 setInterval(() => { try { purgeExpiredSessions(); } catch (e) { console.error("session purge:", e.message); } }, 60 * 60_000).unref();
 
 /** Shut down cleanly: supervised processes and marketplace servers are children of
@@ -73,6 +75,7 @@ function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   const procs = stopAllProcsEverywhere();
+  killAllSessionsEverywhere();
   killAllHosted();
   if (procs) console.log(`\nstopped ${procs} supervised process${procs === 1 ? "" : "es"}`);
   if (signal) process.exit(0);
