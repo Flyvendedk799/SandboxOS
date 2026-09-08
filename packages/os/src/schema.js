@@ -29,6 +29,10 @@ export const LIMITS = {
   themes: 48,
   animations: 48,
   notifications: 60,
+  // A proposal is a change waiting to be reviewed. A few at a time: they are a
+  // conversation, not a queue, and they cost document bytes.
+  proposals: 8,
+  proposalOps: 24,
   history: 40,
   nameLen: 64,
   titleLen: 120,
@@ -92,6 +96,7 @@ export function defaultDoc(name = "untitled-os") {
     apps: {},         // custom app definitions, keyed by id
     widgetKinds: {},  // custom widget definitions, keyed by kind
     notifications: [],
+    proposals: [],    // changes proposed for review (goal.md T2.3)
   };
 }
 
@@ -166,6 +171,10 @@ export function normApp(a) {
     hue: typeof a.hue === "string" && HUE_RE.test(a.hue) ? a.hue : "#35d6c4",
     description: str(a.description, 300),
     permissions: cleanPatterns(a.permissions),
+    // Suspended: no capability session is minted for it (goal.md T3.1). It is a
+    // property of the app, so it survives a reload and travels with a distro —
+    // a suspended app arriving from a stranger stays suspended.
+    ...(a.suspended ? { suspended: true } : {}),
     window: {
       w: num(a.window?.w, 180, 6000, 420),
       h: num(a.window?.h, 120, 6000, 300),
@@ -239,6 +248,7 @@ export function normWidgetKind(w) {
     icon: str(w.icon, 40, "apps"),
     description: str(w.description, 300),
     permissions: cleanPatterns(w.permissions),
+    ...(w.suspended ? { suspended: true } : {}),
     entry: safeRelPath(w.entry) ?? "index.html",
     origin,
     size: { w: num(w.size?.w, 80, 3000, 220), h: num(w.size?.h, 60, 3000, 150) },
@@ -276,6 +286,36 @@ export function cleanAssociations(map) {
     out[key] = app;
   }
   return out;
+}
+
+/**
+ * A proposal: a change someone (usually an agent) wants to make, held for review
+ * instead of applied (goal.md T2.3).
+ *
+ * It is a document object rather than client-side theatre, so it survives a
+ * reload, appears in a second tab, is revertible like everything else, and can be
+ * applied by whoever is actually looking at it. The ops are `desktop.*` calls —
+ * names only, arguments as plain data; applying one runs them through the very
+ * same tools, so a proposal can never do something a caller could not.
+ */
+function normProposal(p) {
+  if (!p || typeof p !== "object") return null;
+  const ops = (Array.isArray(p.ops) ? p.ops : [])
+    .slice(0, LIMITS.proposalOps)
+    .map((op) => {
+      const tool = str(op?.tool, 48);
+      if (!/^[a-zA-Z][a-zA-Z0-9]{1,47}$/.test(tool)) return null;
+      return { tool, args: plainProps(op?.args) };
+    })
+    .filter(Boolean);
+  if (!ops.length) return null;
+  return {
+    id: isId(p.id) ? p.id : rid("prop"),
+    label: str(p.label, LIMITS.titleLen, "proposed change"),
+    by: str(p.by, 64, "agent"),
+    createdAt: num(p.createdAt, 0, Number.MAX_SAFE_INTEGER, Date.now()),
+    ops,
+  };
 }
 
 function normNotification(n) {
@@ -440,6 +480,9 @@ export function normalizeDoc(input, { name } = {}) {
 
   doc.notifications = (Array.isArray(input.notifications) ? input.notifications : [])
     .slice(-LIMITS.notifications).map(normNotification).filter(Boolean);
+
+  doc.proposals = (Array.isArray(input.proposals) ? input.proposals : [])
+    .slice(-LIMITS.proposals).map(normProposal).filter(Boolean);
 
   return doc;
 }

@@ -10,7 +10,7 @@
 // speed and writes a single `desktop.move` on release — sixty writes per drag
 // would be sixty audit rows describing one intention.
 
-import { h, fill, icon, toastError } from "../core.js";
+import { h, fill, icon, api, dialog, toast, toastError } from "../core.js";
 import { os, call, localPatch, select, appMeta, widgetMeta, onOs } from "./client.js";
 import { mountApp } from "./builtins.js";
 import { mountWidget } from "./widgets.js";
@@ -351,6 +351,55 @@ export function createDesktop({ root, ctx = {} }) {
     return { body, frame, stop: () => destroyFrame(frame) };
   }
 
+  /**
+   * The capability ledger for one app: what it declared, what it was granted,
+   * what was withheld, and what it has actually called — read from the audit log
+   * rather than from anything the app told us.
+   */
+  async function showLedger(meta) {
+    let led;
+    try { led = await api.mcp("desktop", "appLedger", { id: meta.id, limit: 40 }); }
+    catch (e) { toastError("Could not read the ledger", e); return; }
+    const row = (k, v) => h("div.kv", null, h("span.k", k), h("span.v", v));
+    const patterns = (list, cls = "") => (list.length
+      ? h("span.v.mono", { class: cls }, list.join(", "))
+      : h("span.v.dim", "none"));
+    const got = await dialog({
+      title: `${meta.name} — what it may do`,
+      wide: true,
+      confirmLabel: led.suspended ? "Restore it" : "Suspend it",
+      danger: !led.suspended,
+      render: () => h("div.ledger", null,
+        row("Declared", patterns(led.declared)),
+        row("Granted", patterns(led.granted, "ok")),
+        row("Withheld", patterns(led.withheld, "warn")),
+        row("Sessions", h("span.v", led.principals.length
+          ? `${led.principals.length} minted, ${led.principals.filter((p) => p.live).length} live`
+          : "none yet")),
+        row("Calls", h("span.v", Object.entries(led.counts).map(([k, n]) => `${n} ${k}`).join(" · ") || "none yet")),
+        led.suspended ? h("div.ops-error", null, icon("shield", 13), h("span", led.note)) : null,
+        h("div.ops-head", "Recent calls"),
+        h("div.ledger-calls", null, ...(led.calls.length
+          ? led.calls.map((c) => h("div.ops-line", { class: c.kind === "ok" ? "" : "err" },
+              h("span.t", new Date(c.at).toLocaleTimeString()),
+              h("span.m.mono", c.tool),
+              h("span.t", c.kind)))
+          : [h("div.dim.ops-none", "this app has not called anything")])),
+        h("div.dim", { style: { padding: "8px 0 0", fontSize: "11px", lineHeight: "1.6" } },
+          "Suspending revokes its live tokens and mints no new session: the app keeps its window and its source, and its next call is refused."),
+      ),
+    });
+    if (!got) return;
+    try {
+      await call("appSuspend", { id: meta.id, suspended: !led.suspended });
+      toast(led.suspended ? `${meta.name} restored` : `${meta.name} suspended`, {
+        body: led.suspended ? "It can hold capabilities again." : "Its tokens are revoked; reload the window to try again.",
+        timeout: 3200,
+      });
+      reloadFramesFor(meta.id);
+    } catch (e) { toastError("That did not work", e); }
+  }
+
   function buildWindow(win) {
     const meta = appMeta(win.app);
     const { body, frame, stop } = appContent(win, meta);
@@ -364,6 +413,18 @@ export function createDesktop({ root, ctx = {} }) {
       ),
       h("span", { style: { color: meta?.hue ?? "var(--os-accent)", display: "flex", marginLeft: "4px" } }, icon(iconName(meta?.icon ?? "apps"), 14)),
       title,
+      // A custom app is a principal with grants of its own. The badge is where
+      // that stops being architecture and becomes something you can look at and
+      // switch off (goal.md T3.1).
+      ...(meta && !meta.builtin && (meta.permissions ?? []).length
+        ? [h("button.os-cap", {
+            class: meta.suspended ? "off" : "",
+            title: meta.suspended
+              ? `${meta.name} is suspended — click for its ledger`
+              : `${meta.name} may call ${(meta.permissions ?? []).join(", ")} — click for its ledger`,
+            onclick: (e) => { e.stopPropagation(); showLedger(meta); },
+          }, icon(meta.suspended ? "shield" : "key", 11), String((meta.permissions ?? []).length))]
+        : []),
     );
 
     const grip = h("div.os-resize");

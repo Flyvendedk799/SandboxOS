@@ -122,3 +122,18 @@ export const BUILTIN_DISTROS = [
 export const builtinApp = (id) => BUILTIN_APPS.find((a) => a.id === id) ?? null;
 export const builtinWidget = (kind) => BUILTIN_WIDGETS.find((w) => w.kind === kind) ?? null;
 export const builtinDistro = (id) => BUILTIN_DISTROS.find((d) => d.id === id) ?? null;
+
+/**
+ * The `desktop.*` tools that only read.
+ *
+ * Two things need this list: a proposal (which is for changes, so a read-only op
+ * in one is a mistake worth naming), and the assistant's review mode, where a
+ * mutation is captured for review and a read is simply allowed through — an agent
+ * that cannot look at the desktop cannot propose anything sensible about it.
+ */
+export const READ_ONLY_DESKTOP_TOOLS = new Set([
+  "get", "state", "summarize", "silhouette", "history",
+  "themeList", "animationList", "workspaceList", "windowList", "widgetList",
+  "appList", "appFiles", "appRead", "widgetFiles", "widgetRead",
+  "distroList", "distroExport", "proposals",
+]);

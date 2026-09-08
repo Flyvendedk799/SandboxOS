@@ -44,7 +44,7 @@ function linkForTool({ tool, args, result }) {
   if (tool === "revert" || tool === "history") return { label: "open Layers", auto: false, run: () => builder.setTab("layers") };
   return null;
 }
-const agent = createAgentPanel({ onClose: () => { agentOpen = false; persist(); layout(); }, onTool: linkForTool });
+const agent = createAgentPanel({ onClose: () => { agentOpen = false; persist(); layout(); }, onTool: linkForTool, review: true });
 
 const screen = createScreen({
   ctx: {

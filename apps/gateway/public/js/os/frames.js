@@ -17,6 +17,36 @@ import { h, slug } from "../core.js";
 const sessions = new Map(); // appId → Promise<{token, patterns, withheld}>
 const frames = new Set();   // {id, kind, el, onTitle, onResize, onClose}
 
+// What each app has said about itself lately — errors and warnings from inside
+// the frame, kept per app so the Studio can show them next to the source. A ring:
+// an app in a loop must not become a memory leak in the shell.
+const LOG_KEEP = 200;
+const logs = new Map();      // appId → [{level, text, where, at}]
+const logWatchers = new Set();
+
+/** The recent output of one app's frame (or all of them). */
+export function frameLogs(id = null) {
+  if (id) return [...(logs.get(id) ?? [])];
+  return [...logs.entries()].flatMap(([app, list]) => list.map((l) => ({ ...l, app })));
+}
+
+/** Forget an app's output — a fresh start after a fix. */
+export function clearFrameLogs(id = null) {
+  if (id) logs.delete(id); else logs.clear();
+  for (const fn of logWatchers) { try { fn(id); } catch { /* a watcher is not the point */ } }
+}
+
+/** Watch what apps print. Returns an unsubscribe. */
+export function onFrameLog(fn) { logWatchers.add(fn); return () => logWatchers.delete(fn); }
+
+function pushLog(id, entry) {
+  const list = logs.get(id) ?? [];
+  list.push(entry);
+  while (list.length > LOG_KEEP) list.shift();
+  logs.set(id, list);
+  for (const fn of logWatchers) { try { fn(id, entry); } catch { /* as above */ } }
+}
+
 export function appSession(id) {
   if (!sessions.has(id)) {
     sessions.set(id, fetch(`/${slug}/os/apps/${encodeURIComponent(id)}/session`, { method: "POST" })
@@ -48,16 +78,24 @@ const covers = (held, wanted) => {
 export function createFrame({ id, kind = "app", onTitle, onResize, onClose }) {
   const path = kind === "widget" ? "widgets" : "apps";
   const frame = h("iframe", {
-    src: `/${slug}/os/${path}/${encodeURIComponent(id)}/`,
     sandbox: "allow-scripts allow-forms allow-popups allow-modals",
     referrerpolicy: "no-referrer",
     title: id,
+  });
+  // The src waits for the session, because it carries the *asset key*: the
+  // frame runs at an opaque origin and can send no cookie, so its own files
+  // are read through a key in the path instead. Without it an app could load
+  // its entry document and nothing it imported — a CORS error in a console
+  // that belongs to nobody (goal.md T2.2).
+  appSession(id).then((s) => {
+    frame.src = s.assetKey
+      ? `/${slug}/os/${path}/${encodeURIComponent(id)}/k/${encodeURIComponent(s.assetKey)}/`
+      : `/${slug}/os/${path}/${encodeURIComponent(id)}/`;
   });
   // Registered by ELEMENT, not by contentWindow: an app's first message can beat
   // the iframe's load event, and a frame whose very first call is dropped as
   // "not one of ours" is a bug that only shows up on fast machines.
   frames.add({ id, kind, el: frame, onTitle, onResize, onClose });
-  appSession(id); // warm the token before the first call
   return frame;
 }
 
@@ -95,11 +133,17 @@ export function reloadFramesFor(id, { path = null } = {}) {
   for (const entry of frames) {
     if (entry.id !== id) continue;
     const el = entry.el;
-    // Re-assigning src with a cache-buster is the only reliable reload for an
-    // opaque-origin frame: we cannot reach into it to call location.reload().
-    const base = el.src.split("#")[0].replace(/([?&])r=\d+/, "");
-    el.src = `${base}${base.includes("?") ? "&" : "?"}r=${Date.now()}`;
-    delete el.dataset.ready;
+    const path = entry.kind === "widget" ? "widgets" : "apps";
+    // A fresh session, because the definition may have changed what this app
+    // is allowed to hold — and because the asset key lives in the path, the
+    // reload has to rebuild the URL rather than append a cache-buster to it.
+    appSession(id).then((s) => {
+      const base = s.assetKey
+        ? `/${slug}/os/${path}/${encodeURIComponent(id)}/k/${encodeURIComponent(s.assetKey)}/`
+        : `/${slug}/os/${path}/${encodeURIComponent(id)}/`;
+      el.src = `${base}?r=${Date.now()}`;
+      delete el.dataset.ready;
+    });
   }
 }
 
@@ -138,6 +182,18 @@ export function startBroker({ notify, closeWindowForFrame } = {}) {
     switch (m.type) {
       case "ready":
         entry.el.dataset.ready = "1";
+        return;
+
+      // One-way: an app reporting what went wrong inside it. No reply, and it
+      // reaches the Studio's console rather than a place nobody looks.
+      case "log":
+        pushLog(entry.id, {
+          level: m.level === "error" || m.level === "warn" ? m.level : "log",
+          text: String(m.text ?? "").slice(0, 2000),
+          where: m.where ? String(m.where).slice(0, 120) : null,
+          at: Number(m.at) || Date.now(),
+          kind: entry.kind,
+        });
         return;
 
       case "permissions":

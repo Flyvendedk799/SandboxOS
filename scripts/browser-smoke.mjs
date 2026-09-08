@@ -152,6 +152,41 @@ try {
   await kernel.call({ principalId: owner.id, heldPatterns: held, server: "ports", tool: "unexpose", args: { port: svcPort } });
   svc.close();
 
+  // A custom app actually RUNS. This is the assertion whose absence hid a real
+  // bug for a whole phase: the frame runs at an opaque origin, so its module
+  // scripts were CORS-blocked and every app's JavaScript silently never
+  // executed. Writing files and serving them is not the same as an app working.
+  await desktop("appDefine", { id: "runs-app", name: "Runs", permissions: ["ports.list"] });
+  await desktop("appWrite", {
+    id: "runs-app", path: "app.js",
+    content: [
+      "const el = document.createElement('div');",
+      "el.id = 'ran';",
+      "document.body.append(el);",
+      "const r = await sbx.mcp('ports', 'list', {});",
+      "el.textContent = 'ports:' + (r.ports ? r.ports.length : '?');",
+      "sbx.ready();",
+      // A warning rather than an error: the smoke fails on console errors, and
+      // this one is on purpose. Both travel to the shell.
+      "console.warn('runs-app says hello from the frame');",
+    ].join("\n"),
+  });
+  await desktop("open", { app: "runs-app" });
+  await page.waitForTimeout(2500);
+  const appFrame = page.frames().find((f) => f.url().includes("/runs-app/"));
+  check(!!appFrame, "a custom app's frame is loaded");
+  const ranText = appFrame ? await appFrame.locator("#ran").textContent().catch(() => null) : null;
+  check(/^ports:\d+$/.test(ranText ?? ""), `its module ran and called through the broker (${ranText})`);
+
+  // …and what it printed reaches the shell, so the Studio can show it.
+  const reported = await page.evaluate(async () => {
+    const { frameLogs } = await import("/static/js/os/frames.js");
+    return frameLogs("runs-app").map((l) => l.text);
+  });
+  check(reported.some((t) => t.includes("hello from the frame")), "and its console output is collected for the Studio");
+  for (const w of (await desktop("state")).doc.windows.filter((x) => x.app === "runs-app")) await desktop("close", { id: w.id });
+  await desktop("appRemove", { id: "runs-app" });
+
   // The terminal screen: cursor addressing, an alternate buffer, scroll regions.
   const term = await page.evaluate(async () => {
     const { createScreen } = await import("/static/js/os/ansi.js");

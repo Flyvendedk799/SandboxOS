@@ -10,7 +10,8 @@
 // The panel and the built-in Assistant window share this code, so a conversation
 // looks and behaves the same wherever you have it open.
 
-import { h, fill, icon, api, slug, toastError } from "../core.js";
+import { h, fill, icon, api, slug, toast, toastError } from "../core.js";
+import { call, onOs, os } from "./client.js";
 
 const SYSTEM_HINT = [
   "Ask for a window, a widget, a colour, a whole app.",
@@ -33,8 +34,17 @@ function preview(value, max = 90) {
   return s.length > max ? `${s.slice(0, max)}…` : s;
 }
 
-export function createAgentPanel({ onClose, quick = QUICK, title = "Build agent", onTool } = {}) {
+export function createAgentPanel({ onClose, quick = QUICK, title = "Build agent", onTool, review = false } = {}) {
   const log = h("div.agent-log");
+  // Review mode: the agent's desktop changes arrive as a proposal you read before
+  // anything moves (goal.md T2.3). It is per person and per surface, remembered
+  // in the browser, because it is a working preference and not desktop truth.
+  let propose = review && localStorage.getItem("sbx.agent.review") !== "0";
+  const proposalsEl = h("div.agent-proposals");
+  const reviewBtn = h("button.chip", {
+    title: "Review the agent's desktop changes before they happen",
+    onclick: () => { propose = !propose; localStorage.setItem("sbx.agent.review", propose ? "1" : "0"); paintReview(); },
+  });
   const input = h("textarea", { rows: 1, placeholder: "Ask the agent to build or restyle…" });
   const send = h("button.send", { title: "Send" }, icon("send", 15));
   let chatId = null;
@@ -50,9 +60,46 @@ export function createAgentPanel({ onClose, quick = QUICK, title = "Build agent"
       onClose ? h("button.rail-btn", { style: { width: "24px", height: "24px" }, onclick: onClose }, icon("x", 13)) : null,
     ),
     log,
-    h("div.quick-row", ...quick.map((q) => h("button.chip", { onclick: () => submit(q) }, q))),
+    proposalsEl,
+    h("div.quick-row", ...(review ? [reviewBtn] : []), ...quick.map((q) => h("button.chip", { onclick: () => submit(q) }, q))),
     h("div.composer", null, input, send),
   );
+
+  /** What a proposal would do, in the shortest honest form: the calls it holds. */
+  function paintProposals() {
+    if (!review) return;
+    const list = os.doc?.proposals ?? [];
+    if (!list.length) { fill(proposalsEl); return; }
+    fill(proposalsEl, ...list.map((p) => h("div.proposal", null,
+      h("div.hd", null,
+        h("b", p.label),
+        h("span.dim", `${p.ops.length} change${p.ops.length === 1 ? "" : "s"}`)),
+      h("div.ops", null, ...p.ops.map((op) => h("div.op", null,
+        h("code", `desktop.${op.tool}`), h("span.dim", preview(op.args, 60))))),
+      h("div.act", null,
+        h("button.app-btn.primary", { onclick: () => applyProposal(p) }, "Apply"),
+        h("button.app-btn", { onclick: () => discardProposal(p) }, "Discard")),
+    )));
+  }
+
+  async function applyProposal(p) {
+    try {
+      const r = await call("applyProposal", { id: p.id });
+      if (r.failure) toast("Partly applied", { body: `${r.failure.tool}: ${r.failure.error}`, kind: "err", timeout: 5000 });
+      else toast("Applied", { body: `${r.applied.length} change${r.applied.length === 1 ? "" : "s"}`, timeout: 2200 });
+    } catch (e) { toastError("Could not apply it", e); }
+  }
+  async function discardProposal(p) {
+    try { await call("discardProposal", { id: p.id }); }
+    catch (e) { toastError("Could not discard it", e); }
+  }
+
+  function paintReview() {
+    reviewBtn.classList.toggle("on", propose);
+    fill(reviewBtn, icon(propose ? "eye" : "play", 12), propose ? "Review changes" : "Apply directly");
+  }
+  if (review) { paintReview(); paintProposals(); }
+  const offOs = review ? onOs((kind) => { if (kind === "doc" || kind === "local") paintProposals(); }) : null;
 
   function bubble(role, text) {
     return h("div.agent-msg", { class: role },
@@ -106,7 +153,7 @@ export function createAgentPanel({ onClose, quick = QUICK, title = "Build agent"
       const res = await fetch(`/${slug}/chats/${chatId}/send`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input: line }),
+        body: JSON.stringify({ input: line, ...(propose ? { propose: true } : {}) }),
       });
       if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
       const reader = res.body.getReader();
@@ -169,6 +216,10 @@ export function createAgentPanel({ onClose, quick = QUICK, title = "Build agent"
         }
         break;
       }
+      case "proposal":
+        say("agent", `Queued ${ev.ops} change${ev.ops === 1 ? "" : "s"} for review — read them below and apply or discard.`);
+        paintProposals();
+        break;
       case "error":
         say("agent", `error: ${ev.error ?? "unknown"}`);
         break;
@@ -186,7 +237,7 @@ export function createAgentPanel({ onClose, quick = QUICK, title = "Build agent"
     input.style.height = `${Math.min(120, input.scrollHeight)}px`;
   });
 
-  return { el, focus: () => input.focus(), submit };
+  return { el, focus: () => input.focus(), submit, destroy: () => offOs?.() };
 }
 
 /** The Assistant built-in app: the same agent, inside a window. */

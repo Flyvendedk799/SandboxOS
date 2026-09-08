@@ -1262,3 +1262,64 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
   .app-body.ops-split { flex-direction: column; }
   .ops-list, .ops-list.wide { width: auto; max-height: 45%; border-right: 0; border-bottom: 1px solid var(--os-line); }
 }
+
+/* ── Proposals: a change you read before it happens ──────────────────────── */
+
+.agent-proposals { flex: none; max-height: 40%; overflow: auto; padding: 0 10px 8px; display: flex; flex-direction: column; gap: 8px; }
+.proposal {
+  border: 1px solid var(--stx-accent-line, var(--os-accent-line)); border-radius: 10px;
+  background: var(--stx-bg-2, var(--os-bg-2)); overflow: hidden;
+}
+.proposal .hd { display: flex; align-items: baseline; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--stx-line, var(--os-line)); font-size: 11.5px; }
+.proposal .hd .dim { margin-left: auto; font-size: 10.5px; }
+.proposal .ops { padding: 6px 10px; display: flex; flex-direction: column; gap: 3px; }
+.proposal .op { display: flex; gap: 8px; align-items: baseline; font-size: 10.5px; }
+.proposal .op code { font-family: var(--mono); color: var(--stx-accent, var(--os-accent)); }
+.proposal .op .dim { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proposal .act { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--stx-line, var(--os-line)); }
+.app-btn.primary { background: var(--os-accent); border-color: transparent; color: #04211e; }
+
+/* ── Code: find/replace across the bundle, and the app's own console ─────── */
+
+.code-find { flex: none; border-bottom: 1px solid var(--stx-line); background: var(--stx-bg-2); }
+.code-find .row { display: flex; align-items: center; gap: 6px; padding: 7px 10px; }
+.code-find input {
+  height: 24px; min-width: 0; flex: 1 1 120px; padding: 0 8px; border: 1px solid var(--stx-line);
+  border-radius: 6px; background: var(--stx-bg-1); color: var(--stx-text); font-size: 11.5px;
+}
+.code-find .dim { flex: none; font-size: 10.5px; white-space: nowrap; }
+.code-find .hits { max-height: 160px; overflow: auto; border-top: 1px solid var(--stx-line); }
+.code-find .hit {
+  display: flex; gap: 8px; align-items: baseline; width: 100%; padding: 3px 10px;
+  border: 0; background: transparent; text-align: left; font-size: 10.5px; color: var(--stx-text-2);
+}
+.code-find .hit:hover { background: var(--stx-chip); color: var(--stx-text); }
+.code-find .hit code { font-family: var(--mono); color: var(--stx-accent); flex: none; }
+.code-find .hit .ln { color: var(--stx-text-3); flex: none; min-width: 24px; text-align: right; }
+.code-find .hit .tx { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.code-console { flex: none; max-height: 40%; display: flex; flex-direction: column; border-top: 1px solid var(--stx-line); background: var(--stx-bg-2); }
+.code-console .hd { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--stx-line); font-size: 11px; }
+.code-console .hd .spacer { flex: 1; }
+.code-console .lines { overflow: auto; padding: 5px 0 8px; }
+.code-console .line { display: flex; gap: 8px; padding: 1px 10px; font-family: var(--mono); font-size: 10.5px; line-height: 1.5; }
+.code-console .line .t { color: var(--stx-text-3); flex: none; }
+.code-console .line .m { color: var(--stx-text-2); white-space: pre-wrap; word-break: break-word; }
+.code-console .line .where { color: var(--stx-text-3); flex: none; }
+.code-console .line.error .m { color: var(--stx-err); }
+.code-console .line.warn .m { color: var(--stx-warn, #f0b849); }
+
+/* ── The capability badge and ledger ─────────────────────────────────────── */
+
+.os-cap {
+  display: inline-flex; align-items: center; gap: 3px; margin-left: auto; margin-right: 4px;
+  height: 17px; padding: 0 6px; border: 1px solid var(--os-line); border-radius: 999px;
+  background: var(--os-chip); color: var(--os-text-3);
+  font-size: 9.5px; font-weight: 700; letter-spacing: .02em;
+}
+.os-cap:hover { color: var(--os-text); border-color: var(--os-accent-line); }
+.os-cap.off { color: var(--os-err); border-color: color-mix(in srgb, var(--os-err) 45%, var(--os-line)); }
+.ledger .kv { padding: 4px 0; }
+.ledger .v.ok { color: var(--os-ok); }
+.ledger .v.warn { color: var(--os-warn); }
+.ledger-calls { max-height: 200px; overflow: auto; border: 1px solid var(--os-line); border-radius: 8px; padding: 6px 0; }

@@ -151,9 +151,137 @@ function frameCsp(req) {
 /** Give every app frame the `sbx` bridge whether or not its author asked for it. */
 function injectBridge(html, slug, id, kind) {
   const tag = `<script src="/static/js/os/bridge.js" data-slug="${slug}" data-app="${id}" data-kind="${kind}"></script>`;
-  return /<head[^>]*>/i.test(html)
+  const withBridge = /<head[^>]*>/i.test(html)
     ? html.replace(/<head[^>]*>/i, (m) => `${m}\n${tag}`)
     : `${tag}\n${html}`;
+  return crossOriginModules(withBridge);
+}
+
+/**
+ * A frame's own module scripts, made loadable.
+ *
+ * The frame runs at an *opaque* origin (that is the sandbox), so fetching
+ * `./app.js` from it is a cross-origin request in CORS mode — and a module
+ * script fetched that way sends no cookies, so the Gateway saw an
+ * unauthenticated request and refused it. The app's own JavaScript never ran,
+ * and the failure was a CORS message in a console nobody could open.
+ *
+ * Nor can it send one on request: Chrome treats an opaque initiator as
+ * cross-site, so even `use-credentials` would carry nothing. The frame therefore
+ * reads its own files through the *keyed* route (see `mintAssetKey`), which needs
+ * no credentials — and `crossorigin="anonymous"` is what makes the module fetch
+ * the plain CORS request that route can answer.
+ *
+ * We add the attribute rather than requiring authors to know any of this, because
+ * "why doesn't my import work" is not a question an OS should make people answer.
+ */
+function crossOriginModules(html) {
+  return html.replace(/<script\b[^>]*>/gi, (tag) => {
+    if (!/type\s*=\s*["']module["']/i.test(tag)) return tag;
+    if (/\bcrossorigin\b/i.test(tag)) return tag;
+    if (!/\bsrc\s*=/i.test(tag)) return tag; // inline module: nothing to fetch
+    return tag.replace(/<script\b/i, '<script crossorigin="anonymous"');
+  });
+}
+
+/**
+ * Asset keys: how a sandboxed frame is allowed to read its own files.
+ *
+ * The frame runs at an opaque origin, and that has a consequence nobody should
+ * have to discover from a CORS message: a request it makes for its own
+ * ./app.js is cross-origin, and Chrome treats an opaque initiator as
+ * cross-site, so the session cookie is not sent. The Gateway then saw an
+ * unauthenticated request and refused it — the app's own JavaScript never ran,
+ * and the failure surfaced only inside a console nobody could open.
+ *
+ * So a frame's URL carries an unguessable key as a path segment
+ * (/:slug/os/apps/:id/k/<key>/…), minted for whoever opened the window and
+ * bound to that Sandbox and that app. Relative imports inside the bundle
+ * resolve under the same prefix, so an import works with no cookie at all, and
+ * the key grants exactly one thing: reading that app's own source.
+ */
+const assetKeys = new Map(); // key → { sandboxId, appId, kind, expires }
+const ASSET_KEY_TTL_MS = 6 * 60 * 60 * 1000;
+
+function mintAssetKey(sandboxId, appId, kind) {
+  // One live key per (sandbox, app) is enough, and it keeps a reloading frame
+  // from growing the table: reuse an unexpired one.
+  for (const [k, v] of assetKeys) {
+    if (v.expires < Date.now()) { assetKeys.delete(k); continue; }
+    if (v.sandboxId === sandboxId && v.appId === appId && v.kind === kind) return k;
+  }
+  const key = crypto.randomBytes(24).toString('base64url');
+  assetKeys.set(key, { sandboxId, appId, kind, expires: Date.now() + ASSET_KEY_TTL_MS });
+  return key;
+}
+
+function resolveAssetKey(key, sandboxId, appId) {
+  const found = assetKeys.get(key);
+  if (!found || found.expires < Date.now()) return null;
+  if (found.sandboxId !== sandboxId || found.appId !== appId) return null;
+  return found;
+}
+
+/**
+ * Serve one file out of a custom app or widget bundle, into a sandboxed frame.
+ *
+ * The CSP is closed (connect-src none, in particular): an app talks to the
+ * machine through the shell's broker, never straight out of the frame. The entry
+ * document gets the bridge injected, so `sbx` exists whether or not the author
+ * asked for it, and its module scripts get `crossorigin` so they can actually
+ * load from an opaque origin.
+ *
+ * Two routes call this: the keyed one a frame uses (no cookie — see
+ * mintAssetKey) and the session-authenticated one everything else uses. The
+ * containment checks are the same either way; the only difference is who has
+ * already been trusted to ask.
+ */
+async function serveBundleFile(req, res, { sandbox, slug, isWidget, id, rest, prefix = null, held = null }) {
+  const d = loadOs(sandbox);
+  const desc = isWidget ? widgetDescriptor(d, id) : appDescriptor(d, id);
+  if (!desc || desc.builtin || desc.source?.type !== "bundle") {
+    return sendJson(res, 404, { ok: false, error: `no bundle for ${id}` });
+  }
+  const wanted = safeRelPath(rest || desc.source.entry);
+  if (!wanted) return sendJson(res, 400, { ok: false, error: "invalid path" });
+
+  let body, type;
+  if (desc.source.origin === "volume") {
+    // The app's source is ordinary files in the Cell — editable in the Files
+    // panel, versioned by Tide, and read here with the same containment check
+    // the raw file endpoint uses.
+    if (held && !authorize(held, "fs", "read")) return sendJson(res, 403, { ok: false, error: "denied: fs.read" });
+    const cell = getCell(sandbox);
+    await cell.ensureRunning();
+    try {
+      const file = await canonicalContained(cell.root, `${desc.source.volumePath}/${wanted}`);
+      body = fs.readFileSync(file);
+    } catch { return sendJson(res, 404, { ok: false, error: "not found" }); }
+    type = bundleType(wanted) ?? "application/octet-stream";
+  } else {
+    try {
+      const f = readBundleFile(sandbox, isWidget ? "widget" : "app", id, wanted, { encoding: null });
+      body = f.content;
+      type = f.type;
+    } catch { return sendJson(res, 404, { ok: false, error: "not found" }); }
+  }
+
+  if (type?.startsWith("text/html")) {
+    body = Buffer.from(injectBridge(body.toString("utf8"), slug, id, isWidget ? "widget" : "app"));
+  }
+  res.writeHead(200, {
+    "Content-Type": type ?? "application/octet-stream",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": frameCsp(req),
+    // The frame's origin is opaque, so every fetch it makes for its own files
+    // is a CORS request. Reading a bundle is already gated by the key or the
+    // session, so allowing the read is not a widening — it is what makes the
+    // app's own JavaScript run at all.
+    "Access-Control-Allow-Origin": "*",
+    "Content-Length": body.length,
+  });
+  return res.end(body);
 }
 
 function readBody(req) {
@@ -705,6 +833,21 @@ async function handle(req, res) {
   const sandbox = getSandboxBySlug(slug);
   if (!sandbox) return sendJson(res, 404, { ok: false, error: `no sandbox: ${slug}` });
 
+  // GET /:slug/os/{apps,widgets}/:id/k/:key/<path> — a sandboxed frame reading
+  // its own bundle. This one route is authenticated by the key in the path
+  // rather than by a cookie, because an opaque-origin frame cannot send one
+  // (see mintAssetKey). The key is unguessable, expires, is bound to this
+  // Sandbox and this app, and grants nothing but reading that app's source.
+  if (action === "os" && (segments[3] === "apps" || segments[3] === "widgets") && segments[4] && segments[5] === "k" && segments[6] && req.method === "GET") {
+    const isWidget = segments[3] === "widgets";
+    const keyed = resolveAssetKey(segments[6], sandbox.id, segments[4]);
+    if (!keyed) return sendJson(res, 403, { ok: false, error: "expired or unknown asset key" });
+    return serveBundleFile(req, res, {
+      sandbox, slug, isWidget, id: segments[4], rest: segments.slice(7).filter(Boolean).join("/"),
+      prefix: `/${slug}/os/${segments[3]}/${encodeURIComponent(segments[4])}/k/${segments[6]}`,
+    });
+  }
+
   // AuthN + AuthZ: must be logged in AND hold at least one grant on this Sandbox.
   const principal = authenticate(req);
   if (!principal) {
@@ -1034,7 +1177,7 @@ async function handle(req, res) {
 
     // POST /:slug/chats/:id/send — run one turn, streaming events over SSE.
     if (req.method === "POST" && segments[4] === "send") {
-      const { input, model } = await readBody(req);
+      const { input, model, propose } = await readBody(req);
       if (!input || !String(input).trim()) return sendJson(res, 400, { ok: false, error: "input required" });
       scheduler.touch(sandbox.id);
 
@@ -1058,6 +1201,7 @@ async function handle(req, res) {
         const { messages, stopped } = await runTurn({
           kernel, sandbox, principalId: principal.id, heldPatterns: held,
           history, input: String(input), model, emit: send, signal: controller.signal,
+          propose: !!propose,
         });
         if (messages.length) appendConversationMessages(chat.id, messages);
         send({ type: "end", stopped });
@@ -1292,68 +1436,37 @@ async function handle(req, res) {
     if (!desc) return sendJson(res, 404, { ok: false, error: `no such app: ${segments[4]}` });
     const granted = effectivePermissions(desc.permissions ?? [], held);
     const withheld = withheldPermissions(desc.permissions ?? [], held);
-    if (!granted.length) return sendJson(res, 200, { ok: true, token: null, patterns: [], withheld });
+    // The key that lets the frame read its own files (see mintAssetKey).
+    const assetKey = mintAssetKey(sandbox.id, segments[4], desc.kind === "widget" ? "widget" : "app");
+    // A suspended app is one someone decided to stop trusting for now: it keeps
+    // its window and its source, and gets no capabilities at all (goal.md T3.1).
+    if (desc.suspended) {
+      return sendJson(res, 200, { ok: true, token: null, patterns: [], withheld: desc.permissions ?? [], suspended: true, assetKey });
+    }
+    // No capabilities is not no app: it still needs its own files.
+    if (!granted.length) return sendJson(res, 200, { ok: true, token: null, patterns: [], withheld, assetKey });
     try {
       const minted = mintMachineToken(principal.id, sandbox.id, granted, {
         label: `app-${segments[4]}`, ttlMs: 6 * 60 * 60 * 1000,
       });
-      return sendJson(res, 200, { ok: true, token: minted.token, patterns: minted.patterns, withheld });
+      return sendJson(res, 200, { ok: true, token: minted.token, patterns: minted.patterns, withheld, principalId: minted.principalId, assetKey });
     } catch (e) {
       return sendJson(res, 400, { ok: false, error: e.message });
     }
   }
 
   // GET /:slug/os/apps/:id/<path> · GET /:slug/os/widgets/:kind/<path>
-  // The source of a custom app or widget, served into a sandboxed frame under a
-  // closed CSP. `connect-src 'none'` is deliberate: an app talks to the machine
-  // through the shell's broker, never straight out of the frame.
+  // The source of a custom app or widget, for a caller with a session — the
+  // Studio reading a file, or someone with the URL. The frames themselves use
+  // the keyed route above, because they have no cookie to send.
   if (action === "os" && (segments[3] === "apps" || segments[3] === "widgets") && segments[4] && req.method === "GET") {
     const isWidget = segments[3] === "widgets";
-    const d = loadOs(sandbox);
-    const desc = isWidget ? widgetDescriptor(d, segments[4]) : appDescriptor(d, segments[4]);
-    if (!desc || desc.builtin || desc.source?.type !== "bundle") {
-      return sendJson(res, 404, { ok: false, error: `no bundle for ${segments[4]}` });
-    }
     if (!authorize(held, "desktop", "get")) return sendJson(res, 403, { ok: false, error: "denied: desktop.get" });
-
-    const rest = segments.slice(5).filter(Boolean).join("/");
-    const wanted = safeRelPath(rest || desc.source.entry);
-    if (!wanted) return sendJson(res, 400, { ok: false, error: "invalid path" });
-
-    let body, type;
-    if (desc.source.origin === "volume") {
-      // The app's source is ordinary files in the Cell — editable in the Files
-      // panel, versioned by Tide, and read here with the same containment check
-      // the raw file endpoint uses.
-      if (!authorize(held, "fs", "read")) return sendJson(res, 403, { ok: false, error: "denied: fs.read" });
-      const cell = getCell(sandbox);
-      await cell.ensureRunning();
-      try {
-        const file = await canonicalContained(cell.root, `${desc.source.volumePath}/${wanted}`);
-        body = fs.readFileSync(file);
-      } catch { return sendJson(res, 404, { ok: false, error: "not found" }); }
-      type = bundleType(wanted) ?? "application/octet-stream";
-    } else {
-      try {
-        const f = readBundleFile(sandbox, isWidget ? "widget" : "app", segments[4], wanted, { encoding: null });
-        body = f.content;
-        type = f.type;
-      } catch { return sendJson(res, 404, { ok: false, error: "not found" }); }
-    }
-
-    // The entry document gets the bridge injected, so `sbx` exists in every frame
-    // whether or not the author remembered to ask for it.
-    if (type?.startsWith("text/html")) {
-      body = Buffer.from(injectBridge(body.toString("utf8"), slug, segments[4], isWidget ? "widget" : "app"));
-    }
-    res.writeHead(200, {
-      "Content-Type": type ?? "application/octet-stream",
-      "Cache-Control": "no-store",
-      "X-Content-Type-Options": "nosniff",
-      "Content-Security-Policy": frameCsp(req),
-      "Content-Length": body.length,
+    return serveBundleFile(req, res, {
+      sandbox, slug, isWidget, id: segments[4],
+      rest: segments.slice(5).filter(Boolean).join("/"),
+      held,
     });
-    return res.end(body);
   }
 
   // GET /:slug/apps — list installed apps.

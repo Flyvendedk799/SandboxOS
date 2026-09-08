@@ -34,6 +34,7 @@ export function appDescriptor(doc, id) {
         ? { type: "alias", target: c.target }
         : { type: "bundle", entry: c.entry, origin: c.origin, volumePath: c.volumePath ?? null },
     permissions: c.permissions ?? [],
+    suspended: !!c.suspended,
     window: c.window,
     builtin: false,
     updatedAt: c.updatedAt,
@@ -52,6 +53,7 @@ export function widgetDescriptor(doc, kind) {
     description: c.description,
     source: { type: "bundle", entry: c.entry, origin: c.origin, volumePath: c.volumePath ?? null },
     permissions: c.permissions ?? [],
+    suspended: !!c.suspended,
     size: c.size, refreshMs: c.refreshMs, updatedAt: c.updatedAt,
   };
 }

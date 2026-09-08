@@ -340,6 +340,25 @@ export function createEditor(host, { value = "", language = "txt", onChange, onS
       input.addEventListener("click", handler);
       return handler;
     },
+    /**
+     * Put the caret on a 1-based line and scroll it into view, selecting a range
+     * within it when asked. This is what makes a search hit, or an error with a
+     * line number, somewhere you can *go* rather than something you read.
+     */
+    reveal(line, { column = 1, length = 0 } = {}) {
+      const lines = input.value.split("\n");
+      const n = Math.min(Math.max(1, Math.round(line)), lines.length);
+      let at = 0;
+      for (let i = 0; i < n - 1; i += 1) at += lines[i].length + 1;
+      const start = at + Math.max(0, column - 1);
+      input.focus();
+      input.setSelectionRange(start, start + Math.max(0, length));
+      // Centre it: line height comes from the computed style so a theme change
+      // does not turn this into a guess.
+      const lh = parseFloat(getComputedStyle(input).lineHeight) || 18;
+      input.scrollTop = Math.max(0, (n - 1) * lh - input.clientHeight / 2);
+      repaint();
+    },
     destroy() {
       cancelAnimationFrame(raf);
       root.remove();

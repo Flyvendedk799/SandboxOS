@@ -29,14 +29,16 @@ import {
   writeBundleFile, readBundleFile, listBundleFiles, removeBundleFile, removeBundle,
   exportBundle, importBundle, starterApp, starterAppCss, starterAppJs, starterWidget, starterServerJs, starterAppToolsJs,
   exportPayload, importPayload, builtinDistroList, docFromDistroSpec, RESERVED_SERVER_NAMES,
-  summarizeDoc, silhouetteSvg,
+  summarizeDoc, silhouetteSvg, READ_ONLY_DESKTOP_TOOLS,
 } from "../../../os/src/index.js";
 import { loadManifest, saveManifest } from "../../../manifest/src/manifest.js";
 import { CATALOG } from "../catalog.js";
 import { BUILTIN_DISTROS } from "../../../os/src/catalog.js";
 import {
   createDistro, listDistros, getDistro, getDistroByName, deleteDistro, listGallery, setDistroVisibility, bumpDistroForks,
+  listSandboxAccess, revokeSandboxAccess, queryAudit,
 } from "../../../control-db/src/registry.js";
+import { canDelegate } from "../capabilities.js";
 
 const S = { type: "string" };
 const N = { type: "number" };
@@ -210,7 +212,9 @@ export function desktopServer(deps) {
     widgets: Object.fromEntries(Object.keys(d.widgetKinds).map((k) => [k, exportBundle(sandbox, "widget", k)])),
   });
 
-  return {
+  // The server refers to its own tools when applying a proposal: a proposal is a
+  // list of ordinary calls, and it must not become a second, weaker way in.
+  const self = {
     name: "desktop",
     tools: {
 
@@ -1422,6 +1426,157 @@ export function desktopServer(deps) {
         },
       },
 
+      // ── the capability ledger ─────────────────────────────────────────────
+      //
+      // "An app is a real principal" was true and invisible. This is what makes
+      // it visible (goal.md T3.1): what an app asked for, what it was actually
+      // granted, what was withheld, which principals it has called as, and every
+      // call it has made — from the same audit log everything else lands in.
+
+      appLedger: {
+        description: "What a custom app may do and what it has actually done: declared and granted capabilities, what was withheld, and its recent calls from the audit log.",
+        inputSchema: obj({ id: S, limit: N }, ["id"]),
+        async handler(ctx, a) {
+          const d = doc();
+          const desc = appDescriptor(d, a.id) ?? widgetDescriptor(d, a.id);
+          if (!desc) throw new Error(`no such app: ${a.id}`);
+          const held = ctx?.heldPatterns ?? [];
+          const declared = desc.permissions ?? [];
+          const granted = declared.filter((p) => canDelegate(held, p));
+          const withheld = declared.filter((p) => !canDelegate(held, p));
+
+          // An app calls as machine principals minted for it: label `app-<id>-…`.
+          const principals = listSandboxAccess(sandbox.id)
+            .filter((p) => p.kind === "machine" && String(p.name ?? "").startsWith(`app-${a.id}-`))
+            .map((p) => ({ principalId: p.principalId, patterns: p.patterns, since: p.grantedAt, live: p.liveSessions > 0 }));
+
+          const limit = Math.min(Math.max(1, Number(a.limit) || 50), 200);
+          const calls = principals
+            .flatMap((p) => queryAudit(sandbox.id, { principalId: p.principalId, limit }))
+            .sort((x, y) => y.ts - x.ts)
+            .slice(0, limit)
+            .map((r) => ({ tool: `${r.server}.${r.tool}`, kind: r.result_kind, at: r.ts, error: r.error ?? null }));
+
+          const counts = calls.reduce((acc, c) => { acc[c.kind] = (acc[c.kind] ?? 0) + 1; return acc; }, {});
+          return {
+            id: a.id,
+            kind: desc.kind ?? "bundle",
+            suspended: !!desc.suspended,
+            declared, granted, withheld,
+            principals, calls, counts,
+            // Nothing here is a live grant: a suspended app has no session to
+            // mint, and revoking a principal takes its token with it.
+            note: desc.suspended ? "suspended: no new session will be minted for this app" : null,
+          };
+        },
+      },
+
+      appSuspend: {
+        description: "Suspend a custom app: no new capability session is minted for it, and its live tokens are revoked. Restore it with suspended: false.",
+        inputSchema: obj({ id: S, suspended: B }, ["id"]),
+        async handler(_ctx, a) {
+          const d = doc();
+          const isWidget = !!d.widgetKinds?.[a.id];
+          if (!d.apps?.[a.id] && !isWidget) throw new Error(`no such app: ${a.id}`);
+          const suspended = a.suspended !== false;
+          const next = mutateOs(sandbox, (draft) => {
+            const def = isWidget ? draft.widgetKinds[a.id] : draft.apps[a.id];
+            def.suspended = suspended;
+            def.updatedAt = Date.now();
+          }, { op: "appSuspend", label: `${suspended ? "suspended" : "restored"} ${a.id}` });
+
+          // Suspending is not a promise about the future only: the sessions this
+          // app already holds go away, so the next call it makes is refused.
+          let revoked = 0;
+          if (suspended) {
+            for (const p of listSandboxAccess(sandbox.id)) {
+              if (p.kind !== "machine" || !String(p.name ?? "").startsWith(`app-${a.id}-`)) continue;
+              const r = revokeSandboxAccess(sandbox.id, p.principalId);
+              revoked += (r.tokensRevoked ?? 0) + (r.removed ?? 0);
+            }
+          }
+          return { ok: true, rev: next.rev, id: a.id, suspended, revoked };
+        },
+      },
+
+      // ── proposals: a change you can read before it happens ────────────────
+      //
+      // "The agent restyled my desktop" is revertible, but reviewable is better.
+      // A proposal is a document object holding `desktop.*` calls; applying it
+      // runs them through these very tools, as the caller who applied it — so a
+      // proposal can never do something its applier could not do by hand.
+
+      propose: {
+        description: "Propose desktop changes for review instead of making them. Ops are desktop tool names with their arguments; nothing happens until someone applies it.",
+        inputSchema: obj({
+          label: S,
+          ops: { type: "array", items: { type: "object", properties: { tool: S, args: { type: "object" } }, required: ["tool"] } },
+        }, ["ops"]),
+        async handler(ctx, a) {
+          const ops = (Array.isArray(a.ops) ? a.ops : []).map((op) => ({ tool: String(op?.tool ?? ""), args: op?.args ?? {} }));
+          if (!ops.length) throw new Error("a proposal needs at least one op");
+          for (const op of ops) {
+            const t = self.tools[op.tool];
+            if (!t) throw new Error(`unknown tool in proposal: desktop.${op.tool}`);
+            if (READ_ONLY_DESKTOP_TOOLS.has(op.tool)) throw new Error(`desktop.${op.tool} changes nothing — a proposal is for changes`);
+          }
+          const proposal = { id: rid("prop"), label: a.label ?? "proposed change", by: ctx?.principalId ?? "agent", createdAt: Date.now(), ops };
+          const next = mutateOs(sandbox, (d) => {
+            d.proposals = [...(d.proposals ?? []), proposal].slice(-LIMITS.proposals);
+          }, { op: "propose", label: `propose: ${proposal.label}` });
+          return { ok: true, rev: next.rev, proposal: next.proposals.at(-1) };
+        },
+      },
+
+      proposals: {
+        description: "Changes waiting for review, with the calls each one would make.",
+        inputSchema: obj({}),
+        async handler() {
+          const d = doc();
+          return { proposals: d.proposals ?? [] };
+        },
+      },
+
+      applyProposal: {
+        description: "Apply a proposed change: its ops run in order, as you, and the proposal is dropped. Stops at the first failure and reports what did land.",
+        inputSchema: obj({ id: S }, ["id"]),
+        async handler(ctx, a) {
+          const found = (doc().proposals ?? []).find((p) => p.id === a.id);
+          if (!found) throw new Error(`no such proposal: ${a.id}`);
+          const applied = [];
+          let failure = null;
+          for (const op of found.ops) {
+            try {
+              await self.tools[op.tool].handler(ctx, op.args ?? {});
+              applied.push(op.tool);
+            } catch (err) {
+              // Partial application is reported, not hidden: the ops that ran are
+              // each their own revision, and revert can take them back.
+              failure = { tool: op.tool, error: err?.message ?? String(err) };
+              break;
+            }
+          }
+          const next = mutateOs(sandbox, (d) => {
+            d.proposals = (d.proposals ?? []).filter((p) => p.id !== a.id);
+          }, { op: "applyProposal", label: `applied: ${found.label}` });
+          await syncServers();
+          return { ok: !failure, rev: next.rev, applied, ...(failure ? { failure } : {}) };
+        },
+      },
+
+      discardProposal: {
+        description: "Throw a proposed change away without applying it.",
+        inputSchema: obj({ id: S }, ["id"]),
+        async handler(_ctx, a) {
+          const found = (doc().proposals ?? []).find((p) => p.id === a.id);
+          if (!found) throw new Error(`no such proposal: ${a.id}`);
+          const next = mutateOs(sandbox, (d) => {
+            d.proposals = (d.proposals ?? []).filter((p) => p.id !== a.id);
+          }, { op: "discardProposal", label: `discarded: ${found.label}` });
+          return { ok: true, rev: next.rev };
+        },
+      },
+
       distroImport: {
         description: "Install a portable payload over this machine's OS.",
         inputSchema: obj({ payload: { type: "object" }, name: S, applyManifest: B }, ["payload"]),
@@ -1448,6 +1603,8 @@ export function desktopServer(deps) {
       },
     },
   };
+
+  return self;
 }
 
 /** Recursive merge for `desktop.patch`. A null value deletes the key. */

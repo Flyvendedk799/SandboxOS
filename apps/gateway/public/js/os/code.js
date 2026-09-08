@@ -15,6 +15,7 @@
 import { h, fill, icon, dialog, confirmDialog, menu, toast, toastError, fmtBytes, api } from "../core.js";
 import { os, call, onOs } from "./client.js";
 import { createEditor, languageFor } from "../editor.js";
+import { frameLogs, clearFrameLogs, onFrameLog } from "./frames.js";
 
 const STARTERS = {
   ".html": "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\" />\n<link rel=\"stylesheet\" href=\"./app.css\" />\n</head>\n<body>\n\n<script type=\"module\" src=\"./app.js\"></script>\n</body>\n</html>\n",
@@ -36,11 +37,17 @@ export function createCodePane({ onTargetChange } = {}) {
   const editorHost = h("div.code-editor");
   const statusEl = h("div.code-status");
   const picker = h("select.code-picker");
+  const findEl = h("div.code-find", { hidden: true });
+  const consoleEl = h("div.code-console", { hidden: true });
+  let logOff = null;
   const el = h("div.code-pane", null,
     h("div.code-head", null, picker,
+      h("button.rail-btn.sm", { title: "Find and replace (⌘F)", onclick: () => toggleFind() }, icon("search", 13)),
+      h("button.rail-btn.sm", { title: "The app's own console", onclick: () => toggleConsole() }, icon("list", 13)),
       h("button.rail-btn.sm", { title: "New file", onclick: () => addFile() }, icon("plus", 13)),
       h("button.rail-btn.sm", { title: "Reload files", onclick: () => loadFiles() }, icon("refresh", 13))),
-    h("div.code-body", null, treeEl, h("div.code-main", null, tabsEl, editorHost, statusEl)));
+    findEl,
+    h("div.code-body", null, treeEl, h("div.code-main", null, tabsEl, editorHost, consoleEl, statusEl)));
 
   const isVolume = () => {
     if (!target) return false;
@@ -262,6 +269,136 @@ export function createCodePane({ onTargetChange } = {}) {
     }
   }
 
+  // ── find and replace, across the whole bundle ─────────────────────────────
+  //
+  // A bundle is a handful of files that refer to each other, so "where is this
+  // used" is a question about the bundle rather than about the open tab.
+  // Searching reads every file (they are small, and already ours); replacing
+  // writes them through the same appWrite an agent uses, one revision per file.
+
+  const findInput = h("input", { placeholder: "find", oninput: () => runFind() });
+  const replaceInput = h("input", { placeholder: "replace with" });
+  const findHits = h("div.hits");
+  const findCount = h("span.dim", "");
+  fill(findEl,
+    h("div.row", null,
+      findInput, replaceInput,
+      h("button.app-btn", { onclick: () => replaceIn(active) }, "Replace here"),
+      h("button.app-btn", { onclick: () => replaceIn(null) }, "Replace everywhere"),
+      findCount,
+      h("button.rail-btn.sm", { title: "Close", onclick: () => toggleFind(false) }, icon("x", 12))),
+    findHits);
+
+  function toggleFind(show = findEl.hidden) {
+    findEl.hidden = !show;
+    if (show) { findInput.focus(); findInput.select(); runFind(); }
+  }
+
+  /** Every file's current text: an open tab's live value wins over the store. */
+  async function bundleText() {
+    const out = new Map();
+    for (const f of files) {
+      const tab = open.find((t) => t.path === f.path);
+      if (tab) { out.set(f.path, tab.editor.getValue()); continue; }
+      if (/\.(png|jpe?g|gif|webp|ico|woff2?)$/i.test(f.path)) continue;
+      try { out.set(f.path, await readFile(f.path)); } catch { /* unreadable is not a hit */ }
+    }
+    return out;
+  }
+
+  async function runFind() {
+    const needle = findInput.value;
+    if (!needle) { fill(findHits); findCount.textContent = ""; return; }
+    const texts = await bundleText();
+    let total = 0;
+    const rows = [];
+    for (const [path, text] of texts) {
+      text.split("\n").forEach((line, i) => {
+        let at = line.indexOf(needle);
+        while (at !== -1) {
+          total += 1;
+          if (rows.length < 200) {
+            const col = at + 1;
+            rows.push(h("button.hit", { onclick: () => goTo(path, i + 1, col, needle.length) },
+              h("code", path.split("/").pop()), h("span.ln", String(i + 1)), h("span.tx", line.trim().slice(0, 90))));
+          }
+          at = line.indexOf(needle, at + needle.length);
+        }
+      });
+    }
+    findCount.textContent = `${total} match${total === 1 ? "" : "es"} in ${texts.size} file${texts.size === 1 ? "" : "s"}`;
+    fill(findHits, ...(rows.length ? rows : [h("div.dim.ops-none", "no matches")]));
+  }
+
+  async function goTo(path, line, column, length) {
+    await openFile(path);
+    open.find((t) => t.path === path)?.editor.reveal(line, { column, length });
+  }
+
+  /** Replace in one file, or in every file. Each write is its own revision. */
+  async function replaceIn(onlyPath) {
+    const needle = findInput.value;
+    if (!needle) return;
+    const next = replaceInput.value;
+    const texts = await bundleText();
+    let changed = 0, hits = 0;
+    for (const [path, text] of texts) {
+      if (onlyPath && path !== onlyPath) continue;
+      if (!text.includes(needle)) continue;
+      hits += text.split(needle).length - 1;
+      const replaced = text.split(needle).join(next);
+      const tab = open.find((t) => t.path === path);
+      if (tab) tab.editor.setValue(replaced);
+      await writeFile(path, replaced);
+      if (tab) { tab.dirty = false; tab.saved = replaced; }
+      changed += 1;
+    }
+    paintTabs(); paintTree();
+    status(`replaced ${hits} in ${changed} file${changed === 1 ? "" : "s"}`);
+    runFind();
+  }
+
+  // ── the app's own console ─────────────────────────────────────────────────
+  //
+  // A custom app runs in an opaque-origin frame, so its errors used to die where
+  // the person who could fix them could not see them (goal.md T2.2). bridge.js
+  // reports them out; this is where they land, beside the source.
+
+  function toggleConsole(show = consoleEl.hidden) {
+    consoleEl.hidden = !show;
+    if (show) paintConsole();
+  }
+
+  function paintConsole() {
+    if (consoleEl.hidden || !target) return;
+    const list = frameLogs(target.id);
+    fill(consoleEl,
+      h("div.hd", null,
+        h("b", "Console"), h("span.dim", target.id),
+        h("span.spacer"),
+        h("button.app-btn", { onclick: () => { clearFrameLogs(target.id); paintConsole(); } }, "Clear"),
+        h("button.rail-btn.sm", { title: "Hide", onclick: () => toggleConsole(false) }, icon("x", 12))),
+      h("div.lines", null, ...(list.length
+        ? list.slice(-120).map((l) => h("div.line", { class: l.level },
+            h("span.t", new Date(l.at).toLocaleTimeString()),
+            h("span.m", l.text),
+            l.where ? h("span.where", l.where) : null))
+        : [h("div.dim.ops-none", "nothing from this app yet — errors, warnings and console.error land here")])));
+    const lines = consoleEl.querySelector(".lines");
+    if (lines) lines.scrollTop = lines.scrollHeight;
+  }
+
+  // An error while the console is closed still deserves to be noticed once.
+  logOff = onFrameLog((id, entry) => {
+    if (!target || id !== target.id) return;
+    if (!consoleEl.hidden) { paintConsole(); return; }
+    if (entry?.level === "error") {
+      status(`${target.id}: ${entry.text.slice(0, 80)}`);
+      toast("The app reported an error", { body: entry.text.slice(0, 160), kind: "err", timeout: 4500 });
+      toggleConsole(true);
+    }
+  });
+
   // ── plumbing ──────────────────────────────────────────────────────────────
 
   function status(text) { statusEl.textContent = text; }
@@ -315,6 +452,8 @@ export function createCodePane({ onTargetChange } = {}) {
 
   el.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s" && e.shiftKey) { e.preventDefault(); saveAll(); }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") { e.preventDefault(); toggleFind(true); }
+    if (e.key === "Escape" && !findEl.hidden) { e.preventDefault(); toggleFind(false); }
   });
 
   return {
@@ -322,6 +461,8 @@ export function createCodePane({ onTargetChange } = {}) {
     get target() { return target; },
     get dirty() { return open.some((t) => t.dirty); },
     hasDirty: () => open.some((t) => t.dirty),
-    destroy() { bundleOff?.(); for (const t of open) t.editor.destroy(); },
+    find: (show = true) => toggleFind(show),
+    console: (show = true) => toggleConsole(show),
+    destroy() { bundleOff?.(); logOff?.(); for (const t of open) t.editor.destroy(); },
   };
 }

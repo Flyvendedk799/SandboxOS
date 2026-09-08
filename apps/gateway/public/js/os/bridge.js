@@ -37,6 +37,43 @@
     }
   }
 
+  // ── telling someone when this app breaks ──────────────────────────────────
+  //
+  // The frame is opaque-origin, so its console belongs to nobody: an uncaught
+  // error inside a custom app used to die where the person who could fix it
+  // could not see it (goal.md T2.2). These are one-way notes to the shell — no
+  // id, no reply, and they carry only what the app itself printed.
+  function report(level, text, where) {
+    try {
+      parent.postMessage({
+        __sbx: 1, app: appId, kind, type: "log",
+        level, text: String(text ?? "").slice(0, 2000), where: where ?? null, at: Date.now(),
+      }, "*");
+    } catch { /* detached */ }
+  }
+
+  window.addEventListener("error", (e) => {
+    report("error", e.message ?? "script error", e.filename ? `${e.filename.split("/").pop()}:${e.lineno}:${e.colno}` : null);
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    const r = e.reason;
+    report("error", r?.stack ?? r?.message ?? String(r), "unhandled rejection");
+  });
+  for (const level of ["error", "warn", "log", "info"]) {
+    const original = console[level].bind(console);
+    console[level] = (...args) => {
+      original(...args);
+      // Only errors and warnings travel by default; `log` and `info` do too when
+      // the app is being edited, which the shell decides by asking for them.
+      if (level === "error" || level === "warn" || window.sbx?.trace) {
+        report(level, args.map((a) => {
+          if (typeof a === "string") return a;
+          try { return JSON.stringify(a); } catch { return String(a); }
+        }).join(" "));
+      }
+    };
+  }
+
   function post(type, payload) {
     const id = `${appId}:${++seq}`;
     return new Promise((resolve, reject) => {
