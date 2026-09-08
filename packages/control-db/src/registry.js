@@ -354,6 +354,21 @@ function redact(args) {
 }
 
 export function appendAudit(ev) {
+  // Every column is bound explicitly and defensively: an audit row is written on
+  // the failure paths too, and a driver-level binding error there would replace a
+  // caller's real problem with a sentence about SQLite parameters.
+  const text = (v, dflt = null) => (typeof v === "string" ? v : v == null ? dflt : String(v));
+  ev = {
+    ...ev,
+    server: text(ev.server, "(none)"),
+    tool: text(ev.tool, "(none)"),
+    resultKind: text(ev.resultKind, "error"),
+    error: text(ev.error),
+    capability: text(ev.capability),
+    sandboxId: text(ev.sandboxId),
+    principalId: text(ev.principalId),
+    onBehalfOf: text(ev.onBehalfOf),
+  };
   const db = openDb();
   const prev = db.prepare("SELECT hash FROM audit ORDER BY id DESC LIMIT 1").get();
   const prevHash = prev?.hash ?? "";

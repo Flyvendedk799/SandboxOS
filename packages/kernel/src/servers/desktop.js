@@ -23,7 +23,7 @@ import {
   normalizeDoc, normApp, normWidgetKind, cleanTokens, cleanAnimation, cleanPatterns,
   isId, rid, LIMITS, DOCK_POSITIONS, WM_MODES, resolveAlias,
   buildTree, treeBoxes, treeLeaves, splitFor, setRatio, setDir, swapLeaves, normalizeTree, describeTree, TREE_PRESETS,
-  BUILTIN_THEMES, listThemes, resolveTheme,
+  BUILTIN_THEMES, listThemes, resolveTheme, themeKey,
   BUILTIN_ANIMATIONS, listAnimations, resolveAnimation,
   builtinApp, builtinWidget, appDescriptor, widgetDescriptor, listApps, listWidgetKinds,
   writeBundleFile, readBundleFile, listBundleFiles, removeBundleFile, removeBundle,
@@ -108,6 +108,7 @@ function snapshot(doc, kernel = null) {
   return {
     doc,
     rev: doc.rev,
+    themeKey: themeKey(doc),
     theme: resolveTheme(doc),
     animation: resolveAnimation(doc),
     apps: annotatedApps(doc, kernel),
@@ -226,7 +227,7 @@ export function desktopServer(deps) {
       state: {
         description: "Just the OS document (no catalogs) — the cheap poll.",
         inputSchema: obj({}),
-        async handler() { const d = doc(); return { doc: d, rev: d.rev }; },
+        async handler() { const d = doc(); return { doc: d, rev: d.rev, themeKey: themeKey(d) }; },
       },
 
       summarize: {

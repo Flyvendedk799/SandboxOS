@@ -18,6 +18,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 
 import { normalizeDoc, LIMITS } from "./schema.js";
+import { themeKey } from "./themes.js";
 import { firstRunDoc } from "./distro.js";
 import { osDir } from "./bundles.js";
 
@@ -102,7 +103,7 @@ function writeDoc(sandbox, doc, { op = "set", label = null, keepRev = false } = 
   try { _cache.set(sandbox.id, { mtimeMs: fs.statSync(osPath(sandbox)).mtimeMs, doc: next }); }
   catch { _cache.delete(sandbox.id); }
 
-  osEvents(sandbox.id).emit("change", { op, rev: next.rev, at: next.updatedAt, doc: next });
+  osEvents(sandbox.id).emit("change", { op, rev: next.rev, at: next.updatedAt, themeKey: themeKey(next), doc: next });
   return next;
 }
 
@@ -137,31 +138,70 @@ export function resetOs(sandbox, { name } = {}) {
 
 // ---- history ---------------------------------------------------------------
 
+// History used to be one array holding forty whole documents, rewritten on every
+// write — so dragging a window wrote the last forty desktops back to disk, and
+// the file was already 141 KB after a short session (goal.md T0.5). It is now an
+// append-only set of revision files with a small index: one document written per
+// revision, and a line appended to a list of names, times and labels.
+
+const historyDir = (sandbox) => path.join(osDir(sandbox), "history");
+const historyIndexPath = (sandbox) => path.join(historyDir(sandbox), "index.json");
+const revPath = (sandbox, rev) => path.join(historyDir(sandbox), `${Number(rev)}.json`);
+
+/** Fold a pre-existing single-file history into the new shape, once. */
+function migrateHistory(sandbox) {
+  const legacy = readJson(historyPath(sandbox));
+  if (!Array.isArray(legacy)) return null;
+  const index = [];
+  for (const e of legacy) {
+    const rev = Number(e?.rev ?? 0);
+    if (!e?.doc) continue;
+    try { writeJsonAtomic(revPath(sandbox, rev), e.doc); index.push({ rev, ts: e.ts ?? Date.now(), label: e.label ?? "" }); }
+    catch { /* one unreadable revision must not cost the rest */ }
+  }
+  writeJsonAtomic(historyIndexPath(sandbox), index);
+  try { fs.rmSync(historyPath(sandbox), { force: true }); } catch { /* it can stay */ }
+  return index;
+}
+
+/** The index, migrating an old history file the first time we meet one. */
+function historyIndex(sandbox) {
+  const index = readJson(historyIndexPath(sandbox));
+  if (Array.isArray(index)) return index;
+  return migrateHistory(sandbox) ?? [];
+}
+
 function pushHistory(sandbox, doc, label) {
-  const file = historyPath(sandbox);
-  const list = readJson(file) ?? [];
-  list.push({ rev: Number(doc.rev ?? 0), ts: Date.now(), label: String(label ?? "").slice(0, 80), doc });
-  while (list.length > LIMITS.history) list.shift();
-  try { writeJsonAtomic(file, list); } catch { /* history is a convenience, never a blocker */ }
+  try {
+    const index = historyIndex(sandbox);
+    const rev = Number(doc.rev ?? 0);
+    writeJsonAtomic(revPath(sandbox, rev), doc);
+    index.push({ rev, ts: Date.now(), label: String(label ?? "").slice(0, 80) });
+    while (index.length > LIMITS.history) {
+      const gone = index.shift();
+      try { fs.rmSync(revPath(sandbox, gone.rev), { force: true }); } catch { /* already gone */ }
+    }
+    writeJsonAtomic(historyIndexPath(sandbox), index);
+  } catch { /* history is a convenience, never a blocker */ }
 }
 
 /** The revisions available to revert to, newest first (documents omitted). */
 export function osHistory(sandbox) {
-  const list = readJson(historyPath(sandbox)) ?? [];
-  return list.map((e) => ({ rev: e.rev, ts: e.ts, label: e.label })).reverse();
+  return historyIndex(sandbox).map((e) => ({ rev: e.rev, ts: e.ts, label: e.label })).reverse();
 }
 
 /** One stored revision, document included, or null. */
 export function osHistoryEntry(sandbox, rev) {
-  const list = readJson(historyPath(sandbox)) ?? [];
-  return list.find((e) => Number(e.rev) === Number(rev)) ?? null;
+  const entry = historyIndex(sandbox).find((e) => Number(e.rev) === Number(rev));
+  if (!entry) return null;
+  const doc = readJson(revPath(sandbox, entry.rev));
+  return doc ? { ...entry, doc } : null;
 }
 
 /** Restore a previous revision. The restore is itself a new revision — history
  *  moves forward, so an undo can always be undone. */
 export function revertOs(sandbox, rev) {
-  const list = readJson(historyPath(sandbox)) ?? [];
-  const entry = list.find((e) => Number(e.rev) === Number(rev));
+  const entry = osHistoryEntry(sandbox, rev);
   if (!entry) throw new Error(`no such revision: ${rev}`);
   return writeDoc(sandbox, entry.doc, { op: "revert", label: `revert to rev ${rev}` });
 }

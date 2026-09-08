@@ -19,22 +19,18 @@
 
 import crypto from "node:crypto";
 
-/** A handle over a locally-spawned, detached child: signal the whole group. */
+import { killTree } from "./spawn.js";
+
+/** A handle over a locally-spawned, detached child: signal the whole group.
+ *  The process group on POSIX, the child tree on Windows — same intention,
+ *  expressed by whichever platform is underneath (see spawn.js `killTree`). */
 export function groupHandle(child) {
   return {
     pid: child.pid ?? null,
     child,
     kill(signal = "SIGTERM") {
       if (!child.pid) return false;
-      try {
-        // Negative pid = the process group. The child is a group leader because
-        // it was spawned detached, so this reaches the shell and its children.
-        process.kill(-child.pid, signal);
-        return true;
-      } catch {
-        // The group is already gone, or we are on a platform without groups.
-        try { child.kill(signal); return true; } catch { return false; }
-      }
+      return killTree(child.pid, signal, child);
     },
   };
 }

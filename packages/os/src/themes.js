@@ -113,6 +113,24 @@ export function resolveTheme(doc) {
   return resolved;
 }
 
+/**
+ * A stable identity for what `theme.css` will compile to.
+ *
+ * The stylesheet used to be linked by `doc.rev`, which made every window move a
+ * fresh download of the same bytes in every open tab (goal.md T0.5). It depends
+ * on exactly two branches of the document, so it is keyed by those: same
+ * appearance, same key, same cached stylesheet — whatever the revision.
+ */
+export function themeKey(doc) {
+  const payload = JSON.stringify([doc?.theme ?? null, doc?.animation ?? null]);
+  let h = 0x811c9dc5; // FNV-1a: short, stable, and no crypto import in a hot path
+  for (let i = 0; i < payload.length; i += 1) {
+    h ^= payload.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return `${h.toString(36)}${payload.length.toString(36)}`;
+}
+
 /** Every theme the document can switch to right now — built-in plus custom. */
 export function listThemes(doc) {
   const out = Object.entries(BUILTIN_THEMES).map(([key, th]) => ({ key, name: th.name, scheme: th.scheme, builtin: true, tokens: th }));

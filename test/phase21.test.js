@@ -101,7 +101,10 @@ test("an absolute path means the Sandbox's root, not the host's", async () => {
     fs.readFileSync(path.join(sandbox.volume_path, "etc", "hosts"), "utf8"),
     "127.0.0.1 sandbox",
   );
-  assert.ok(!fs.readFileSync("/etc/hosts", "utf8").includes("127.0.0.1 sandbox"));
+  // …and the host's own file, where the host has one, is untouched.
+  if (fs.existsSync("/etc/hosts")) {
+    assert.ok(!fs.readFileSync("/etc/hosts", "utf8").includes("127.0.0.1 sandbox"));
+  }
 });
 
 test("file transfer requires authentication", async () => {

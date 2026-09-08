@@ -1,6 +1,7 @@
 // Gateway entry point — boot the SandboxOS spine.
 
-import { spawn } from "node:child_process";
+import { safeSpawn } from "../../../packages/cell/src/spawn.js";
+import { hostReport } from "../../../packages/cell/src/shell.js";
 import config from "../../../packages/config/src/config.js";
 import { assertSupportedNode, quietSqliteWarning } from "../../../packages/config/src/node-compat.js";
 import { openDb } from "../../../packages/control-db/src/db.js";
@@ -16,16 +17,39 @@ import { killAllHosted } from "../../../packages/kernel/src/marketplace-pool.js"
 assertSupportedNode();
 quietSqliteWarning();
 
+// goal.md invariant 11 — no unhandled child, and no unhandled anything.
+//
+// A failure inside one Sandbox may end that Sandbox's operation; it may never end
+// the host process, because the host process is everyone else's machine too. The
+// classic way this went wrong: `spawn` reports a missing binary by emitting
+// 'error' asynchronously, so opening a Terminal on a host without /bin/sh killed
+// every session on the Gateway. Children now attach their own listeners
+// (packages/cell/src/spawn.js); this is the floor under that.
+let inFatalHandler = false;
+function survive(kind, err) {
+  // A failure *inside* the handler is the one case where staying up is not an
+  // option: the log itself is broken, and a loop would be worse than an exit.
+  if (inFatalHandler) process.exit(1);
+  inFatalHandler = true;
+  try {
+    console.error(`
+[${kind}] ${err?.stack ?? err}
+  — the Gateway is staying up; the operation that caused this failed.`);
+  } finally {
+    inFatalHandler = false;
+  }
+}
+process.on("uncaughtException", (err) => survive("uncaughtException", err));
+process.on("unhandledRejection", (err) => survive("unhandledRejection", err));
+
 const backend = await resolveBackend();
 config.cellBackend = backend; // pin the resolved choice for the rest of the process
 
 openDb();
 const { tenant, sandbox } = ensureSeed(backend);
-{
-  const { buildInfo } = await import("../../../packages/config/src/config.js");
-  const b = buildInfo();
-  console.log(`SandboxOS build ${b.commit ?? "(unknown commit)"} · node ${process.versions.node} · cells: ${backend}`);
-}
+const { buildInfo } = await import("../../../packages/config/src/config.js");
+const buildStamp = `${buildInfo().commit ?? "(unknown commit)"} · node ${process.versions.node}`;
+console.log(`SandboxOS build ${buildStamp} · cells: ${backend}`);
 seedVolume(sandbox); // first run only — an existing volume is never touched
 
 // Backlog #4: verify the audit hash-chain on boot — tamper-evidence is only
@@ -62,16 +86,21 @@ server.listen(config.port, config.host, () => {
   const tunnelToken = process.env.SANDBOXOS_TUNNEL_TOKEN;
   let tunnelLine = `  │  Public access:  cloudflared tunnel --url ${base}`;
   if (tunnelToken) {
-    const cf = spawn("cloudflared", ["tunnel", "run", "--token", tunnelToken], { stdio: "inherit" });
-    cf.on("error", (e) => console.error(`cloudflared: ${e.message} (is cloudflared installed?)`));
+    const cf = safeSpawn("cloudflared", ["tunnel", "run", "--token", tunnelToken], { stdio: "inherit" },
+      (e) => console.error(`cloudflared: ${e.message} (is cloudflared installed?)`));
     cf.on("close", (code) => { if (code !== null) console.error(`cloudflared exited with code ${code}`); });
     tunnelLine = "  │  tunnel     Cloudflare Tunnel starting (SANDBOXOS_TUNNEL_TOKEN set)";
   }
+  const host = hostReport();
+  const hostLines = host.notes
+    .flatMap((n) => (n.disables ? [`  │  ${n.text}`, `  │            ↳ unavailable: ${n.disables}`] : [`  │  ${n.text}`]))
+    .join("\n");
   console.log(`
-  ┌─ SandboxOS ── Phase 19 · per-tenant keys · agent cap · db ───
+  ┌─ SandboxOS ── build ${buildStamp} ───────────────────────────
   │  gateway   ${base}
   │  slug      ${base}/${sandbox.slug}   (tenant: ${tenant.name})
   │  cell      ${backend} backend${backend === "local" ? "  (no isolation — install/run Docker for real Cells)" : ""}
+${hostLines}
   │  password  ${config.password === "dev" ? "dev  (set SANDBOXOS_PASSWORD to change)" : "(from SANDBOXOS_PASSWORD)"}
   │  home      ${config.home}
   │

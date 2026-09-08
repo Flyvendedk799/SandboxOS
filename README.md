@@ -45,6 +45,9 @@ laptop and your sandbox in lockstep through **Tide**.
 
 Node 22.13 or newer — the 22 LTS line included — and no dependencies to install.
 (On Node 22.5–22.12 add `--experimental-sqlite`; `node:sqlite` needs no flag from 22.13 on.)
+Linux, macOS and Windows: the Cell resolves whatever shell the host has — including the
+one Git for Windows ships — and says at boot what it found and what is unavailable
+without it.
 
 ```bash
 git clone https://github.com/Flyvendedk799/SandboxOS && cd SandboxOS
@@ -231,8 +234,10 @@ for await (const ev of sbx.assistant.ask("summarise today's changes")) {
 | 15 | [The OS experience](docs/15-os-experience.md) | The desktop as a document, the builder for it, apps with two faces, distros, the second surface |
 
 Architecture Decision Records live in [`docs/adr/`](docs/adr). Each build phase has its
-own note: `PHASE0.md` … `PHASE30.md`. [`heroplan.md`](heroplan.md) is the plan Phases
-28–30 implemented.
+own note: `PHASE0.md` … `PHASE31.md`. [`heroplan.md`](heroplan.md) is the plan Phases
+28–30 implemented. [`goal.md`](goal.md) is what comes next — the desktop and the Studio
+as software you would trust: the gaps as measured, ten promises, and the acceptance
+suite that decides when they are kept.
 
 ## Layout
 

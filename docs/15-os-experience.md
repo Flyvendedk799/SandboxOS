@@ -164,6 +164,26 @@ as a hint: after a call returns `rev`, it waits briefly, and pulls only if the s
 did not catch up. An event describing a revision older than the one in hand is
 dropped, so out-of-order delivery can never rewind the desktop.
 
+A stream that comes back after a gap has missed every write inside it, so the `hello`
+frame carries the revision the document is *actually* at; a client whose own revision
+disagrees re-reads before painting anything. Without that, a tab that slept through
+three agent writes kept showing a desktop that no longer existed and said nothing.
+
+### What a write costs
+
+A desktop write is one document written to disk and one event on the wire, and it is
+worth keeping it that way. Two things used to make it more than that, and no longer do:
+
+- **The stylesheet.** `theme.css` is linked by an *appearance* key — a hash of the
+  document's `theme` and `animation` branches — rather than by `rev`, and served with
+  an ETag. Moving a window changes the revision, not the appearance, so it costs no
+  request at all; changing the theme costs one; a frame that links the stylesheet
+  without a key still revalidates into a 304.
+- **The history.** Revisions are append-only files (`os/history/<rev>.json` plus a
+  small `index.json` of revisions, times and labels), pruned to `LIMITS.history`. A
+  drag writes one document; it used to rewrite the previous forty. An older
+  single-file `history.json` is migrated the first time it is read.
+
 ### The conflict policy
 
 Every write is last-write-wins **unless it says otherwise**. Writes that describe a
@@ -422,7 +442,7 @@ truth.
 | `GET` | `/:slug/studio` | the builder |
 | `GET` | `/:slug/os/doc` | document + resolved theme/motion + catalogs (apps annotated with their live tools) |
 | `GET` | `/:slug/os/events` | SSE: every desktop change, plus catalog changes (`appServers`) and bundle writes (`appFiles`) |
-| `GET` | `/:slug/os/theme.css` | the compiled theme and motion |
+| `GET` | `/:slug/os/theme.css` | the compiled theme and motion (ETag = the appearance key; `?k=` is the shell's cache buster) |
 | `POST` | `/:slug/os/apps/:id/session` | open a capability session for an app frame |
 | `GET` | `/:slug/os/apps/:id/*` · `/:slug/os/widgets/:kind/*` | a custom app's or widget's files (sandboxed, CSP-locked) |
 | `GET` | `/static/js/os/lib/{layout,themes,animations,summary}.js` | the pure OS modules, served from `packages/os` |

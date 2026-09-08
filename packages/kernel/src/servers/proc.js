@@ -11,6 +11,7 @@
 // shell command" is an authorized, audited MCP call rather than a raw PTY bypass.
 
 import { notifyJobEnded } from "../../../os/src/notify.js";
+import { raiseFailure } from "../../../cell/src/shell.js";
 
 // Supervised processes, keyed by Sandbox id → job id → record. Module-level (not
 // per-server-instance) because the Kernel rebuilds its server set whenever the
@@ -36,6 +37,7 @@ function jobView(rec) {
   return {
     id: rec.id, name: rec.name, cmd: rec.cmd, pid: rec.pid ?? null,
     state: rec.state, code: rec.code ?? null,
+    ...(rec.failure ? { failure: rec.failure } : {}),
     startedAt: rec.startedAt, exitedAt: rec.exitedAt ?? null,
     lines: rec.logs.length,
   };
@@ -100,8 +102,8 @@ export function procServer(cell, sandbox) {
           properties: { cmd: { type: "string" }, timeoutMs: { type: "number" } },
         },
         async handler(_ctx, args) {
-          const r = await cell.exec(args.cmd, { timeoutMs: args.timeoutMs ?? 30_000 });
-          return { cmd: args.cmd, stdout: r.stdout, stderr: r.stderr, code: r.code };
+          const r = raiseFailure(await cell.exec(args.cmd, { timeoutMs: args.timeoutMs ?? 30_000 }), "run commands");
+          return { cmd: args.cmd, stdout: r.stdout, stderr: r.stderr, code: r.code, ...(r.timedOut ? { timedOut: true } : {}) };
         },
       },
       list: {
@@ -109,7 +111,7 @@ export function procServer(cell, sandbox) {
         inputSchema: { type: "object", properties: {} },
         async handler() {
           // `ps` flavors differ (busybox vs coreutils); fall back gracefully.
-          const r = await cell.exec("ps -ef 2>/dev/null || ps aux 2>/dev/null || ps");
+          const r = raiseFailure(await cell.exec("ps -ef 2>/dev/null || ps aux 2>/dev/null || ps"), "list processes");
           return { processes: r.stdout };
         },
       },
@@ -145,6 +147,8 @@ export function procServer(cell, sandbox) {
             if (ev.type === "stdout" || ev.type === "stderr") pushLog(rec, ev.type, ev.chunk);
             else if (ev.type === "done") {
               flushLog(rec);
+              // A shell that never started is a job that never ran: say which.
+              if (ev.failure) rec.failure = ev.failure;
               rec.state = rec.state === "stopped" ? "stopped" : ev.code === 0 ? "exited" : "failed";
               rec.code = ev.code;
               rec.exitedAt = Date.now();
@@ -227,7 +231,7 @@ export function procServer(cell, sandbox) {
         },
         async handler(_ctx, args) {
           const sig = String(args.signal || "TERM").replace(/^SIG/, "");
-          const r = await cell.exec(`kill -${sig} ${Number(args.pid)}`);
+          const r = raiseFailure(await cell.exec(`kill -${sig} ${Number(args.pid)}`), "signal processes");
           return { pid: Number(args.pid), signal: sig, code: r.code, stderr: r.stderr };
         },
       },

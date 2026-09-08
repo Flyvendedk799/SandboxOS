@@ -5,6 +5,8 @@
 // contract, the backing command is swappable per distro. Names are validated to a
 // safe charset before reaching the shell.
 
+import { raiseFailure } from "../../../cell/src/shell.js";
+
 const SAFE = /^[a-zA-Z0-9._+-]+$/;
 
 export function pkgServer(deps) {
@@ -23,7 +25,7 @@ export function pkgServer(deps) {
         inputSchema: { type: "object", required: ["name"], properties: { name: { type: "string" } } },
         async handler(_ctx, a) {
           if (!SAFE.test(a.name)) throw new Error(`invalid package name: ${a.name}`);
-          const r = await cell.exec(cmd.install(a.name), { timeoutMs: 120_000 });
+          const r = raiseFailure(await cell.exec(cmd.install(a.name), { timeoutMs: 120_000 }), "install packages");
           return { name: a.name, code: r.code, stdout: r.stdout, stderr: r.stderr };
         },
       },
@@ -32,7 +34,7 @@ export function pkgServer(deps) {
         inputSchema: { type: "object", required: ["name"], properties: { name: { type: "string" } } },
         async handler(_ctx, a) {
           if (!SAFE.test(a.name)) throw new Error(`invalid package name: ${a.name}`);
-          const r = await cell.exec(cmd.remove(a.name), { timeoutMs: 60_000 });
+          const r = raiseFailure(await cell.exec(cmd.remove(a.name), { timeoutMs: 60_000 }), "install packages");
           return { name: a.name, code: r.code, stdout: r.stdout, stderr: r.stderr };
         },
       },
@@ -40,7 +42,7 @@ export function pkgServer(deps) {
         description: "List installed packages.",
         inputSchema: { type: "object", properties: {} },
         async handler() {
-          const r = await cell.exec(cmd.list(), { timeoutMs: 30_000 });
+          const r = raiseFailure(await cell.exec(cmd.list(), { timeoutMs: 30_000 }), "install packages");
           return { packages: r.stdout.split("\n").filter(Boolean) };
         },
       },

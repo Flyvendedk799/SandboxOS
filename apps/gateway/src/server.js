@@ -32,7 +32,7 @@ import { exposedPorts } from "../../../packages/kernel/src/servers/ports.js";
 import { safeResolve, canonicalContained, canonicalLeafContained } from "../../../packages/kernel/src/servers/fs.js";
 import { loadManifest, saveManifest } from "../../../packages/manifest/src/manifest.js";
 import {
-  loadOs, osEvents, resolveTheme, themeCss, resolveAnimation, animationCss,
+  loadOs, osEvents, resolveTheme, themeCss, resolveAnimation, animationCss, themeKey,
   appDescriptor, widgetDescriptor, effectivePermissions, withheldPermissions,
   readBundleFile, bundleType, safeRelPath, destroyOs,
   importPayload, importBundle, saveOs, docFromDistroSpec, builtinDistro,
@@ -1074,6 +1074,14 @@ async function handle(req, res) {
   if (action === "mcp" && req.method === "POST") {
     scheduler.touch(sandbox.id);
     const { server: mcpSrv, tool: mcpTool, args } = await readBody(req);
+    // Validate at the door: what a caller sends is data, and data that does not
+    // fit the shape gets a sentence naming the field — never a database error.
+    if (typeof mcpSrv !== "string" || !mcpSrv)
+      return sendJson(res, 400, { ok: false, code: "bad_request", error: "missing field: server" });
+    if (typeof mcpTool !== "string" || !mcpTool)
+      return sendJson(res, 400, { ok: false, code: "bad_request", error: "missing field: tool" });
+    if (args != null && (typeof args !== "object" || Array.isArray(args)))
+      return sendJson(res, 400, { ok: false, code: "bad_request", error: "field args must be an object" });
     // Agent spawn quota: check before delegating to the kernel.
     if (mcpSrv === "agents" && mcpTool === "spawn") {
       const agentQuota = getQuota(principal.tenant_id);
@@ -1248,9 +1256,22 @@ async function handle(req, res) {
     if (!authorize(held, "desktop", "get")) return sendJson(res, 403, { ok: false, error: "denied: desktop.get" });
     const d = loadOs(sandbox);
     const css = themeCss(resolveTheme(d)) + animationCss(resolveAnimation(d));
+    // The client asks for this by *appearance*, not by revision, so moving a
+    // window costs nothing here (goal.md T0.5). The ETag makes even a changed
+    // appearance a 304 when the browser already has that exact stylesheet, and
+    // immutable caching makes a repeat of the same key free.
+    // `no-cache` here means "revalidate", not "do not store": the shell links this
+    // by appearance key so a window move asks for nothing at all, and a frame that
+    // links it without one still gets a 304 rather than a stale desktop.
+    const etag = `"${themeKey(d)}"`;
+    if (req.headers["if-none-match"] === etag) {
+      res.writeHead(304, { ETag: etag, "Cache-Control": "no-cache" });
+      return res.end();
+    }
     res.writeHead(200, {
       "Content-Type": "text/css; charset=utf-8",
-      "Cache-Control": "no-store",
+      "Cache-Control": "no-cache",
+      ETag: etag,
       "Content-Length": Buffer.byteLength(css),
     });
     return res.end(css);

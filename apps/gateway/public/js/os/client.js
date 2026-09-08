@@ -30,7 +30,7 @@ export function onOs(fn) { listeners.add(fn); return () => listeners.delete(fn);
 function adopt(snapshot) {
   os.snap = snapshot;
   os.doc = snapshot.doc;
-  applyThemeLink(snapshot.doc.rev);
+  applyThemeLink(snapshot.themeKey);
   emit("doc");
 }
 
@@ -43,7 +43,7 @@ export async function loadOs() {
 /** Re-read the document without re-reading the catalogs (cheap and frequent). */
 export async function refreshDoc() {
   const r = await api.mcp("desktop", "state", {});
-  if (os.snap) { os.snap.doc = r.doc; os.doc = r.doc; applyThemeLink(r.doc.rev); emit("doc"); }
+  if (os.snap) { os.snap.doc = r.doc; os.doc = r.doc; applyThemeLink(r.themeKey); emit("doc"); }
   return r.doc;
 }
 
@@ -129,7 +129,17 @@ let source = null;
 export function connect() {
   if (source) return;
   source = new EventSource(`/${slug}/os/events`);
-  source.addEventListener("hello", () => { os.connected = true; emit("conn"); });
+  // A stream that comes back after a gap has missed every write in it. `hello`
+  // says where the document is now; if that is not where we are, we pull. Without
+  // this a tab that slept through three agent writes painted a desktop that no
+  // longer existed, and said nothing (goal.md T0.6).
+  source.addEventListener("hello", (e) => {
+    os.connected = true;
+    emit("conn");
+    let at = null;
+    try { at = JSON.parse(e.data)?.rev ?? null; } catch { /* an unreadable hello is still a hello */ }
+    if (at != null && at !== (os.doc?.rev ?? null)) loadOs().catch(() => {});
+  });
   source.onerror = () => { os.connected = false; emit("conn"); };
   source.onmessage = (e) => {
     let ev;
@@ -139,7 +149,7 @@ export function connect() {
       // out-of-order delivery must never rewind the desktop.
       if ((ev.doc.rev ?? 0) < (os.doc?.rev ?? 0)) return;
       if (os.snap) { os.snap.doc = ev.doc; os.doc = ev.doc; }
-      applyThemeLink(ev.doc.rev);
+      applyThemeLink(ev.themeKey);
       emit("doc");
       // A newly defined app or theme changes the catalogs, not just the document.
       if (["appDefine", "widgetDefine", "appRemove", "widgetKindRemove", "set", "revert", "reset"].includes(ev.op)) {
@@ -163,10 +173,13 @@ export function disconnect() { source?.close(); source = null; }
 // shell, the Studio preview and every custom app frame then read one stylesheet
 // and can never drift from each other.
 
-let themeRev = -1;
-function applyThemeLink(rev) {
-  if (rev === themeRev) return;
-  themeRev = rev;
+// Keyed by what the stylesheet *is*, not by the revision it arrived with: moving
+// a window changes the revision and not the appearance, and re-fetching a
+// stylesheet sixty times during a drag is a cost nobody asked for (goal.md T0.5).
+let themeAt = null;
+function applyThemeLink(key) {
+  if (key == null || key === themeAt) return;
+  themeAt = key;
   let link = document.getElementById("os-theme");
   if (!link) {
     link = document.createElement("link");
@@ -174,7 +187,7 @@ function applyThemeLink(rev) {
     link.rel = "stylesheet";
     document.head.append(link);
   }
-  link.href = `/${slug}/os/theme.css?rev=${rev}`;
+  link.href = `/${slug}/os/theme.css?k=${encodeURIComponent(key)}`;
 }
 
 // ── small shared helpers ────────────────────────────────────────────────────

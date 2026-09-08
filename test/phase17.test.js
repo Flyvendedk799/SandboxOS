@@ -203,9 +203,27 @@ test("#3 in-volume symlink escape is rejected for read/list/write; normal I/O wo
   const h = grantsFor(owner.id, sb.id);
   const c = (server, tool, args) => k.call({ principalId: owner.id, heldPatterns: h, server, tool, args });
 
-  // Ensure the volume exists, then plant a symlink pointing outside it.
+  // Ensure the volume exists, then plant a symlink pointing outside it. The
+  // target is a real directory with a real file in it, so a missing containment
+  // check would *succeed* rather than trip over ENOENT — the test has to be able
+  // to fail for the right reason.
   await c("fs", "write", { path: ".keep", content: "x" });
-  nodeFs.symlinkSync("/etc", path.join(k.cell.root, "escape"));
+  const outside = path.join(k.cell.root, "..", "outside-p17");
+  nodeFs.mkdirSync(outside, { recursive: true });
+  nodeFs.writeFileSync(path.join(outside, "passwd"), "root:x:0:0:host secret");
+  // Creating a symlink is a privilege on Windows (SeCreateSymbolicLink: Developer
+  // Mode or an elevated shell); a directory junction is not, and is the same
+  // attack. Where neither can be planted, say so and skip — a guard test that
+  // passes because the attack never happened is worse than an absent one.
+  try {
+    nodeFs.symlinkSync(outside, path.join(k.cell.root, "escape"), "junction");
+  } catch (e) {
+    if (e.code === "EPERM" || e.code === "EACCES") {
+      console.log(`  ⓘ skipped: this host does not permit creating symlinks or junctions (${e.code})`);
+      return;
+    }
+    throw e;
+  }
 
   const r1 = await c("fs", "read", { path: "escape/passwd" });
   assert.equal(r1.ok, false);

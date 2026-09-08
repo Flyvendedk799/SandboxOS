@@ -5,6 +5,7 @@
 // command in the Cell with the secrets as env vars, and returns only the output.
 
 import { putSecret, listSecrets, removeSecret, resolveSecretEnv } from "../../../secrets/src/store.js";
+import { raiseFailure } from "../../../cell/src/shell.js";
 
 export function secretsServer(deps) {
   const { sandbox, cell } = deps;
@@ -34,7 +35,7 @@ export function secretsServer(deps) {
         },
         async handler(_ctx, a) {
           const env = resolveSecretEnv(sandbox.id, a.refs); // values stay server-side
-          const r = await cell.exec(a.cmd, { env, timeoutMs: a.timeoutMs ?? 30_000 });
+          const r = raiseFailure(await cell.exec(a.cmd, { env, timeoutMs: a.timeoutMs ?? 30_000 }), "run commands");
           return { stdout: r.stdout, stderr: r.stderr, code: r.code };
         },
       },

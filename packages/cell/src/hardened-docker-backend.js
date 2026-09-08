@@ -14,7 +14,8 @@
 
 import fs from "node:fs";
 import { newMarker as ptyMarker, ptyWrapper, resizeScript, cleanupScript } from "./pty.js";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
+import { safeSpawn, detachedSpawn } from "./spawn.js";
 import config from "../../config/src/config.js";
 import { remoteHandle, newMarker, recordingScript } from "./handles.js";
 
@@ -131,10 +132,11 @@ export class HardenedDockerBackend {
     // command; the handle signals *that*. The command travels as $0, so no
     // quoting is needed at any layer.
     const marker = newMarker();
-    const proc = spawn("docker", [
+    const proc = safeSpawn("docker", [
       "exec", "-w", WORKDIR, ...envFlags, this.container,
       "/bin/sh", "-c", recordingScript(marker), command,
-    ]);
+    ], {}, (err) => callback({ type: "stderr", chunk: `sandboxos: could not run docker: ${err.code ?? err.message}
+` }));
     const handle = remoteHandle(proc, marker, (script) =>
       docker(["exec", this.container, "/bin/sh", "-c", script], { timeoutMs: 10_000 }));
     const timer = setTimeout(() => handle.kill("SIGKILL"), timeoutMs);
@@ -153,17 +155,19 @@ export class HardenedDockerBackend {
     const envFlags = Object.entries({ ...env, TERM: "xterm-256color", COLUMNS: String(cols), LINES: String(rows) })
       .flatMap(([k, v]) => ["-e", `${k}=${v}`]);
     const marker = ptyMarker();
-    const proc = spawn("docker", ["exec", "-i", "-w", WORKDIR, ...envFlags, this.container, "/bin/sh", "-c", ptyWrapper("/bin/sh -i"), "sh", marker], {
+    const proc = safeSpawn("docker", ["exec", "-i", "-w", WORKDIR, ...envFlags, this.container, "/bin/sh", "-c", ptyWrapper("/bin/sh -i"), "sh", marker], {
       stdio: ["pipe", "pipe", "pipe"],
-    });
+    }, (err) => onData(`
+[31msandboxos:[0m could not run docker: ${err.code ?? err.message}
+`));
     proc.stdout.on("data", onData);
     proc.stderr.on("data", onData);
     const container = this.container;
-    const resize = (c, r) => { try { spawn("docker", ["exec", container, "/bin/sh", "-c", resizeScript(marker, c, r)], { stdio: "ignore" }); } catch { /* best effort */ } };
+    const resize = (c, r) => detachedSpawn("docker", ["exec", container, "/bin/sh", "-c", resizeScript(marker, c, r)]);
     const first = setTimeout(() => resize(cols, rows), 400);
     // Killing `docker exec` locally leaves the shell alive in the container:
     // the cleanup script kills the recorded shell's process group in there.
-    const cleanup = () => { try { spawn("docker", ["exec", container, "/bin/sh", "-c", cleanupScript(marker)], { stdio: "ignore", detached: true }).unref(); } catch {} };
+    const cleanup = () => detachedSpawn("docker", ["exec", container, "/bin/sh", "-c", cleanupScript(marker)], { detached: true });
     let closed = false;
     proc.on("exit", () => { clearTimeout(first); cleanup(); if (!closed) { closed = true; onClose(); } });
     proc.on("error", () => { if (!closed) { closed = true; onClose(); } });

@@ -37,6 +37,14 @@ class HostedServer {
       clearTimeout(p.timer);
       msg.ok ? p.resolve(msg.result) : p.reject(new Error(msg.error || "marketplace error"));
     });
+    // A child that cannot start emits 'error' asynchronously; unhandled, that
+    // ends the Gateway. Pending calls are failed instead, and the next call
+    // gets a fresh attempt.
+    child.on("error", (err) => {
+      for (const p of this._pending.values()) { clearTimeout(p.timer); p.reject(new Error(`marketplace server failed to start: ${err.code ?? err.message}`)); }
+      this._pending.clear();
+      this.child = null;
+    });
     child.on("exit", () => {
       for (const p of this._pending.values()) { clearTimeout(p.timer); p.reject(new Error("marketplace server exited")); }
       this._pending.clear();
