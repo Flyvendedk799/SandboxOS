@@ -32,6 +32,17 @@ process.env.SANDBOXOS_HOME = home;
 process.env.SANDBOXOS_CELL_BACKEND = "local";
 process.env.SANDBOXOS_PASSWORD = "day";
 
+/**
+ * DAY_KEYBOARD=1 drives the whole day with the keyboard: every activation
+ * becomes focus-then-Enter instead of a click.
+ *
+ * This is the last clause of Track 4's "done when" — a keyboard-only run of the
+ * day test completes — and it is a real check rather than a mode switch, because
+ * an affordance that only answers a synthetic click is not keyboard-reachable.
+ * A div with an onclick passes the pointer run and fails this one.
+ */
+const keyboardOnly = process.env.DAY_KEYBOARD === "1";
+
 const shots = process.env.DAY_SHOTS ?? path.join(home, "shots");
 fs.mkdirSync(shots, { recursive: true });
 
@@ -43,6 +54,8 @@ const { getKernel, _resetKernels } = await import("../packages/kernel/src/kernel
 const { createServer } = await import("../apps/gateway/src/server.js");
 const { killAllSessionsEverywhere } = await import("../packages/kernel/src/pty-sessions.js");
 const { chromium } = await import("playwright-core");
+
+if (keyboardOnly) console.log("keyboard only: every activation is focus-then-Enter\n");
 
 const failures = [];
 let act = "—";
@@ -92,6 +105,20 @@ const until = async (fn, what, ms = 25_000) => {
   }
   return false;
 };
+/**
+ * Press a thing. With a pointer, that is a click; with a keyboard, it is focus
+ * and Enter — and if the element cannot take focus, that is the finding.
+ */
+const press = async (selector) => {
+  if (!keyboardOnly) return page.click(selector);
+  const el = page.locator(selector).first();
+  await el.waitFor({ state: "visible", timeout: 15_000 });
+  await el.focus();
+  const focused = await page.evaluate(() => document.activeElement?.tagName?.toLowerCase() ?? "none");
+  if (focused === "body" || focused === "none") throw new Error(`${selector} cannot take focus — it is not reachable without a pointer`);
+  await page.keyboard.press("Enter");
+};
+
 const serverPort = await freePort();
 // Two ways to ask the same question. Direct is how the *script* checks that
 // something is listening at all; through the slug is how a *person* reaches it,
@@ -128,8 +155,8 @@ try {
   check((await page.$$(".fr-card")).length === 4, "the one idea is explained on one screen");
   const seedNames = await page.$$eval(".fr-seed .fr-seed-name", (els) => els.map((e) => e.textContent));
   check(seedNames.length >= 4, `and there is a seed to pick (${seedNames.join(", ")})`);
-  await page.click(".fr-seed:has-text('Developer Box')");
-  await page.click(".fr-go");
+  await press(".fr-seed:has-text('Developer Box')");
+  await press(".fr-go");
   await page.waitForSelector(".os-window", { timeout: 60_000 });
   await page.waitForTimeout(1200);
 
@@ -163,16 +190,16 @@ try {
   await page.waitForSelector(".file-list .row-line", { timeout: 15_000 });
   const listing = await page.$$eval(".file-list .row-line", (els) => els.map((e) => e.textContent));
   check(listing.some((t) => t.includes("server.js")), `Files shows the project (${listing.length} entries)`);
-  await page.click(".file-list .row-line:has-text('server.js')");
+  await press(".file-list .row-line:has-text('server.js')");
   await page.waitForSelector(".file-pane textarea", { timeout: 10_000 });
   const opened = await page.inputValue(".file-pane textarea");
-  check(/createServer/.test(opened), "clicking the file opens it, with its contents");
+  check(/createServer/.test(opened), `${keyboardOnly ? "reaching the file with the keyboard" : "clicking the file"} opens it, with its contents`);
 
   // Edit it in the window and press Save — no tool call, no console.
   await page.focus(".file-pane textarea");
   await page.keyboard.press("Control+End");
   await page.keyboard.type("\n// edited in the Files window\n");
-  await page.click(".app-bar button:has-text('Save')");
+  await press(".app-bar button:has-text('Save')");
   const saved = await until(async () => /edited in the Files window/.test((await mcp("fs", "read", { path: "app/server.js" })).content), "the save to land");
   check(saved, "editing it and pressing Save writes the file inside the machine");
   await shot(page, "01-files");
@@ -224,7 +251,7 @@ try {
   check(await until(listening("day one"), "the supervised server to answer"), "the same command, supervised this time, is serving");
   const listed = await until(async () => (await page.$$eval(".ops-list .row-line", (els) => els.map((e) => e.textContent))).some((t) => t.includes("web")), "Jobs to list it");
   check(listed, "the supervised process is in Jobs, with the shells listed beneath it");
-  await page.click(".ops-list .row-line:has-text('web')");
+  await press(".ops-list .row-line:has-text('web')");
   const tailed = await until(async () => /still serving/.test(await page.$eval(".ops-pane", (el) => el.innerText)), "the log to arrive in the window");
   check(tailed, "Jobs tails its output in the window, without a console anywhere");
   await page.fill(".ops-search", "serving");
@@ -237,9 +264,9 @@ try {
   await page.fill(".ops-search", "");
 
   // Restart it from the window: Stop, then Start again, both in the pane head.
-  await page.click(".ops-pane-head button:has-text('Stop')");
+  await press(".ops-pane-head button:has-text('Stop')");
   await until(async () => (await mcp("proc", "logs", { id: job.id })).state !== "running", "it to stop");
-  await page.click(".ops-pane-head button:has-text('Start again')");
+  await press(".ops-pane-head button:has-text('Start again')");
   const back = await until(listening("day one"), "it to come back", 30_000);
   check(back, "and it can be stopped and started again from the same two buttons");
   check((await mcp("proc", "jobs", {})).jobs.filter((j) => j.name === "web").length === 2, "the run that ended stays in the list, so its log is still readable");
@@ -424,7 +451,7 @@ try {
   check(front === 1, `one front window instead of a pile of tiny ones (${front})`);
   check(await page.$(".os-dock .dock-app .lbl"), "the dock becomes a labelled app switcher");
   check(await page.$(".os-shelf"), "and the widgets fold into a shelf rather than disappearing");
-  await page.click(".os-shelf-handle");
+  await press(".os-shelf-handle");
   await page.waitForTimeout(500);
   check((await page.$$eval(".os-shelf-body .os-widget", (els) => els.filter((e) => !e.hidden).length)) >= 1, "the shelf holds the workspace's widgets");
   check(await serves("day two")(), "the server is still serving while you look at it on a phone");

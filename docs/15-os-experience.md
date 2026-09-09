@@ -283,6 +283,14 @@ have not read. A tool that takes no arguments also has a **Run**, which does.
 Spotlight itself now carries the whole catalogue, so the handoff lands on a row
 that works.
 
+### The day, with no pointer
+
+`DAY_KEYBOARD=1 npm run day` runs the whole acceptance day with the keyboard: every
+activation becomes focus-then-Enter, and an element that cannot take focus fails the
+run with its selector. That is the last clause of Track 4's "done when", and it is a
+check rather than a mode — a div with an `onclick` passes the pointer run and fails
+this one. `npm run release-check` runs both.
+
 ### Recorded, or announced
 
 Attention is the user's, and the mechanism is one flag rather than a queue with

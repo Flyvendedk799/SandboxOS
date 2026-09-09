@@ -64,12 +64,19 @@ const stages = [
   { key: "bench", label: "the bench", cmd: ["scripts/bench.mjs"], what: "the T4.1 budgets, D of the acceptance suite" },
   { key: "smoke", label: "the smoke", cmd: ["scripts/browser-smoke.mjs"], what: "the OS and the Studio in a real browser", browser: true },
   { key: "day", label: "the day", cmd: ["scripts/day.mjs"], what: "A of the acceptance suite — ten acts, no console", browser: true },
+  // The same day with no pointer at all. goal.md Track 4 is done "when the bench
+  // passes, the hostile test passes, and a keyboard-only run of the day
+  // completes", and the only way to know is to run it.
+  { key: "keyboard", label: "the keyboard", cmd: ["scripts/day.mjs"], what: "the same day, driven with nothing but the keyboard", browser: true, env: { DAY_KEYBOARD: "1" } },
   { key: "docker", label: "the container", cmd: ["scripts/docker-check.mjs"], what: "the same machine on the Docker backend", docker: true },
 ];
 
-const run = (cmd) => new Promise((res) => {
+const run = (cmd, extraEnv = null) => new Promise((res) => {
   const started = Date.now();
-  const p = spawn(process.execPath, cmd, { stdio: ["ignore", "pipe", "pipe"], env: process.env });
+  const p = spawn(process.execPath, cmd, {
+    stdio: ["ignore", "pipe", "pipe"],
+    env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
+  });
   let out = "";
   p.stdout.on("data", (d) => { out += d; if (!jsonOut) process.stdout.write(dim(d.toString())); });
   p.stderr.on("data", (d) => { out += d; });
@@ -103,7 +110,7 @@ function headline(key, out) {
     const good = (out.match(/^\s+✓ /gm) ?? []).length;
     return bad ? `${bad} of ${good + bad} checks failed` : `${good} checks passed in a container`;
   }
-  if (key === "day") {
+  if (key === "day" || key === "keyboard") {
     const acts = (out.match(/^\d+\. /gm) ?? []).length;
     const bad = (out.match(/^\s+✗ /gm) ?? []).length;
     const good = (out.match(/^\s+✓ /gm) ?? []).length;
@@ -118,7 +125,7 @@ for (const stage of stages) {
   if (stage.browser && !chrome) { results.push({ ...stage, skipped: "no browser on this host" }); continue; }
   if (stage.docker && !dockerVersion) { results.push({ ...stage, skipped: "no Docker here — which is a supported way to run" }); continue; }
   if (!jsonOut) console.log(`\n\x1b[1m${stage.label}\x1b[0m — ${stage.what}`);
-  const r = await run(stage.cmd);
+  const r = await run(stage.cmd, stage.env ?? null);
   results.push({ ...stage, ...r, headline: headline(stage.key, r.out) });
 }
 

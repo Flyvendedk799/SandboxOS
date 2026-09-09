@@ -56,6 +56,7 @@ npm test                                       # the whole suite
 npm run smoke                                  # the OS and the Studio, in a headless browser
 npm run bench                                  # the performance budgets, with a pass/fail per row
 npm run day                                    # a whole day of work, driven through the desktop
+DAY_KEYBOARD=1 npm run day                     # …the same day, with no pointer at all
 npm run release-check                          # all of the above on this host, as one page
 ```
 
