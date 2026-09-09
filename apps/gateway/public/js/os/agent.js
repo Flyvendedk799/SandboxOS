@@ -12,6 +12,10 @@
 
 import { h, fill, icon, api, slug, toast, toastError } from "../core.js";
 import { call, onOs, os } from "./client.js";
+// The impact table is shared with the tool that reports it, served from
+// packages/os, so the panel and the Kernel cannot disagree about what a call
+// touches.
+import { proposalImpact } from "/static/js/os/lib/proposals.js";
 
 const SYSTEM_HINT = [
   "Ask for a window, a widget, a colour, a whole app.",
@@ -65,28 +69,75 @@ export function createAgentPanel({ onClose, quick = QUICK, title = "Build agent"
     h("div.composer", null, input, send),
   );
 
-  /** What a proposal would do, in the shortest honest form: the calls it holds. */
+  /**
+   * What a proposal would do: which parts of the document it touches, then the
+   * exact calls.
+   *
+   * Deliberately not a predicted diff. The ops have not run, so their effect can
+   * only be simulated by running them — and a prediction that turned out wrong
+   * would be worse than no prediction. What *is* true before anything happens is
+   * which sections each call changes (`proposalImpact`), and after applying, the
+   * history's own structural diff says exactly what did change: measured rather
+   * than guessed. The last-applied line below is the way to it.
+   */
   function paintProposals() {
     if (!review) return;
     const list = os.doc?.proposals ?? [];
-    if (!list.length) { fill(proposalsEl); return; }
-    fill(proposalsEl, ...list.map((p) => h("div.proposal", null,
-      h("div.hd", null,
-        h("b", p.label),
-        h("span.dim", `${p.ops.length} change${p.ops.length === 1 ? "" : "s"}`)),
-      h("div.ops", null, ...p.ops.map((op) => h("div.op", null,
-        h("code", `desktop.${op.tool}`), h("span.dim", preview(op.args, 60))))),
+    if (!list.length) { fill(proposalsEl, ...(lastApplied ? [appliedRow()] : [])); return; }
+    fill(proposalsEl, ...list.map((p) => {
+      const impact = proposalImpact(p);
+      return h("div.proposal", null,
+        h("div.hd", null,
+          h("b", p.label),
+          h("span.dim", `${p.ops.length} change${p.ops.length === 1 ? "" : "s"}`)),
+        h("div.touches", null,
+          h("span.dim", "would change"),
+          ...impact.sections.map((sec) => h("span.chip-tag", sec)),
+          ...(impact.unknown ? [h("span.chip-tag.warn", `unknown: ${impact.unknown.join(", ")}`)] : [])),
+        h("div.ops", null, ...p.ops.map((op) => h("div.op", null,
+          h("code", `desktop.${op.tool}`), h("span.dim", preview(op.args, 60))))),
+        h("div.act", null,
+          h("button.app-btn.primary", { onclick: () => applyProposal(p) }, "Apply"),
+          h("button.app-btn", { onclick: () => discardProposal(p) }, "Discard")),
+      );
+    }), ...(lastApplied ? [appliedRow()] : []));
+  }
+
+  /** After applying: the diff that actually happened, on request. */
+  let lastApplied = null;
+  function appliedRow() {
+    return h("div.proposal.applied", null,
+      h("div.hd", null, h("b", lastApplied.label), h("span.dim", `applied · r${lastApplied.rev}`)),
       h("div.act", null,
-        h("button.app-btn.primary", { onclick: () => applyProposal(p) }, "Apply"),
-        h("button.app-btn", { onclick: () => discardProposal(p) }, "Discard")),
-    )));
+        h("button.app-btn", { onclick: () => showApplied() }, "What changed"),
+        h("button.app-btn", { onclick: () => { lastApplied = null; paintProposals(); } }, "Dismiss")));
+  }
+
+  async function showApplied() {
+    try {
+      const r = await api.mcp("desktop", "history", { rev: Math.max(0, lastApplied.rev - lastApplied.ops) });
+      const d = r.diff ?? {};
+      const part = (k, v) => (v && (v.added || v.removed || v.changed)
+        ? `${k} +${v.added} −${v.removed} ~${v.changed}`
+        : Array.isArray(v) && v.length ? `${k} (${v.join(", ")})` : null);
+      const said = ["windows", "widgets", "workspaces", "theme", "animation", "wm", "shell", "apps"]
+        .map((k) => part(k, d[k])).filter(Boolean);
+      toast(`${lastApplied.label}`, {
+        body: said.length ? said.join(" · ") : "nothing changed structurally",
+        timeout: 7000,
+      });
+    } catch (e) { toastError("Could not read what changed", e); }
   }
 
   async function applyProposal(p) {
     try {
       const r = await call("applyProposal", { id: p.id });
+      // Each op was its own revision, so the diff of what happened starts that
+      // many revisions back. Kept so "what changed" is answerable afterwards.
+      lastApplied = { label: p.label, rev: r.rev, ops: (r.applied?.length ?? 0) + 1 };
       if (r.failure) toast("Partly applied", { body: `${r.failure.tool}: ${r.failure.error}`, kind: "err", timeout: 5000 });
       else toast("Applied", { body: `${r.applied.length} change${r.applied.length === 1 ? "" : "s"}`, timeout: 2200 });
+      paintProposals();
     } catch (e) { toastError("Could not apply it", e); }
   }
   async function discardProposal(p) {

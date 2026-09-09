@@ -37,7 +37,7 @@ import {
   summarizeDoc, silhouetteSvg, READ_ONLY_DESKTOP_TOOLS,
   writeCheckpoint, readCheckpoint, removeCheckpoint, restoreCheckpoint,
   KEY_ACTIONS, DEFAULT_KEYS, isChord, NOTIFY_KINDS, prettyChord,
-  firstRunFiles, firstRunServer, firstRunPort,
+  firstRunFiles, firstRunServer, firstRunPort, proposalImpact,
 } from "../../../os/src/index.js";
 import { loadManifest, saveManifest } from "../../../manifest/src/manifest.js";
 import { CATALOG } from "../catalog.js";
@@ -1930,7 +1930,12 @@ export function desktopServer(deps) {
         inputSchema: obj({}),
         async handler() {
           const d = doc();
-          return { proposals: d.proposals ?? [] };
+          // Each one says which parts of the document it would touch. Not a
+          // predicted diff: a call that has not run cannot be diffed, and a
+          // prediction that turned out wrong would be worse than none (T2.3).
+          return {
+            proposals: (d.proposals ?? []).map((p) => ({ ...p, impact: proposalImpact(p) })),
+          };
         },
       },
 

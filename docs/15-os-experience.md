@@ -187,6 +187,22 @@ it** — through the same tools, so a proposal can never do something its applie
 not do by hand — and reports which ops landed and where it stopped if one failed.
 `discardProposal` throws it away.
 
+What the panel shows above the calls is **which parts of the document the change
+would touch** — "would change: windows, theme" — and not a predicted diff. The ops
+have not run: their effect can only be simulated by running them, or by a second,
+pure implementation of every desktop tool, which would be a second implementation to
+keep honest and the first one people stopped trusting. `PROPOSAL_TOUCHES` in
+`packages/os/src/proposals.js` maps every writable tool to the sections it changes,
+the suite checks it against the live tool catalogue so a new tool cannot be added
+without saying what it touches, an unrecognised call is named rather than treated as
+harmless, and a call that replaces the document says "everything" instead of listing
+parts. The browser reads the same module the tool does, so the panel and the Kernel
+cannot disagree.
+
+After applying, **what changed** is measured rather than guessed: each op was its own
+revision, so the history's structural diff from the revision before the first one is
+the real answer, and the panel offers it.
+
 Because a proposal is in the document, it survives a reload, appears in a second tab,
 and is itself revertible. The Studio's agent panel has a **Review changes** switch: with
 it on, the assistant's `desktop.*` *writes* are captured into one proposal per turn

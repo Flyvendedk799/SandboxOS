@@ -1560,3 +1560,19 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
    clearly not asking for anything (goal.md T3.3). */
 .notif.quiet { opacity: .68; }
 .notif.quiet .hd b { font-weight: 550; }
+
+/* A proposal says which parts of the document it would touch, before it runs.
+   Not a predicted diff — a call that has not run cannot be diffed, and after
+   applying, "what changed" reads the history's own (goal.md T2.3). */
+.proposal .touches {
+  display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+  padding: 6px 10px 0; font-size: 10.5px;
+}
+.proposal .touches .dim { flex: none; }
+.chip-tag {
+  padding: 1px 6px; border-radius: 999px; font-size: 9.5px; font-weight: 600;
+  background: var(--stx-chip, var(--os-chip)); color: var(--stx-text-2, var(--os-text-2));
+}
+.chip-tag.warn { background: var(--os-accent-dim); color: var(--os-accent); }
+.proposal.applied { opacity: .85; }
+.proposal.applied .hd b { font-weight: 550; }

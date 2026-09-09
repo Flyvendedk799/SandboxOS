@@ -73,7 +73,7 @@ const requireIsolation = () => process.env.SANDBOXOS_REQUIRE_ISOLATION === "1";
 
 const PUBLIC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
 const OS_SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "os", "src");
-const OS_SHARED = new Set(["layout.js", "animations.js", "themes.js", "summary.js", "keys.js"]);
+const OS_SHARED = new Set(["layout.js", "animations.js", "themes.js", "summary.js", "keys.js", "proposals.js"]);
 const RESERVED = new Set(["", "login", "logout", "signup", "health", "api", "static", "favicon.ico"]);
 
 // ---- small http helpers ---------------------------------------------------
