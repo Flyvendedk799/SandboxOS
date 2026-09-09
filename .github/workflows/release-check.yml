@@ -1,0 +1,98 @@
+# The matrix behind promise §0.9 of goal.md: "it runs where its owner runs it —
+# Windows, macOS, Linux, with Docker or without". A promise nobody runs on three
+# platforms is a promise about one platform.
+#
+# Every leg runs the same command — `npm run release-check` — which prints one
+# page: what the host is, then the suite, the bench, the smoke, the day and the
+# container, each with a headline. Shipping is every page here being green.
+#
+# Docker is present on the Linux runners and absent on macOS and Windows, so the
+# "with Docker or without" half of the promise is covered by the matrix itself
+# rather than by a flag. The `linux-no-docker` leg hides the binary so the same
+# host is tested both ways.
+
+name: release check
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  release-check:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+          - name: linux-no-docker
+            os: ubuntu-latest
+            hide-docker: true
+          - name: macos
+            os: macos-latest
+          - name: windows
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      # The smoke and the day need a real Chromium. scripts/lib/chrome.mjs finds
+      # whatever this runner ended up with, so nothing here has to name a path.
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      # Prove the "without Docker" half on a host that has it: take it off PATH
+      # for this leg only. The release check then reports it as absent and skips
+      # the container stage, which is exactly what a laptop without Docker does.
+      - name: Hide Docker
+        if: matrix.hide-docker
+        shell: bash
+        run: |
+          sudo mv "$(command -v docker)" /usr/local/bin/docker.hidden
+          ! command -v docker
+
+      - name: Release check
+        run: npm run release-check
+
+      # The same page as JSON, kept as an artifact, so a regression can be read
+      # against the run before it rather than re-derived from scrollback.
+      - name: Release check (JSON)
+        if: always()
+        shell: bash
+        env:
+          RELEASE_JSON: "1"
+        run: npm run release-check > release-check.json || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-check-${{ matrix.name }}
+          path: release-check.json
+          if-no-files-found: warn
+
+  # The alternative database driver, on the platform where it is most likely to
+  # be used. Not part of the page: it is the same suite through another driver.
+  better-sqlite3:
+    name: suite (better-sqlite3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --no-audit --no-fund
+      - run: npm install --no-save better-sqlite3
+      - run: npm run test:better-sqlite3

@@ -19,7 +19,9 @@
     "tunnel": "echo 'Expose the spine publicly:' && echo '  cloudflared tunnel --url http://localhost:'${SANDBOXOS_PORT:-3939}",
     "smoke": "node scripts/browser-smoke.mjs",
     "bench": "node scripts/bench.mjs",
-    "day": "node scripts/day.mjs"
+    "day": "node scripts/day.mjs",
+    "release-check": "node scripts/release-check.mjs",
+    "docker-check": "node scripts/docker-check.mjs"
   },
   "optionalDependencies": {
     "better-sqlite3": "^11.0.0"
