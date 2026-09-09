@@ -35,7 +35,12 @@ export function createScreen({ ctx = {} } = {}) {
 
   const wm = createDesktop({
     root: desktopEl,
-    ctx: { ...ctx, launch, mark: () => call("arrange", { preset: "grid", viewport: wm.viewport() }), windowMenu },
+    ctx: {
+      ...ctx, launch, mark: () => call("arrange", { preset: "grid", viewport: wm.viewport() }), windowMenu,
+      // An app can hand you to Spotlight with something already typed — the
+      // Manual's "Try it" is exactly this, and deliberately not "run it for me".
+      spotlight: (q = "") => showOverlay("spotlight", () => spotlight(q)),
+    },
   });
 
   /** The window's menu — a right-click on a desktop, a long press on a phone. */
@@ -314,8 +319,20 @@ export function createScreen({ ctx = {} } = {}) {
     return fileIndex;
   }
 
-  function spotlight() {
-    const input = h("input", { placeholder: "Search apps, files, widgets, themes, actions…", autofocus: true });
+  /** The machine's whole tool catalogue, fetched once per page like the files. */
+  let toolIndex = null;
+  async function indexTools() {
+    if (toolIndex) return toolIndex;
+    try { toolIndex = (await api.mcp("kernel", "tools", {})).tools ?? []; }
+    catch { toolIndex = []; }
+    return toolIndex;
+  }
+
+  /** Arguments a tool cannot be called without — a Spotlight row cannot supply them. */
+  const requiredArgs = (schema) => schema?.required ?? [];
+
+  function spotlight(prefill = "") {
+    const input = h("input", { placeholder: "Search apps, files, widgets, themes, tools, actions…", autofocus: true, value: prefill });
     const results = h("div.results");
     let cursor = 0;
     let rows = [];
@@ -332,6 +349,23 @@ export function createScreen({ ctx = {} } = {}) {
             catch (e) { toastError(`${a.mcp.name}.${t} failed`, e); }
           } });
         }
+      }
+      // Every tool this machine serves, so the Manual's "Try it" lands on
+      // something runnable. A tool with required arguments is not run from a
+      // one-line search box — it opens in the Manual, where they are named.
+      for (const t of toolIndex ?? []) {
+        const [server, name] = t.name.split(".");
+        const needs = requiredArgs(t.inputSchema);
+        out.push({
+          name: t.name,
+          sub: needs.length ? `Tool · needs ${needs.join(", ")}` : `Tool · ${(t.description ?? "").slice(0, 48)}`,
+          icon: "play",
+          run: async () => {
+            if (needs.length) { launch("help", { page: null, q: t.name }); return; }
+            try { const r = await api.mcp(server, name, {}); toast(t.name, { body: JSON.stringify(r).slice(0, 240), kind: "ok", timeout: 7000 }); }
+            catch (e) { toastError(`${t.name} said no`, e); }
+          },
+        });
       }
       for (const p of recentFiles()) out.push({ name: p.split("/").pop(), sub: `Recent · ${p}`, icon: "files", run: () => launch(appFor(p) ?? "files", { path: p }) });
       for (const w of os.snap.widgetKinds ?? []) out.push({ name: `Add ${w.name}`, sub: "Widget", icon: w.icon, run: () => call("widgetAdd", { kind: w.kind }) });
@@ -363,7 +397,7 @@ export function createScreen({ ctx = {} } = {}) {
       return out;
     };
 
-    const all = actions();
+    const all = [...actions()];
 
     function paint() {
       const q = input.value.trim().toLowerCase();
@@ -393,7 +427,8 @@ export function createScreen({ ctx = {} } = {}) {
     });
     paint();
     indexFiles().then(paint);
-    setTimeout(() => input.focus(), 0);
+    indexTools().then(() => { all.length = 0; all.push(...actions()); paint(); });
+    setTimeout(() => { input.focus(); input.select?.(); }, 0);
 
     return h("div.os-overlay.top", { onclick: hideOverlay },
       h("div.os-panel.os-spotlight", { onclick: (e) => e.stopPropagation() },

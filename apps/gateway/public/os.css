@@ -1380,3 +1380,59 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
 .stx-inspector .kv { display: flex; gap: 8px; padding: 3px 0; font-size: 10.5px; }
 .stx-inspector .kv .k { flex: none; min-width: 96px; color: var(--stx-text-3); }
 .stx-inspector .kv .v { color: var(--stx-text-2); }
+
+/* ── The Manual (help.js) ────────────────────────────────────────────────────
+   The repository's own documentation, rendered, plus the live tool catalogue.
+   Prose wants a measure and a rhythm the ops panes do not, so it gets its own
+   type here rather than borrowing a list's. */
+
+.help-list { width: 300px; }
+.help-pane { padding: 0; }
+.help-source {
+  padding: 10px 20px 22px; font-size: 10.5px; color: var(--os-text-3);
+  border-top: 1px solid var(--os-line); font-family: var(--mono);
+}
+
+.md { padding: 16px 20px 8px; max-width: 74ch; }
+.md-h {
+  margin: 22px 0 8px; line-height: 1.3; color: var(--os-text);
+  font-weight: 650; scroll-margin-top: 8px;
+}
+.md h1.md-h { font-size: 18px; margin-top: 4px; }
+.md h2.md-h { font-size: 14.5px; }
+.md h3.md-h { font-size: 12.5px; }
+.md h4.md-h { font-size: 11.5px; color: var(--os-text-2); }
+.md-p { margin: 0 0 11px; font-size: 12px; line-height: 1.65; color: var(--os-text-2); }
+.md-list { margin: 0 0 11px; padding-left: 20px; font-size: 12px; line-height: 1.65; color: var(--os-text-2); }
+.md-list li { margin: 2px 0; }
+.md-quote {
+  margin: 0 0 11px; padding: 6px 12px; border-left: 2px solid var(--os-accent);
+  background: var(--os-chip); font-size: 12px; line-height: 1.6; color: var(--os-text-2);
+}
+.md-rule { margin: 18px 0; border: 0; border-top: 1px solid var(--os-line); }
+.md code, .ops-pane .md-code code {
+  font-family: var(--mono); font-size: 11px;
+  background: var(--os-chip); border-radius: 4px; padding: 1px 4px; color: var(--os-text);
+}
+.md-code {
+  margin: 0 0 12px; padding: 10px 12px; border-radius: 8px; overflow-x: auto;
+  background: var(--os-bg-1); border: 1px solid var(--os-line);
+}
+.md-code code { background: none; padding: 0; line-height: 1.6; color: var(--os-text-2); white-space: pre; }
+.md a { color: var(--os-accent); }
+.md-ref { color: var(--os-text); border-bottom: 1px dotted var(--os-line); }
+.md-table-wrap { overflow-x: auto; margin: 0 0 12px; }
+.md-table { border-collapse: collapse; font-size: 11px; min-width: 100%; }
+.md-table th, .md-table td {
+  border: 1px solid var(--os-line); padding: 5px 9px; text-align: left;
+  color: var(--os-text-2); vertical-align: top;
+}
+.md-table th { color: var(--os-text); font-weight: 650; background: var(--os-chip); }
+
+/* A tool page: the arguments, and which of them are not optional. */
+.help-pane .ops-pane-head + .md-p { padding: 0 12px; margin-top: 10px; }
+.help-pane .kv { align-items: flex-start; }
+.help-pane .kv .v { font-family: inherit; text-align: right; max-width: 62%; }
+.help-pane .kv .v div { color: var(--os-text-2); margin-top: 2px; }
+.help-pane .req { color: var(--os-accent); font-size: 9.5px; font-weight: 700; letter-spacing: .06em; }
+.help-pane .md-code { margin: 0 12px 12px; }

@@ -36,6 +36,7 @@ import {
   appDescriptor, widgetDescriptor, effectivePermissions, withheldPermissions,
   readBundleFile, bundleType, safeRelPath, destroyOs,
   importPayload, importBundle, saveOs, docFromDistroSpec, builtinDistro,
+  manualIndex, manualPage, manualHeadings,
 } from "../../../packages/os/src/index.js";
 import { putTenantSecret, removeTenantSecret } from "../../../packages/secrets/src/store.js";
 import { providerConfig, providerOptions } from "../../../packages/llm/src/providers.js";
@@ -1383,6 +1384,21 @@ async function handle(req, res) {
   if (action === "os" && segments[3] === "doc" && req.method === "GET") {
     const r = await kernel.call({ principalId: principal.id, heldPatterns: held, server: "desktop", tool: "get", args: {} });
     return sendJson(res, r.ok ? 200 : 403, r.ok ? { ok: true, ...r.result } : { ok: false, error: r.error });
+  }
+
+  // GET /:slug/os/manual        — the table of contents plus every heading
+  // GET /:slug/os/manual/:page   — one page, as the markdown that ships
+  //
+  // The Help app reads the repository's own documentation rather than carrying a
+  // copy of it, so the manual cannot drift from the build (goal.md T5.2). The
+  // page id is looked up in a fixed table; nothing here joins a path from what
+  // the caller sent.
+  if (action === "os" && segments[3] === "manual" && req.method === "GET") {
+    if (!authorize(held, "desktop", "get")) return sendJson(res, 403, { ok: false, error: "denied: desktop.get" });
+    if (!segments[4]) return sendJson(res, 200, { ok: true, pages: manualIndex(), headings: manualHeadings() });
+    const page = manualPage(segments[4]);
+    if (!page) return sendJson(res, 404, { ok: false, error: `no such manual page: ${segments[4]}` });
+    return sendJson(res, 200, { ok: true, page: { id: page.id, title: page.title, file: page.file, text: page.text, missing: !!page.missing } });
   }
 
   // GET /:slug/os/events — live desktop changes (SSE). Every desktop.* write lands

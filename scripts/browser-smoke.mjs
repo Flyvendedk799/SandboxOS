@@ -188,6 +188,36 @@ try {
   for (const w of (await desktop("state")).doc.windows.filter((x) => x.app === "runs-app")) await desktop("close", { id: w.id });
   await desktop("appRemove", { id: "runs-app" });
 
+  // The Manual: the repository's own documentation, rendered, and the machine's
+  // own tool catalogue. Both halves are read at open time, so this is the check
+  // that would have caught a renderer that never returns (goal.md T5.2).
+  await desktop("open", { app: "help" });
+  await page.waitForSelector(".help-list .row-line", { timeout: 10_000 });
+  const manualRows = await page.$$eval(".help-list .row-line", (els) => els.map((e) => e.textContent));
+  check(manualRows.some((t) => t.includes("The desktop")), `the manual lists the pages this build ships (${manualRows.length} rows)`);
+  await page.click(".help-list .row-line:has-text('The desktop')");
+  await page.waitForSelector(".md .md-h", { timeout: 10_000 });
+  const rendered = await page.$$eval(".md .md-h", (els) => els.map((e) => e.textContent));
+  check(rendered.length > 10, `a page renders its headings (${rendered.length})`);
+  check((await page.$$(".md .md-code")).length >= 1 && (await page.$$(".md .md-table")).length >= 1, "with its code blocks and tables");
+  check((await page.textContent(".help-source")).includes("docs/15-os-experience.md"), "and says which file it is");
+
+  await page.fill(".app-bar .ops-search", "revert");
+  await page.waitForTimeout(400);
+  const hits = await page.$$eval(".help-list .row-line", (els) => els.map((e) => e.textContent));
+  check(hits.some((t) => t.includes("desktop.revert")), "search finds tools as well as headings");
+  await page.click(".help-list .row-line:has-text('desktop.revert')");
+  await page.waitForTimeout(300);
+  const toolPane = await page.textContent(".help-pane");
+  check(/Arguments/.test(toolPane) && /rev/.test(toolPane), "a tool page says what it takes");
+  await page.click(".help-pane .app-btn:has-text('Try it')");
+  await page.waitForSelector(".os-spotlight input", { timeout: 6_000 });
+  check(await page.inputValue(".os-spotlight input") === "desktop.revert", "Try it hands you to Spotlight with the tool typed in");
+  const spotRows = await page.$$eval(".os-spotlight .spot-row", (els) => els.map((e) => e.textContent));
+  check(spotRows.some((t) => t.includes("desktop.revert")), "and Spotlight knows the machine's tools");
+  await page.keyboard.press("Escape");
+  for (const w of (await desktop("state")).doc.windows.filter((x) => x.app === "help")) await desktop("close", { id: w.id });
+
   // The terminal screen: cursor addressing, an alternate buffer, scroll regions.
   const term = await page.evaluate(async () => {
     const { createScreen } = await import("/static/js/os/ansi.js");

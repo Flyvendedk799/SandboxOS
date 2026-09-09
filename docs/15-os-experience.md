@@ -194,6 +194,29 @@ it on, the assistant's `desktop.*` *writes* are captured into one proposal per t
 sensible about it), the system prompt says so, and the panel shows each proposal as a
 list of calls with Apply and Discard.
 
+### The Manual is an app, and it reads this build
+
+`help` is a built-in app with two halves and one search box. The **manual** is
+the repository's own documentation — `docs/15`, the surface map, the architecture,
+the Kernel, the security model, distros, the glossary and `goal.md` — fetched
+from `/:slug/os/manual` and rendered in the window. Nothing is copied: if a
+sentence in that window is wrong, the file in `docs/` is wrong, and one edit
+fixes both. The page id is looked up in a fixed table, so the route cannot be
+talked into reading anything else, and it needs `desktop.get` — the right that
+lets you see the desktop is the right that lets you read about it.
+
+The **catalogue** is `kernel.tools`: every tool of every enabled server on this
+machine, with its description and its arguments. A custom app's companion server
+appears in it the moment it is switched on and vanishes when it is switched off,
+because the list is the machine's answer rather than one somebody maintains.
+
+Every tool has a **Try it**, and it fills Spotlight with the tool's name rather
+than running it. That is deliberate: the manual hands you to the thing that runs
+it, in the place you would have reached for anyway, instead of firing a call you
+have not read. A tool that takes no arguments also has a **Run**, which does.
+Spotlight itself now carries the whole catalogue, so the handoff lands on a row
+that works.
+
 ### An undo you can aim
 
 An agent's change is usually several revisions — it aligned the windows, then
@@ -372,7 +395,7 @@ An app id resolves to one descriptor shape whatever kind it is:
 
 | kind | what it is |
 |---|---|
-| `builtin` | drawn by code we shipped — Files, Terminal, Console, Notes, Assistant, Observability, Media, Browser, Settings, Studio, and the machine's own work: Jobs, Ports, Agents, Secrets, Sync, Access, Audit |
+| `builtin` | drawn by code we shipped — Files, Terminal, Console, Notes, Assistant, Observability, Media, Browser, Settings, Studio, and the machine's own work: Jobs, Ports, Agents, Secrets, Sync, Access, Audit, plus the Manual |
 | `bundle` | HTML/CSS/JS the user or their agent wrote, served by this machine |
 | `url` | a service somewhere else (typically an exposed port) |
 | `alias` | another app under a different name — `open` resolves it, the window wears the alias's title |

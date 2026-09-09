@@ -18,3 +18,4 @@ export * from "./bundles.js";
 export * from "./distro.js";
 export * from "./store.js";
 export * from "./notify.js";
+export * from "./manual.js";

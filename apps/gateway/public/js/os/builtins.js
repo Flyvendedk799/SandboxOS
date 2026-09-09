@@ -20,6 +20,7 @@ import { KEY_ACTIONS, prettyChord } from "./lib/keys.js";
 const NOTIFY_SOURCES = [["agents", "agents"], ["procs", "processes"], ["apps", "apps"], ["system", "the system"]];
 import { mountTerminal } from "./terminal.js";
 import { OPS_APPS } from "./ops.js";
+import { HELP_APP } from "./help.js";
 
 const IMAGE = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".ico"]);
 const fileUrl = (p, download) => `/${slug}/file?path=${encodeURIComponent(p)}${download ? "&download=1" : ""}`;
@@ -976,6 +977,8 @@ export const APPS = {
   // audit log — lives in ops.js, so this file stays about the desk and that one
   // stays about the machine.
   ...OPS_APPS,
+  // The manual, read from the files this build ships (goal.md T5.2).
+  ...HELP_APP,
 };
 
 /** Mount a built-in app into a window body. Returns a stopper, or null when the

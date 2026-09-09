@@ -61,6 +61,8 @@ All require a grant on that Sandbox.
 | `GET` | `/:slug/os/events` | SSE: every desktop change, with the new document; catalog and bundle changes too |
 | `GET` | `/static/js/os/lib/*.js` | the pure OS modules (layout, themes, animations, summary, keys) served from `packages/os` |
 | `GET` | `/:slug/os/theme.css` | the active theme and motion, compiled |
+| `GET` | `/:slug/os/manual` | the manual: the pages this build ships, and every heading in them |
+| `GET` | `/:slug/os/manual/:page` | one page, as the markdown on disk — a fixed table of ids, never a path |
 | `POST` | `/:slug/os/apps/:id/session` | open a capability session for an app frame |
 | `GET` | `/:slug/os/apps/:id/*` | a custom app's files (sandboxed frame, closed CSP) |
 | `GET` | `/:slug/os/widgets/:kind/*` | a custom widget's files |

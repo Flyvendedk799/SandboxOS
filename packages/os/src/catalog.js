@@ -28,6 +28,10 @@ export const BUILTIN_APPS = [
   { id: "sync",      name: "Sync",          icon: "refresh",   hue: "#7be3d0", window: { w: 600, h: 400 }, needs: ["tide.*"] },
   { id: "access",    name: "Access",        icon: "shield",    hue: "#9fb0c0", window: { w: 560, h: 380 }, needs: ["access.*"] },
   { id: "audit",     name: "Audit",         icon: "list",      hue: "#43d17f", window: { w: 680, h: 420 }, needs: ["kernel.auditQuery"] },
+  // The manual, read from the docs this build ships, plus the live tool
+  // catalogue. It needs nothing: a machine you cannot read about is worse than
+  // a machine you cannot use (goal.md T5.2).
+  { id: "help",      name: "Manual",        icon: "list",      hue: "#6aa9ff", window: { w: 720, h: 460 }, needs: [] },
 ];
 
 export const BUILTIN_WIDGETS = [
