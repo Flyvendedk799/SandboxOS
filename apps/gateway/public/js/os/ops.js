@@ -143,6 +143,9 @@ const jobs = {
           { name: "target", label: "Tool", placeholder: "proc.exec", hint: "server.tool" },
           { name: "args", label: "Arguments (JSON)", type: "textarea", rows: 3, value: '{ "cmd": "echo hello" }' },
           { name: "every", label: "Repeat every (minutes)", type: "number", placeholder: "0 = run once" },
+          // The tool takes milliseconds; a person thinks in minutes. The
+          // translation happens here rather than in the tool, because "every
+          // 1800000" is not a thing anybody means to type.
         ],
         confirmLabel: "Schedule",
       });
@@ -153,7 +156,7 @@ const jobs = {
       const [server, tool] = String(got.target).split(".");
       const every = Number(got.every) || 0;
       try {
-        if (every > 0) await api.mcp("cron", "every", { minutes: every, server, tool, args });
+        if (every > 0) await api.mcp("cron", "every", { intervalMs: every * 60_000, server, tool, args });
         else await api.mcp("cron", "at", { at: Date.now() + 1000, server, tool, args });
         tab = "schedule"; save(); refresh();
       } catch (e) { toastError("Could not schedule it", e); }
@@ -246,8 +249,11 @@ const jobs = {
           ]);
         },
       },
-        h("span", null, h("b", `${c.server}.${c.tool}`), h("span.dim", c.every_ms ? ` every ${Math.round(c.every_ms / 60000)}m` : " once")),
-        h("span.sz", c.next_at ? clock(c.next_at) : "—"),
+        // The row comes from the jobs table as it is stored: interval_ms and
+        // due_at. Reading fields that were never there showed "once" for a
+        // recurring job and no time at all for either.
+        h("span", null, h("b", `${c.server}.${c.tool}`), h("span.dim", c.interval_ms ? ` every ${Math.round(c.interval_ms / 60000)}m` : " once")),
+        h("span.sz", c.due_at ? clock(c.due_at) : "—"),
       )));
       fill(paneEl, emptyCard("clock", "The schedule",
         "Every entry is a tool call the scheduler makes on your behalf, with your capabilities. Right-click one to cancel it."));

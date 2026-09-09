@@ -765,6 +765,33 @@ const settings = {
       buildEl.textContent = b ? `${b.commit ?? "unknown commit"} · up since ${new Date(b.startedAt).toLocaleString()}` : "unavailable";
     }).catch(() => { buildEl.textContent = "unavailable"; });
 
+    // What the panel reads but the document does not hold: the tenant's quota
+    // and usage, and the snapshot schedules. Deliberately *outside* `render` —
+    // they were declared inside it, which reset the ten-second cache on every
+    // repaint and put `loadSnapshotJobs` out of reach of the mount that wanted to
+    // call it, so the Settings window failed to build at all.
+    let limits = null;
+    let limitsAt = 0;
+    async function loadLimits() {
+      if (Date.now() - limitsAt < 10_000) return;
+      limitsAt = Date.now();
+      try { limits = await api.mcp("kernel", "limits", {}); }
+      catch (e) { limits = { using: { unavailable: e.message }, quota: {}, model: { total: 0, byModel: [], windowDays: 30, note: e.message } }; }
+      if (section === "machine") render();
+    }
+
+    // Scheduled snapshots are cron jobs, so they are read from the scheduler
+    // rather than from the document: the desktop holds the checkpoints, the
+    // scheduler holds the intention to make more of them.
+    let snapshotJobs = [];
+    async function loadSnapshotJobs() {
+      try {
+        const r = await api.tryMcp("cron", "list", {});
+        snapshotJobs = (r?.jobs ?? []).filter((j) => j.server === "desktop" && j.tool === "checkpoint");
+      } catch { snapshotJobs = []; }
+      render();
+    }
+
     function render() {
       const d = os.doc;
       if (!d) return;
@@ -833,13 +860,27 @@ const settings = {
 
         label("Checkpoints"),
         ...((d.checkpoints ?? []).length
-          ? d.checkpoints.slice().reverse().map((c) => row(c.name, h("span", { style: { display: "flex", gap: "6px" } },
-              h("span.v.dim", `r${c.rev}`),
-              h("button.app-btn", { onclick: () => restoreCheckpoint(c) }, "Restore"),
-              h("button.app-btn", { onclick: () => call("checkpointRemove", { id: c.id }).catch((e) => toastError("Could not forget it", e)) }, "Forget"))))
+          ? d.checkpoints.slice().reverse().map((c) => row(
+              h("span", null, c.name, c.auto ? h("span.dim", { style: { fontSize: "10px" } }, "  scheduled") : null),
+              h("span", { style: { display: "flex", gap: "6px" } },
+                h("span.v.dim", `r${c.rev}`),
+                h("button.app-btn", { onclick: () => restoreCheckpoint(c) }, "Restore"),
+                h("button.app-btn", { onclick: () => call("checkpointRemove", { id: c.id }).catch((e) => toastError("Could not forget it", e)) }, "Forget"))))
           : [h("div.dim", { style: { padding: "0 11px", fontSize: "11px" } }, "No named states yet. A checkpoint is a desktop you meant to come back to.")]),
-        h("div", { style: { padding: "6px 11px 10px" } },
-          h("button.app-btn", { onclick: () => nameCheckpoint() }, "Save this desktop…")),
+        h("div", { style: { padding: "6px 11px 10px", display: "flex", gap: "6px", flexWrap: "wrap" } },
+          h("button.app-btn", { onclick: () => nameCheckpoint() }, "Save this desktop…"),
+          h("button.app-btn", { onclick: () => scheduleSnapshots() }, "Snapshot on a schedule…")),
+        ...(snapshotJobs.length
+          ? [
+              ...snapshotJobs.map((j) => row(
+                h("span.dim", `every ${Math.round((j.interval_ms ?? 0) / 60000)} minutes`),
+                h("span", { style: { display: "flex", gap: "6px" } },
+                  h("span.v.dim", j.due_at ? new Date(Number(j.due_at)).toLocaleTimeString() : "—"),
+                  h("button.app-btn", { onclick: () => stopSnapshots(j.id) }, "Stop")))),
+              h("div.dim", { style: { padding: "0 11px 10px", fontSize: "11px", lineHeight: "1.6" } },
+                `The scheduler calls desktop.checkpoint with your capabilities, and every run is audited. Scheduled snapshots keep their own ${os.snap.limits?.autoCheckpoints ?? 6} slots, so they cannot push out a desktop you named.`),
+            ]
+          : []),
         label("Opens with"),
         ...(assoc.length ? assoc.map(([ext, appId]) => row(h("span.mono", ext),
           sel([...apps, { value: "", label: "— clear —" }], appId, (v) => call("associate", { ext, app: v || null })))) : [h("div.dim", { style: { padding: "0 11px", fontSize: "11px" } }, "No associations. Right-click a file in Files → Open with…")]),
@@ -850,18 +891,6 @@ const settings = {
             h("button.app-btn", { onclick: () => ext.value.trim() && call("associate", { ext: ext.value.trim(), app: app.value }).catch((e) => toastError("Could not associate", e)) }, "Set")));
         })(),
       ];
-
-      // The tenant's quota and this machine's usage. Read once per render of the
-      // Machine tab rather than polled: it changes when you change it.
-      let limits = null;
-      let limitsAt = 0;
-      async function loadLimits() {
-        if (Date.now() - limitsAt < 10_000) return;
-        limitsAt = Date.now();
-        try { limits = await api.mcp("kernel", "limits", {}); }
-        catch (e) { limits = { using: { unavailable: e.message }, quota: {}, model: { total: 0, byModel: [], windowDays: 30, note: e.message } }; }
-        if (section === "machine") render();
-      }
 
       /** Capture a chord by listening for the next keypress, honestly. */
       function keyField(action, chord) {
@@ -891,6 +920,40 @@ const settings = {
           window.addEventListener("keydown", onKey, true);
         });
         return btn;
+      }
+
+      /**
+       * A snapshot on a schedule (goal.md T3.4). Nothing new in the machine: it
+       * is a cron job that calls `desktop.checkpoint` with `auto: true`, on your
+       * behalf and with your capabilities, which is why it appears in Jobs →
+       * Schedule and in the audit log like any other call.
+       */
+      async function scheduleSnapshots() {
+        const got = await dialog({
+          title: "Snapshot this desktop on a schedule",
+          message: "The scheduler calls desktop.checkpoint for you at that interval. Scheduled snapshots keep their own slots, so they cannot push out a state you named yourself.",
+          fields: [
+            { name: "minutes", label: "Every (minutes)", type: "number", value: "60", hint: "60 is hourly; 1440 is daily" },
+            { name: "name", label: "Called", value: "Scheduled snapshot" },
+          ],
+          confirmLabel: "Schedule",
+        });
+        if (!got) return;
+        const minutes = Math.max(1, Math.round(Number(got.minutes) || 60));
+        try {
+          await api.mcp("cron", "every", {
+            intervalMs: minutes * 60_000,
+            server: "desktop", tool: "checkpoint",
+            args: { name: (got.name || "Scheduled snapshot").slice(0, 64), auto: true },
+          });
+          toast(`Snapshotting every ${minutes} minutes`, { kind: "ok", timeout: 2600 });
+          loadSnapshotJobs();
+        } catch (e) { toastError("Could not schedule it", e); }
+      }
+
+      async function stopSnapshots(id) {
+        try { await api.mcp("cron", "cancel", { id }); loadSnapshotJobs(); }
+        catch (e) { toastError("Could not stop it", e); }
       }
 
       async function nameCheckpoint() {
@@ -967,6 +1030,7 @@ const settings = {
     }
 
     render();
+    loadSnapshotJobs();
     return ctx.onDoc?.(render) ?? (() => {});
   },
 };

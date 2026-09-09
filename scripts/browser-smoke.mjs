@@ -401,6 +401,11 @@ try {
   await desktop("open", { app: "settings" });
   await studio.waitForSelector(".stx-viewport .os-window .kv", { timeout: 8_000 });
   check((await studio.$$(".stx-viewport .os-window .kv")).length >= 12, "Settings has a full Desktop section");
+  // Scheduled snapshots live in Settings beside the checkpoints they make
+  // (goal.md T3.4). The button is the whole feature: a cron job that calls
+  // desktop.checkpoint, which is why there is nothing else to check here.
+  check(await studio.$(".stx-viewport .os-window .app-btn:has-text('Snapshot on a schedule…')"),
+    "and a way to snapshot the desktop on a schedule");
 
   await studio.click(".stx-tabs .seg:has-text('Theme')");
   await studio.waitForSelector(".token-row", { timeout: 5_000 });

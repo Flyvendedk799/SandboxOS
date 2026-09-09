@@ -67,6 +67,10 @@ export const LIMITS = {
   // Named states of the whole desktop. Few, on purpose: a checkpoint is a
   // place you meant to come back to, not an autosave.
   checkpoints: 12,
+  // Of those, how many the scheduler may hold. Automatic snapshots have their
+  // own budget so an hourly one cannot quietly evict the state you named and
+  // meant to come back to (goal.md T3.4).
+  autoCheckpoints: 6,
   nameLen: 64,
   titleLen: 120,
   docBytes: 512 * 1024,
@@ -562,6 +566,9 @@ export function normalizeDoc(input, { name } = {}) {
           name: str(c.name, LIMITS.nameLen, c.id),
           rev: num(c.rev, 0, Number.MAX_SAFE_INTEGER, 0),
           ts: num(c.ts, 0, Number.MAX_SAFE_INTEGER, Date.now()),
+          // Written by the scheduler rather than by a person. Kept out of the
+          // document when false, like every other flag here.
+          ...(c.auto ? { auto: true } : {}),
         }
       : null))
     .filter(Boolean);

@@ -1700,24 +1700,40 @@ export function desktopServer(deps) {
       // of the whole document, kept outside the pruning window (goal.md T2.4).
 
       checkpoint: {
-        description: "Save the desktop as a named state you can come back to, whatever happens to the revision history.",
-        inputSchema: obj({ name: S }, ["name"]),
+        description:
+          "Save the desktop as a named state you can come back to, whatever happens to the revision history. " +
+          "auto:true marks it as the scheduler's, which keeps it in its own budget so it cannot evict one you named.",
+        inputSchema: obj({ name: S, auto: B }, ["name"]),
         async handler(_ctx, a) {
           const name = String(a.name ?? "").trim().slice(0, LIMITS.nameLen);
           if (!name) throw new Error("a checkpoint needs a name");
+          const auto = !!a.auto;
           const current = doc();
           const id = rid("cp");
           if (!writeCheckpoint(sandbox, id, current)) throw new Error("could not write the checkpoint");
           const next = mutateOs(sandbox, (d) => {
-            d.checkpoints = [...(d.checkpoints ?? []), { id, name, rev: current.rev, ts: Date.now() }];
-            // Over the ceiling, the oldest one goes — and its file with it, or
-            // the disk keeps a state nothing can reach.
-            while (d.checkpoints.length > LIMITS.checkpoints) {
-              const gone = d.checkpoints.shift();
+            d.checkpoints = [...(d.checkpoints ?? []), { id, name, rev: current.rev, ts: Date.now(), ...(auto ? { auto: true } : {}) }];
+            const drop = (pick) => {
+              const gone = d.checkpoints.find(pick);
+              if (!gone) return false;
+              d.checkpoints = d.checkpoints.filter((c) => c !== gone);
+              // The file goes with the entry, or the disk keeps a state nothing
+              // can reach.
               removeCheckpoint(sandbox, gone.id);
+              return true;
+            };
+            // An hourly snapshot has its own, smaller budget: without this, a day
+            // of scheduled snapshots would push out the desktop you named on
+            // purpose, which is the opposite of what a checkpoint is for.
+            while (d.checkpoints.filter((c) => c.auto).length > LIMITS.autoCheckpoints) {
+              if (!drop((c) => c.auto)) break;
+            }
+            // And when the whole shelf is full, the scheduler's oldest goes first.
+            while (d.checkpoints.length > LIMITS.checkpoints) {
+              if (!drop((c) => c.auto) && !drop(() => true)) break;
             }
           }, { op: "checkpoint", label: `checkpoint: ${name}` });
-          return { ok: true, rev: next.rev, checkpoint: next.checkpoints.at(-1) };
+          return { ok: true, rev: next.rev, checkpoint: next.checkpoints.find((c) => c.id === id) ?? null };
         },
       },
 

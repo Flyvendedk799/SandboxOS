@@ -283,6 +283,28 @@ have not read. A tool that takes no arguments also has a **Run**, which does.
 Spotlight itself now carries the whole catalogue, so the handoff lands on a row
 that works.
 
+### Snapshots on a schedule
+
+A scheduled snapshot is not a new mechanism: it is a `cron` job that calls
+`desktop.checkpoint { name, auto: true }` on your behalf, with your capabilities,
+audited like any other call — which is why it appears in Jobs → Schedule and in the
+audit log, and why a principal who cannot take a checkpoint by hand cannot schedule
+one either. Settings → Checkpoints has the button; you say minutes, the tool takes
+milliseconds, and the translation happens in the panel because "every 1800000" is
+not a thing anybody means to type.
+
+The one addition is a budget. `auto` snapshots hold their own `LIMITS.autoCheckpoints`
+slots, and when the whole shelf is full the scheduler's oldest goes before yours
+does. Without that, a day of hourly snapshots would quietly push out the desktop you
+named on purpose, which is the opposite of what a checkpoint is for.
+
+Two things were fixed alongside it. A `revert` no longer forgets a checkpoint: the
+index travels with the current document, exactly as it does for a restore, because a
+checkpoint is explicitly outside the revision window. And replacing the machine
+wholesale — a reset, a fork, a restored backup — now sweeps the checkpoint *files* of
+the desktop that no longer exists; they were unreachable (the index is the only way
+in) and they are whole documents, so they used to sit on the volume for its lifetime.
+
 ### An undo you can aim
 
 An agent's change is usually several revisions — it aligned the windows, then

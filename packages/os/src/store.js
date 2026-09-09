@@ -98,6 +98,16 @@ function writeDoc(sandbox, doc, { op = "set", label = null, keepRev = false } = 
     throw new Error(`OS document too large: ${json.length} bytes (max ${LIMITS.docBytes})`);
   }
 
+  // Replacing the whole machine — a reset, a fork, a restored backup — leaves
+  // the checkpoint *files* of a desktop that no longer exists. They are
+  // unreachable (the index is the only way in) and they are whole documents, so
+  // they are swept here rather than left to accumulate for the life of the
+  // volume. Only for ops that replace the document: every other write keeps its
+  // index, and a checkpoint must never disappear as a side effect.
+  if (prior && (op === "reset" || op === "set")) {
+    const kept = new Set((next.checkpoints ?? []).map((c) => c.id));
+    for (const c of prior.checkpoints ?? []) if (!kept.has(c.id)) removeCheckpoint(sandbox, c.id);
+  }
   if (prior && op !== "seed") pushHistory(sandbox, prior, label ?? op);
   writeJsonAtomic(osPath(sandbox), next);
   try { _cache.set(sandbox.id, { mtimeMs: fs.statSync(osPath(sandbox)).mtimeMs, doc: next }); }
@@ -231,7 +241,13 @@ export const REVERT_SCOPES = Object.freeze([
 export function revertOs(sandbox, rev, { only = null } = {}) {
   const entry = osHistoryEntry(sandbox, rev);
   if (!entry) throw new Error(`no such revision: ${rev}`);
-  if (!only?.length) return writeDoc(sandbox, entry.doc, { op: "revert", label: `revert to rev ${rev}` });
+  if (!only?.length) {
+    // The checkpoint index travels with the *current* document, exactly as it
+    // does for a restore. A checkpoint is explicitly outside the revision
+    // window; undoing a window move must not forget one you named yesterday.
+    const now = loadOs(sandbox);
+    return writeDoc(sandbox, { ...entry.doc, checkpoints: now.checkpoints }, { op: "revert", label: `revert to rev ${rev}` });
+  }
 
   const scopes = [...new Set(only.map(String))];
   const unknown = scopes.filter((k) => !REVERT_SCOPES.includes(k));
