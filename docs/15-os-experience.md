@@ -572,6 +572,30 @@ right — because they answer the same kind of question, and each one says when 
 is *unavailable* rather than showing a plausible zero: a port scan that could not look
 says so, a job whose shell never started says "never started" instead of "failed".
 
+### The editor's four things
+
+goal.md asked the editor for four: search and replace across a bundle, the frame's
+errors coming back, a symbol jump within a file, and a diff against the last saved
+version.
+
+**Symbols** (⌘⇧O, or the tag in the rail) list the definitions in the open file with
+a filter and a jump. It is not a parser: it is the shapes a definition takes in the
+four languages a bundle is made of — `function`, `class`, a named arrow, a `const`,
+a method, a CSS selector, an HTML id — matched line by line, with the CSS and HTML
+rules applying only in those languages. That is enough to answer "where is that
+defined" in a file of a few hundred lines and honest about being a list of lines. A
+wrong jump costs a scroll; a JavaScript parser in the Studio would cost more than the
+question is worth.
+
+**The diff** compares what is in front of you against `tab.saved` — the version this
+editor last wrote or read — so it answers "what am I about to write" before you press
+save, including after an agent wrote the file underneath you. Longest common
+subsequence over lines, two lines of context around each change, added and removed in
+the theme's ok and error colours.
+
+Both panels sit above the editor and are mutually exclusive, because two of them
+stacked there would leave no editor.
+
 ### Getting from one app to the next
 
 Each of the seven does its own job; several clauses of Track 1 were about the seams

@@ -448,6 +448,37 @@ try {
   check((await studio.textContent(".code-status")).includes("written by another editor") || (await studio.$(".code-tab.on .name:has-text('app.js')")),
     "an agent's appWrite lands in the open editor");
 
+  // Jump to a definition, and see what is about to be written (goal.md T2.2).
+  // A file with definitions in it, since that is the thing being checked.
+  await desktop("appWrite", {
+    id: "smoke-app", path: "helpers.js",
+    content: [
+      "export function greet(name) { return 'hi ' + name; }",
+      "const later = async () => 42;",
+      "class Thing { run() { return later(); } }",
+      "",
+    ].join("\n"),
+  });
+  await studio.waitForTimeout(600);
+  await studio.click(".code-file:has-text('helpers.js')");
+  await studio.waitForSelector(".code-tab.on .name:has-text('helpers.js')", { timeout: 5_000 });
+  // The button rather than the chord: the chord is bound on the code pane, so it
+  // needs focus inside it, and what this check is about is the panel.
+  await studio.click(".code-head .rail-btn.sm[title^='Jump to a definition']");
+  await studio.waitForSelector(".code-symbols .hit", { timeout: 6_000 });
+  const symbols = await studio.$$eval(".code-symbols .hit", (els) => els.map((e) => e.textContent));
+  check(symbols.length >= 1, `the open file's definitions are listed (${symbols.length}: ${symbols.slice(0, 3).join(", ")})`);
+  await studio.click(".code-symbols .hit");
+  await studio.waitForTimeout(300);
+  check(await studio.$(".code-symbols[hidden]") !== null || !(await studio.$(".code-symbols .hit")),
+    "and picking one closes the list and goes there");
+
+  await studio.click(".code-head .rail-btn.sm[title^='What has changed']");
+  await studio.waitForSelector(".code-diff .row", { timeout: 6_000 });
+  const diffText = await studio.textContent(".code-diff .row");
+  check(/since the last save/.test(diffText), `the diff says what has changed since the last save (${diffText.trim().slice(0, 60)})`);
+  await studio.keyboard.press("Escape");
+
   // Settings reshapes the desktop without the Studio.
   await desktop("open", { app: "settings" });
   await studio.waitForSelector(".stx-viewport .os-window .kv", { timeout: 8_000 });

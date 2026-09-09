@@ -1525,3 +1525,33 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
    — a supervised process does not tell us which ports it bound. */
 .ops-ports { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 6px 12px; border-bottom: 1px solid var(--os-line); }
 .ops-ports .dim { font-size: 10.5px; }
+
+/* Symbols and the diff-against-saved panel share the find panel's shape: a row
+   of controls, then a scrolling list. Same furniture, same muscle memory. */
+.code-symbols, .code-diff { flex: none; border-bottom: 1px solid var(--stx-line); background: var(--stx-bg-2); }
+.code-symbols .row, .code-diff .row { display: flex; align-items: center; gap: 6px; padding: 7px 10px; }
+.code-symbols .row .spacer, .code-diff .row .spacer { flex: 1; }
+.code-symbols input {
+  height: 24px; min-width: 0; flex: 1 1 120px; padding: 0 8px; border: 1px solid var(--stx-line);
+  border-radius: 6px; background: var(--stx-bg-1); color: var(--stx-text); font-size: 11.5px;
+}
+.code-symbols .dim, .code-diff .dim { flex: none; font-size: 10.5px; white-space: nowrap; }
+.code-symbols .hits { max-height: 200px; overflow: auto; border-top: 1px solid var(--stx-line); }
+.code-symbols .hit {
+  display: flex; gap: 8px; align-items: baseline; width: 100%; padding: 3px 10px;
+  border: 0; background: transparent; text-align: left; font-size: 10.5px; color: var(--stx-text-2); cursor: pointer;
+}
+.code-symbols .hit:hover, .code-symbols .hit:focus-visible { background: var(--stx-chip); color: var(--stx-text); }
+.code-symbols .hit code { font-family: var(--mono); color: var(--stx-accent); flex: none; min-width: 40px; }
+.code-symbols .hit .tx { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.code-symbols .hit .ln { margin-left: auto; color: var(--stx-text-3); flex: none; }
+
+.code-diff-body { max-height: 220px; overflow: auto; border-top: 1px solid var(--stx-line); padding: 4px 0 6px; }
+.code-diff-line { display: flex; gap: 8px; padding: 0 10px; font-family: var(--mono); font-size: 10.5px; line-height: 1.55; }
+.code-diff-line .ln { flex: none; min-width: 28px; text-align: right; color: var(--stx-text-3); }
+.code-diff-line .mk { flex: none; width: 8px; color: var(--stx-text-3); }
+.code-diff-line .tx { white-space: pre; overflow: hidden; text-overflow: ellipsis; color: var(--stx-text-2); }
+.code-diff-line.add { background: color-mix(in srgb, var(--stx-ok, #43d17f) 12%, transparent); }
+.code-diff-line.add .mk, .code-diff-line.add .tx { color: var(--stx-ok, #43d17f); }
+.code-diff-line.del { background: color-mix(in srgb, var(--stx-err, #ff6b6b) 12%, transparent); }
+.code-diff-line.del .mk, .code-diff-line.del .tx { color: var(--stx-err, #ff6b6b); }
