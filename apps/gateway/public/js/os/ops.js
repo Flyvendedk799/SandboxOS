@@ -14,7 +14,7 @@
 import {
   h, fill, icon, api, slug, fmtBytes, toast, toastError, dialog, confirmDialog, menu,
 } from "../core.js";
-import { call } from "./client.js";
+import { call, os } from "./client.js";
 
 // ── shared furniture ────────────────────────────────────────────────────────
 
@@ -815,7 +815,14 @@ const audit = {
     let events = [];
     let error = null;
     let chain = null;
-    const f = { server: win.props?.server ?? "", tool: win.props?.tool ?? "", kind: win.props?.kind ?? "" };
+    const f = {
+      server: win.props?.server ?? "", tool: win.props?.tool ?? "", kind: win.props?.kind ?? "",
+      // Scoping to one caller (goal.md T1.7). A window passes an app's minted
+      // principal here, which is how "everything this app has called" becomes a
+      // query rather than a separate feature.
+      principalId: win.props?.principalId ?? "",
+    };
+    const scopedTo = win.props?.scopeLabel ?? null;
 
     const listEl = h("div.ops-list.wide");
     const paneEl = h("div.ops-pane");
@@ -830,7 +837,14 @@ const audit = {
         onchange: (e) => { f.kind = e.target.value; refresh(); },
       }, ...[["", "any result"], ["ok", "ok"], ["error", "error"], ["denied", "denied"]].map(([v, l]) =>
         h("option", { value: v, selected: f.kind === v }, l))),
+      scopedTo
+        ? h("button.app-btn.on", {
+            title: "Stop scoping to one caller",
+            onclick: () => { f.principalId = ""; call("windowSet", { id: win.id, props: { principalId: "", scopeLabel: null } }).catch(() => {}); refresh(); },
+          }, icon("shield", 12), scopedTo, " ×")
+        : null,
       h("span.spacer"),
+      h("button.app-btn", { title: "Save these rows, with the filter and the chain's verdict", onclick: () => exportRows() }, icon("save", 12), "Export"),
       h("button.app-btn", { onclick: () => verify() }, "Verify the chain"),
       h("button.app-btn", { title: "Refresh", onclick: () => refresh() }, icon("refresh", 12)),
     );
@@ -843,11 +857,38 @@ const audit = {
           ...(f.server ? { server: f.server } : {}),
           ...(f.tool ? { tool: f.tool } : {}),
           ...(f.kind ? { resultKind: f.kind } : {}),
+          ...(f.principalId ? { principalId: f.principalId } : {}),
         });
         events = (r.events ?? []).slice().reverse();
         error = null;
       } catch (e) { error = e; }
       paint();
+    }
+
+    /**
+     * The rows on screen, as a file. The whole point of a hash-chained log is
+     * that it can leave the machine and still be checked, so the export carries
+     * the filter that produced it and the chain's own verdict beside the rows —
+     * a bag of events with no context is evidence of nothing.
+     */
+    async function exportRows() {
+      try {
+        const verdict = await api.tryMcp("kernel", "auditVerify", {});
+        const payload = {
+          exportedAt: new Date().toISOString(),
+          machine: os.doc?.name ?? null,
+          filter: { ...f },
+          chain: verdict ?? { ok: null, note: "the chain could not be verified at export time" },
+          count: events.length,
+          events,
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const a = h("a", { href: URL.createObjectURL(blob), download: `audit-${new Date().toISOString().slice(0, 10)}.json` });
+        document.body.append(a);
+        a.click();
+        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+        toast(`Exported ${events.length} rows`, { body: "With the filter and the chain's verdict beside them.", kind: "ok", timeout: 3000 });
+      } catch (e) { toastError("Could not export", e); }
     }
 
     async function verify() {

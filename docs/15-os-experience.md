@@ -359,6 +359,23 @@ through (`agents`, `procs`, `apps`, `system`), defaulting to `["agents"]`, becau
 agent coming back is the interruption most people do want. The bell shows the state, the
 notification centre has the switch, and `mod+shift+u` toggles it.
 
+### The audit log, taken with you and pointed at one caller
+
+The Audit app filters by server, tool and result, and verifies the hash chain. Two
+things T1.7 asked for that it did not have:
+
+**Export.** The rows on screen become a file — with the filter that produced them and
+the chain's verdict beside them, because the whole point of a hash-chained log is that
+it can leave the machine and still be checked, and a bag of events with no context is
+evidence of nothing.
+
+**Scoping to one caller.** A window's capability ledger (see below) now has a way out
+into the log: "everything it has called", which opens the Audit app filtered to the
+machine principal that app was minted. It is a query — `auditQuery { principalId }`,
+filtered in SQL — rather than a second feature, and the window shows what it is scoped
+to with a visible way out of it. A built-in app's calls are made as *you*, so there is
+nothing to scope: that is a property of how built-ins work, not a gap in the explorer.
+
 ### An app is a principal you can see
 
 A custom app has always been a real principal with attenuated grants; Phase 33 made that

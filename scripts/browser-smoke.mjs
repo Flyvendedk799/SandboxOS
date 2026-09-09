@@ -201,6 +201,26 @@ try {
   for (const w of (await desktop("state")).doc.windows.filter((x) => x.app === "runs-app")) await desktop("close", { id: w.id });
   await desktop("appRemove", { id: "runs-app" });
 
+  // The Audit app: filters, the chain, an export, and scoping to one caller
+  // (goal.md T1.7). The export writes a file, so this only checks that the button
+  // is there and the pane fills — the download itself is the browser's business.
+  await desktop("open", { app: "audit" });
+  // Scoped to the audit window: other ops apps are open, and they all use
+  // .ops-list. Only the explorer's list is .wide.
+  await page.waitForSelector(".ops-list.wide .row-line", { timeout: 10_000 });
+  const auditRows = (await page.$$(".ops-list.wide .row-line")).length;
+  check(auditRows >= 1, `the audit explorer lists rows (${auditRows})`);
+  const auditBar = ".os-window:has(.ops-list.wide) .app-bar";
+  check(!!(await page.$(`${auditBar} .app-btn:has-text('Export')`)), "with a way to take them with you");
+  check(!!(await page.$(`${auditBar} .app-btn:has-text('Verify the chain')`)), "and to verify the chain");
+  await page.fill(`${auditBar} .ops-search`, "desktop");
+  await page.waitForTimeout(700);
+  const filtered = await page.$$eval(".ops-list.wide .row-line", (els) => els.map((e) => e.textContent));
+  check(filtered.length >= 1 && filtered.every((t) => t.includes("desktop.")),
+    `filtering by server narrows it to that server (${filtered.length}: ${filtered.find((t) => !t.includes("desktop.")) ?? "all desktop"})`);
+  await page.fill(`${auditBar} .ops-search`, "");
+  for (const w of (await desktop("state")).doc.windows.filter((x) => x.app === "audit")) await desktop("close", { id: w.id });
+
   // The Manual: the repository's own documentation, rendered, and the machine's
   // own tool catalogue. Both halves are read at open time, so this is the check
   // that would have caught a renderer that never returns (goal.md T5.2).

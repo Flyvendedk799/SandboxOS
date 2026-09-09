@@ -13,6 +13,7 @@
 import "./_setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 
 import { openDb, closeDb } from "../packages/control-db/src/db.js";
 import { ensureSeed, grantsFor, createSession } from "../packages/control-db/src/registry.js";
@@ -228,4 +229,34 @@ test("a body that lies about its length is still bounded", async () => {
   // with its own sentence. What must not happen is a 200.
   assert.notEqual(res.status, 200, `a chunked flood is not a success (${res.status})`);
   await alive();
+});
+
+// ── T1.7: the audit explorer can be taken with you, and pointed at one caller ──
+
+test("the audit explorer exports its rows with the filter and the chain's verdict", () => {
+  const ops = fs.readFileSync(new URL("../apps/gateway/public/js/os/ops.js", import.meta.url), "utf8");
+  const fn = ops.split("async function exportRows()")[1].split("async function verify()")[0];
+  assert.match(fn, /filter: \{ \.\.\.f \}/, "the export says what produced it");
+  assert.match(fn, /chain: verdict/, "and what the chain said at the time");
+  assert.match(fn, /the chain could not be verified at export time/, "or that it could not be checked");
+  assert.match(fn, /download: `audit-/, "and it is a file you keep");
+});
+
+test("scoping the log to one caller is a query, not a second feature", () => {
+  const ops = fs.readFileSync(new URL("../apps/gateway/public/js/os/ops.js", import.meta.url), "utf8");
+  assert.match(ops, /principalId: win\.props\?\.principalId \?\? ""/, "the window carries the scope");
+  assert.match(ops, /\.\.\.\(f\.principalId \? \{ principalId: f\.principalId \} : \{\}\)/, "and it goes to auditQuery as a filter");
+  assert.match(ops, /Stop scoping to one caller/, "with a visible way out of it");
+  const wm = fs.readFileSync(new URL("../apps/gateway/public/js/os/wm.js", import.meta.url), "utf8");
+  assert.match(wm, /ctx\.launch\?\.\("audit", \{\s*\n\s*principalId: led\.principals\[0\]\.principalId,/,
+    "an app's ledger opens the log scoped to the principal it was minted");
+  assert.match(wm, /Everything it has called…/);
+});
+
+test("auditQuery filters by principal in SQL, not by paging the log in", async () => {
+  const { queryAudit } = await import("../packages/control-db/src/registry.js");
+  const mine = queryAudit(sandbox.id, { principalId: owner.id, limit: 20 });
+  assert.ok(mine.every((r) => r.principal_id === owner.id), "every row is that principal's");
+  const nobody = queryAudit(sandbox.id, { principalId: "prn_nobody", limit: 20 });
+  assert.deepEqual(nobody, [], "and a principal with no calls has none");
 });

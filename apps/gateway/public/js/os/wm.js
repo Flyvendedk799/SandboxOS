@@ -406,6 +406,20 @@ export function createDesktop({ root, ctx = {} }) {
               h("span.m.mono", c.tool),
               h("span.t", c.kind)))
           : [h("div.dim.ops-none", "this app has not called anything")])),
+        led.principals.length
+          ? h("div", { style: { padding: "8px 0 0" } },
+              h("button.app-btn", {
+                onclick: () => {
+                  // One caller, all of its rows: the Audit app filtered to the
+                  // principal this app was minted. Scoping is a query, not a
+                  // second feature.
+                  ctx.launch?.("audit", {
+                    principalId: led.principals[0].principalId,
+                    scopeLabel: meta.name,
+                  });
+                },
+              }, icon("list", 12), "Everything it has called…"))
+          : null,
         h("div.dim", { style: { padding: "8px 0 0", fontSize: "11px", lineHeight: "1.6" } },
           "Suspending revokes its live tokens and mints no new session: the app keeps its window and its source, and its next call is refused."),
       ),
