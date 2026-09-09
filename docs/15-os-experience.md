@@ -67,7 +67,10 @@ function — `normalizeDoc` — that every write in the system passes through.
   "apps": { "port-monitor": { "kind": "bundle", "permissions": ["ports.list"],
                               "mcp": { "name": "port-monitor", "enabled": true, "entrypoint": "server.js" } } },
   "widgetKinds": { "build-status": { "refreshMs": 30000, … } },
-  "notifications": [ { "title": "build finished", "action": { "app": "metrics" }, … } ]
+  "notifications": [ { "title": "build finished", "source": "procs", "quiet": true, "action": { "app": "metrics" }, … } ],
+  "proposals":   [ { "id": "prop_…", "label": "tidy the workspace", "by": "prn_…",
+                     "ops": [ { "tool": "arrange", "args": { "preset": "grid" } } ] } ],
+  "checkpoints": [ { "id": "cp_…", "name": "before the redesign", "rev": 41, "ts": 0 } ]
 }
 ```
 
@@ -79,8 +82,9 @@ malformed or hostile document cannot reach the renderer, which matters because t
 document is writable by an agent.
 
 Ceilings (`LIMITS`): 16 workspaces, 96 windows, 96 widgets, 128 apps, 64 widget kinds,
-48 themes, 48 motion presets, 60 notifications, 40 revisions, 512 KB total; tiling
-trees are at most 12 deep; props at most 8 KB.
+48 themes, 48 motion presets, 60 notifications, 8 proposals (24 ops each),
+12 checkpoints, 40 revisions, 512 KB total; tiling trees are at most 12 deep; props at
+most 8 KB.
 
 ### The tiling tree
 
@@ -125,6 +129,10 @@ The syscall surface for the OS. Grouped, and complete:
 | widget kinds | `widgetDefine` · `widgetKindRemove` · `widgetFiles` · `widgetRead` · `widgetWrite` · `widgetDelete` |
 | notifications | `notify` · `notificationsRead` · `notificationsClear` |
 | distros | `distroList` · `distroPublish` · `distroSet` · `distroFork` · `distroExport` · `distroImport` |
+| review | `propose` · `proposals` · `applyProposal` · `discardProposal` |
+| checkpoints | `checkpoint` · `checkpoints` · `checkpointRestore` · `checkpointDiff` · `checkpointRemove` |
+| keyboard | `keyList` · `keySet` |
+| apps as principals | `appLedger` · `appSuspend` |
 
 Verbs were deepened rather than multiplied: `layoutSet` takes a tiling `preset`
 (`master-stack`, `columns`, `rows`, `grid`) or an explicit `tree`; `tile` moves a
@@ -168,6 +176,69 @@ A stream that comes back after a gap has missed every write inside it, so the `h
 frame carries the revision the document is *actually* at; a client whose own revision
 disagrees re-reads before painting anything. Without that, a tab that slept through
 three agent writes kept showing a desktop that no longer existed and said nothing.
+
+### Reviewable, not just revertible
+
+An agent's change to the desktop is always undoable, and since Phase 33 it can also
+be read *before* it happens. `desktop.propose` stores a change as a document object:
+a label, who asked, and `ops` that are ordinary `desktop.*` calls with their
+arguments. Nothing runs. `applyProposal` executes them in order **as whoever applied
+it** — through the same tools, so a proposal can never do something its applier could
+not do by hand — and reports which ops landed and where it stopped if one failed.
+`discardProposal` throws it away.
+
+Because a proposal is in the document, it survives a reload, appears in a second tab,
+and is itself revertible. The Studio's agent panel has a **Review changes** switch: with
+it on, the assistant's `desktop.*` *writes* are captured into one proposal per turn
+(reads pass through — an agent that cannot look at the desktop cannot propose anything
+sensible about it), the system prompt says so, and the panel shows each proposal as a
+list of calls with Apply and Discard.
+
+### Checkpoints: a desktop you meant to come back to
+
+History answers "undo that" and keeps forty revisions. A **checkpoint** answers "take
+me back to the desktop I liked": `desktop.checkpoint { name }` writes a copy of the
+whole document to `os/checkpoints/<id>.json` and adds an index entry to the document,
+so it cannot be pruned away by ordinary churn. `checkpointDiff` says what has changed
+since (structurally: windows, widgets, theme keys, apps), `checkpointRestore` goes back
+— as a *new* revision, so the way forward is not lost either — and `checkpointRemove`
+deletes the copy along with the entry. Twelve at a time, oldest pruned with its file.
+
+### The keyboard is a document field
+
+`shell.keys` maps an action to a chord: `{ spotlight: "mod+k", closeWindow: "mod+w", … }`.
+`packages/os/src/keys.js` holds the closed grammar — the action vocabulary, the chord
+parser, the matcher and the pretty-printer — and has no Node imports, so the shell that
+*matches* a key and `desktop.keySet` which *validates* one read the same file. A chord
+is modifiers (`mod`, `shift`, `alt`) plus one key; an unreadable chord is refused rather
+than stored (a binding nobody can press also steals the key), a collision with another
+action is refused by name, and `null` means deliberately unbound — a value, because an
+absence would come back as the default on the next normalization.
+
+The cheat sheet (`?`) is *generated* from the map, so a rebinding shows up there instead
+of quietly making the page a lie, and Settings → Desktop → Keyboard captures a chord by
+listening for the next keypress. An agent can rebind through the same tool, and the map
+travels with a distro.
+
+### Attention is yours
+
+`shell.notifications` grew `dnd` and `allow`. Do-not-disturb throws nothing away: the
+notification is recorded exactly as it would have been and marked `quiet`, so no surface
+interrupts anyone with it — and the decision is made once, in `notifyOs`, so a phone, a
+second tab and the terminal renderer agree. `allow` is a closed list of who still gets
+through (`agents`, `procs`, `apps`, `system`), defaulting to `["agents"]`, because an
+agent coming back is the interruption most people do want. The bell shows the state, the
+notification centre has the switch, and `mod+shift+u` toggles it.
+
+### An app is a principal you can see
+
+A custom app has always been a real principal with attenuated grants; Phase 33 made that
+visible. `desktop.appLedger { id }` answers what the app **declared**, what it was
+**granted**, what was **withheld**, which machine principals have been minted for it, and
+every call it has actually made — read from the audit log, not from anything the app said
+about itself. `desktop.appSuspend { id }` revokes its live tokens and mints no new
+session: the window and the source stay, and the next call it makes is refused. The
+capability badge in a custom app's title bar opens the ledger and offers the switch.
 
 ### What a write costs
 
@@ -498,7 +569,8 @@ fold on purpose, which is how you check it.
 | `GET` | `/:slug/os/theme.css` | the compiled theme and motion (ETag = the appearance key; `?k=` is the shell's cache buster) |
 | `POST` | `/:slug/os/apps/:id/session` | open a capability session for an app frame |
 | `GET` | `/:slug/os/apps/:id/*` · `/:slug/os/widgets/:kind/*` | a custom app's or widget's files (sandboxed, CSP-locked) |
-| `GET` | `/static/js/os/lib/{layout,themes,animations,summary}.js` | the pure OS modules, served from `packages/os` |
+| `GET` | `/static/js/os/lib/{layout,themes,animations,summary,keys}.js` | the pure OS modules, served from `packages/os` |
+| `GET` | `/:slug/os/{apps,widgets}/:id/k/:key/*` | a sandboxed frame reading its own bundle — authenticated by the key in the path, because an opaque-origin frame cannot send a cookie |
 | `POST` | `/api/sandboxes { distro | seed }` | a new machine wearing a distro or a seed |
 
 Everything that *changes* the desktop goes through `POST /:slug/mcp` like any other

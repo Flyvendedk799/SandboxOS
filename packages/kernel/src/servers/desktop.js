@@ -30,6 +30,8 @@ import {
   exportBundle, importBundle, starterApp, starterAppCss, starterAppJs, starterWidget, starterServerJs, starterAppToolsJs,
   exportPayload, importPayload, builtinDistroList, docFromDistroSpec, RESERVED_SERVER_NAMES,
   summarizeDoc, silhouetteSvg, READ_ONLY_DESKTOP_TOOLS,
+  writeCheckpoint, readCheckpoint, removeCheckpoint, restoreCheckpoint,
+  KEY_ACTIONS, DEFAULT_KEYS, isChord, NOTIFY_KINDS, prettyChord,
 } from "../../../os/src/index.js";
 import { loadManifest, saveManifest } from "../../../manifest/src/manifest.js";
 import { CATALOG } from "../catalog.js";
@@ -499,7 +501,14 @@ export function desktopServer(deps) {
           const next = mutate((d) => {
             if (a.menubar) Object.assign(d.shell.menubar, a.menubar);
             if (a.spotlight) Object.assign(d.shell.spotlight, a.spotlight);
-            if (a.notifications) Object.assign(d.shell.notifications, a.notifications);
+            if (a.notifications) {
+              const n = a.notifications;
+              if (n.enabled != null) d.shell.notifications.enabled = !!n.enabled;
+              if (n.dnd != null) d.shell.notifications.dnd = !!n.dnd;
+              if (Array.isArray(n.allow)) {
+                d.shell.notifications.allow = n.allow.filter((k) => NOTIFY_KINDS.includes(k));
+              }
+            }
             if (a.wallpaperFit) d.shell.wallpaperFit = a.wallpaperFit;
           }, "shell", "shell");
           return { ok: true, shell: next.shell, rev: next.rev };
@@ -1423,6 +1432,120 @@ export function desktopServer(deps) {
         async handler(_ctx, a) {
           const d = doc();
           return { payload: exportPayload(d, { ...collectBundles(d), name: a.name, description: a.description }) };
+        },
+      },
+
+      // ── checkpoints: a desktop you meant to come back to ──────────────────
+      //
+      // History is the last forty revisions, which answers "undo that". A
+      // checkpoint answers "take me back to the desktop I liked": a named copy
+      // of the whole document, kept outside the pruning window (goal.md T2.4).
+
+      checkpoint: {
+        description: "Save the desktop as a named state you can come back to, whatever happens to the revision history.",
+        inputSchema: obj({ name: S }, ["name"]),
+        async handler(_ctx, a) {
+          const name = String(a.name ?? "").trim().slice(0, LIMITS.nameLen);
+          if (!name) throw new Error("a checkpoint needs a name");
+          const current = doc();
+          const id = rid("cp");
+          if (!writeCheckpoint(sandbox, id, current)) throw new Error("could not write the checkpoint");
+          const next = mutateOs(sandbox, (d) => {
+            d.checkpoints = [...(d.checkpoints ?? []), { id, name, rev: current.rev, ts: Date.now() }];
+            // Over the ceiling, the oldest one goes — and its file with it, or
+            // the disk keeps a state nothing can reach.
+            while (d.checkpoints.length > LIMITS.checkpoints) {
+              const gone = d.checkpoints.shift();
+              removeCheckpoint(sandbox, gone.id);
+            }
+          }, { op: "checkpoint", label: `checkpoint: ${name}` });
+          return { ok: true, rev: next.rev, checkpoint: next.checkpoints.at(-1) };
+        },
+      },
+
+      checkpoints: {
+        description: "The named desktop states this machine has kept.",
+        inputSchema: obj({}),
+        async handler() { return { checkpoints: doc().checkpoints ?? [] }; },
+      },
+
+      checkpointRestore: {
+        description: "Go back to a named state. The restore is itself a revision, so it can be undone.",
+        inputSchema: obj({ id: S }, ["id"]),
+        async handler(_ctx, a) {
+          const found = (doc().checkpoints ?? []).find((c) => c.id === a.id);
+          if (!found) throw new Error(`no such checkpoint: ${a.id}`);
+          const next = restoreCheckpoint(sandbox, a.id, { label: `restore "${found.name}"` });
+          await syncServers();
+          return { ok: true, rev: next.rev, restored: found };
+        },
+      },
+
+      checkpointRemove: {
+        description: "Forget a named state, and delete the copy it kept.",
+        inputSchema: obj({ id: S }, ["id"]),
+        async handler(_ctx, a) {
+          if (!(doc().checkpoints ?? []).some((c) => c.id === a.id)) throw new Error(`no such checkpoint: ${a.id}`);
+          const next = mutateOs(sandbox, (d) => {
+            d.checkpoints = (d.checkpoints ?? []).filter((c) => c.id !== a.id);
+          }, { op: "checkpointRemove", label: `forget ${a.id}` });
+          removeCheckpoint(sandbox, a.id);
+          return { ok: true, rev: next.rev };
+        },
+      },
+
+      checkpointDiff: {
+        description: "What changed between a named state and now — or between two named states. Structural: windows, widgets, theme, apps.",
+        inputSchema: obj({ id: S, against: S }, ["id"]),
+        async handler(_ctx, a) {
+          const from = readCheckpoint(sandbox, a.id);
+          if (!from) throw new Error(`no such checkpoint: ${a.id}`);
+          const to = a.against ? readCheckpoint(sandbox, a.against) : doc();
+          if (!to) throw new Error(`no such checkpoint: ${a.against}`);
+          return { from: a.id, to: a.against ?? "now", diff: structuralDiff(from, to) };
+        },
+      },
+
+      // ── the keyboard, remappable ──────────────────────────────────────────
+
+      keyList: {
+        description: "Every keyboard action the shell honours, its chord, and what it does. The cheat sheet reads this, so a remap shows up there too.",
+        inputSchema: obj({}),
+        async handler() {
+          const keys = doc().shell.keys ?? {};
+          return {
+            keys,
+            actions: Object.entries(KEY_ACTIONS).map(([action, what]) => ({
+              action, what, chord: keys[action] ?? null, default: DEFAULT_KEYS[action] ?? null,
+            })),
+          };
+        },
+      },
+
+      keySet: {
+        description: "Rebind a keyboard action. A chord is modifiers plus one key: mod+shift+k. Pass chord: null to unbind it, or omit action to restore every default.",
+        inputSchema: obj({ action: S, chord: S }),
+        async handler(_ctx, a) {
+          if (a.action != null && !Object.hasOwn(KEY_ACTIONS, a.action)) {
+            throw new Error(`unknown keyboard action: ${a.action} (try one of ${Object.keys(KEY_ACTIONS).join(", ")})`);
+          }
+          if (a.action != null && a.chord != null && !isChord(a.chord)) {
+            throw new Error(`not a chord: ${a.chord} — modifiers (mod, shift, alt) plus one key, like mod+shift+k`);
+          }
+          // A chord that already belongs to something else is a collision, and
+          // silently stealing it would leave the other action dead.
+          const keys = doc().shell.keys ?? {};
+          if (a.action != null && a.chord) {
+            const clash = Object.entries(keys).find(([act, ch]) => ch === a.chord && act !== a.action);
+            if (clash) throw new Error(`${a.chord} is already ${clash[0]} — unbind that first`);
+          }
+          const next = mutateOs(sandbox, (d) => {
+            if (a.action == null) { d.shell.keys = { ...DEFAULT_KEYS }; return; }
+            d.shell.keys = { ...(d.shell.keys ?? {}) };
+            if (a.chord == null) d.shell.keys[a.action] = null;   // unbound, on purpose
+            else d.shell.keys[a.action] = a.chord;
+          }, { op: "keySet", label: a.action ? `key ${a.action} → ${a.chord ?? "none"}` : "keys reset" });
+          return { ok: true, rev: next.rev, keys: next.shell.keys };
         },
       },
 

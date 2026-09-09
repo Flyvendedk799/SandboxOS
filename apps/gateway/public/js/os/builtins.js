@@ -14,6 +14,10 @@ import {
   dirname, basename, extname,
 } from "../core.js";
 import { call, os } from "./client.js";
+import { KEY_ACTIONS, prettyChord } from "./lib/keys.js";
+
+/** Who can still interrupt you while do-not-disturb is on. */
+const NOTIFY_SOURCES = [["agents", "agents"], ["procs", "processes"], ["apps", "apps"], ["system", "the system"]];
 import { mountTerminal } from "./terminal.js";
 import { OPS_APPS } from "./ops.js";
 
@@ -767,7 +771,33 @@ const settings = {
         row("Status readings", onoff(d.shell.menubar.showStatus, (v) => call("shellSet", { menubar: { showStatus: v } }))),
         label("Notifications"),
         row("Enabled", onoff(d.shell.notifications.enabled, (v) => call("shellSet", { notifications: { enabled: v } }))),
+        // Do-not-disturb records everything and interrupts with nothing; the
+        // allow list is who still gets through (goal.md T3.3).
+        row("Do not disturb", onoff(d.shell.notifications.dnd, (v) => call("shellSet", { notifications: { dnd: v } }))),
+        ...NOTIFY_SOURCES.map(([key, what]) => row(`  …still let ${what} through`,
+          onoff((d.shell.notifications.allow ?? []).includes(key), (v) => {
+            const allow = new Set(d.shell.notifications.allow ?? []);
+            if (v) allow.add(key); else allow.delete(key);
+            return call("shellSet", { notifications: { allow: [...allow] } });
+          }))),
         row("Kept", h("span.v", `${d.notifications.length} of ${os.snap.limits?.notifications ?? 60}`)),
+
+        label("Keyboard"),
+        ...Object.entries(KEY_ACTIONS).map(([action, what]) => row(what, keyField(action, d.shell.keys?.[action] ?? null))),
+        h("div", { style: { padding: "6px 11px 10px" } },
+          h("button.app-btn", { onclick: () => call("keySet", {}).catch((e) => toastError("Could not reset the keyboard", e)) }, "Restore the defaults")),
+        h("div.dim", { style: { padding: "0 11px 10px", fontSize: "11px", lineHeight: "1.6" } },
+          "Click a chord and press the keys you want. The map is in the document, so it travels with a distro — and ⌘? reads it."),
+
+        label("Checkpoints"),
+        ...((d.checkpoints ?? []).length
+          ? d.checkpoints.slice().reverse().map((c) => row(c.name, h("span", { style: { display: "flex", gap: "6px" } },
+              h("span.v.dim", `r${c.rev}`),
+              h("button.app-btn", { onclick: () => restoreCheckpoint(c) }, "Restore"),
+              h("button.app-btn", { onclick: () => call("checkpointRemove", { id: c.id }).catch((e) => toastError("Could not forget it", e)) }, "Forget"))))
+          : [h("div.dim", { style: { padding: "0 11px", fontSize: "11px" } }, "No named states yet. A checkpoint is a desktop you meant to come back to.")]),
+        h("div", { style: { padding: "6px 11px 10px" } },
+          h("button.app-btn", { onclick: () => nameCheckpoint() }, "Save this desktop…")),
         label("Opens with"),
         ...(assoc.length ? assoc.map(([ext, appId]) => row(h("span.mono", ext),
           sel([...apps, { value: "", label: "— clear —" }], appId, (v) => call("associate", { ext, app: v || null })))) : [h("div.dim", { style: { padding: "0 11px", fontSize: "11px" } }, "No associations. Right-click a file in Files → Open with…")]),
@@ -778,6 +808,59 @@ const settings = {
             h("button.app-btn", { onclick: () => ext.value.trim() && call("associate", { ext: ext.value.trim(), app: app.value }).catch((e) => toastError("Could not associate", e)) }, "Set")));
         })(),
       ];
+
+      /** Capture a chord by listening for the next keypress, honestly. */
+      function keyField(action, chord) {
+        const btn = h("button.app-btn.chord", { title: "Click, then press the keys" }, chord ? prettyChord(chord) : "unbound");
+        btn.addEventListener("click", () => {
+          btn.textContent = "press keys…";
+          btn.classList.add("listening");
+          const onKey = async (e) => {
+            if (["Shift", "Control", "Meta", "Alt"].includes(e.key)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            window.removeEventListener("keydown", onKey, true);
+            btn.classList.remove("listening");
+            if (e.key === "Escape") { render(); return; }
+            if (e.key === "Backspace" || e.key === "Delete") {
+              try { await call("keySet", { action, chord: null }); } catch (err) { toastError("Could not unbind it", err); render(); }
+              return;
+            }
+            const parts = [];
+            if (e.metaKey || e.ctrlKey) parts.push("mod");
+            if (e.shiftKey && e.key.length > 1) parts.push("shift");
+            if (e.altKey) parts.push("alt");
+            parts.push(e.key.length === 1 ? e.key : e.key);
+            try { await call("keySet", { action, chord: parts.join("+") }); }
+            catch (err) { toastError("That chord did not take", err); render(); }
+          };
+          window.addEventListener("keydown", onKey, true);
+        });
+        return btn;
+      }
+
+      async function nameCheckpoint() {
+        const got = await dialog({
+          title: "Save this desktop",
+          message: "A named state you can come back to, whatever happens to the revision history.",
+          fields: [{ name: "name", label: "Name", placeholder: "before the redesign" }],
+          confirmLabel: "Save",
+        });
+        if (!got?.name) return;
+        try { await call("checkpoint", { name: got.name }); toast(`Saved “${got.name}”`, { timeout: 2200 }); }
+        catch (e) { toastError("Could not save it", e); }
+      }
+
+      async function restoreCheckpoint(c) {
+        let diff = null;
+        try { diff = (await api.mcp("desktop", "checkpointDiff", { id: c.id })).diff; } catch { /* the diff is a courtesy */ }
+        const summary = diff
+          ? `Windows ${diff.windows.added ? `+${diff.windows.added} ` : ""}${diff.windows.removed ? `−${diff.windows.removed} ` : ""}${diff.windows.changed ? `~${diff.windows.changed}` : ""}`.trim()
+          : "";
+        if (!(await confirmDialog(`Go back to “${c.name}”?`, `${summary ? `${summary}. ` : ""}The restore is itself a revision, so you can undo it.`))) return;
+        try { await call("checkpointRestore", { id: c.id }); }
+        catch (e) { toastError("Could not restore it", e); }
+      }
 
       const machineSection = [
         label("This machine"),

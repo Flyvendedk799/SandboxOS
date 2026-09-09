@@ -7,6 +7,7 @@
 // are ordinary `desktop.*` calls, and an agent can do every one of them.
 
 import { h, fill, icon, api, slug, menu, toast, toastError } from "../core.js";
+import { KEY_ACTIONS, matchesChord, prettyChord } from "./lib/keys.js";
 import { os, call, tint } from "./client.js";
 import { createDesktop } from "./wm.js";
 import { iconName } from "./sprite.js";
@@ -107,9 +108,16 @@ export function createScreen({ ctx = {} } = {}) {
   function renderMenubar() {
     const d = os.doc;
     const unread = d.notifications.filter((n) => !n.read).length;
-    const bell = h("button.icon-btn", { title: "Notifications", onclick: () => toggleOverlay("notifs", notifPanel) },
+    // Do-not-disturb is visible, because a machine that has quietly stopped
+    // telling you things should say so rather than look calm (goal.md T3.3).
+    const dnd = !!d.shell.notifications.dnd;
+    const bell = h("button.icon-btn", {
+      class: dnd ? "dnd" : "",
+      title: dnd ? "Do not disturb — everything is still recorded" : "Notifications",
+      onclick: () => toggleOverlay("notifs", notifPanel),
+    },
       icon("bell", 14),
-      unread ? h("span.os-badge", String(unread)) : null);
+      unread ? h("span.os-badge", { class: dnd ? "quiet" : "" }, String(unread)) : null);
 
     menubar.hidden = !d.shell.menubar.visible;
     fill(menubar,
@@ -240,8 +248,17 @@ export function createScreen({ ctx = {} } = {}) {
     const groups = new Map();
     for (const n of list) { const g = groupOf(n); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(n); }
     const panel = h("div.os-panel.os-notifs", { onclick: (e) => e.stopPropagation() },
-      h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" } },
+      h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px", gap: "8px" } },
         h("span", { style: { fontSize: "12px", fontWeight: "650" } }, `Notifications${list.length ? ` · ${list.length}` : ""}`),
+        h("span.spacer", { style: { flex: "1" } }),
+        // Attention is the user's: the switch is where the interruptions are.
+        h("button.app-btn", {
+          class: os.doc.shell.notifications.dnd ? "on" : "",
+          title: "Everything is still recorded — nothing interrupts you",
+          onclick: () => call("shellSet", { notifications: { dnd: !os.doc.shell.notifications.dnd } })
+            .then(() => { hideOverlay(); })
+            .catch((e) => toastError("Could not change that", e)),
+        }, os.doc.shell.notifications.dnd ? "Do not disturb: on" : "Do not disturb"),
         list.length ? h("button.app-btn", { onclick: () => { call("notificationsClear", {}); hideOverlay(); } }, "Clear all") : null),
       ...(list.length ? [...groups.entries()].flatMap(([g, items]) => [
         h("div.os-label", { style: { marginBottom: "6px" } }, g),
@@ -377,21 +394,33 @@ export function createScreen({ ctx = {} } = {}) {
     try { localStorage.setItem(RECENT_KEY, JSON.stringify([p, ...recentFiles().filter((x) => x !== p)].slice(0, 12))); } catch { /* private mode */ }
   }
 
-  // ── the cheat sheet (⌘?) ──────────────────────────────────────────────────
+  // ── the cheat sheet, generated from the keymap ────────────────────────────
+  //
+  // It reads `shell.keys` rather than a hardcoded list, so a rebinding shows up
+  // here instead of quietly making this page a lie (goal.md T3.2).
   function cheatSheet() {
-    const rows = [
-      ["⌘K", "Search apps, files, widgets, themes, tools, actions"], ["⌘?", "This sheet"],
-      ["⌘1…9", "Switch workspace"], ["⌘W", "Close window"], ["⌘M", "Minimise"],
-      ["⌘↑ / ⌘↓", "Zoom / unzoom"], ["⌘← / ⌘→", "Snap left / right"], ["⌘`", "Next window (⇧ for previous)"],
-      ["⌘⇧D", "Show desktop"], ["⌘⇧B", "Open the Studio"], ["⌘⇧C", "Command Central"],
-      ["Drag to an edge", "Snap to a half, a quarter, or full"], ["Drag a sash", "Resize a tiled split"],
-      ["Studio: ⌘⇧P", "Studio actions"], ["Studio: ⇧-click", "Multi-select; arrows nudge, ⇧ ×5"], ["Studio: ⌘S", "Save the file in Code"],
+    const keys = os.doc?.shell?.keys ?? {};
+    const bound = Object.entries(KEY_ACTIONS)
+      .filter(([action]) => keys[action])
+      .map(([action, what]) => [prettyChord(keys[action]), what]);
+    const fixed = [
+      ["⌘1…9", "Switch workspace"],
+      ["Drag to an edge", "Snap to a half, a quarter, or full"],
+      ["Drag a sash", "Resize a tiled split"],
+      ["Studio: ⌘⇧P", "Studio actions"],
+      ["Studio: ⇧-click", "Multi-select; arrows nudge, ⇧ ×5"],
+      ["Studio: ⌘S", "Save the file in Code"],
     ];
+    const unbound = Object.entries(KEY_ACTIONS).filter(([action]) => !keys[action]);
     return h("div.os-overlay.center", { onclick: hideOverlay },
       h("div.os-panel.os-keys", { onclick: (e) => e.stopPropagation() },
         h("div.os-label", "Keyboard"),
-        h("div.keys-grid", ...rows.flatMap(([k, what]) => [h("kbd", k), h("span", what)])),
-        h("div.dim", { style: { fontSize: "10.5px", marginTop: "10px" } }, "Every shortcut is the same desktop.* call the menus make — an agent has the same keyboard.")));
+        h("div.keys-grid", ...[...bound, ...fixed].flatMap(([k, what]) => [h("kbd", k), h("span", what)])),
+        unbound.length
+          ? h("div.dim", { style: { fontSize: "10.5px", marginTop: "8px" } },
+              `Unbound: ${unbound.map(([, what]) => what.toLowerCase()).join(", ")}. Settings → Desktop → Keyboard.`)
+          : null,
+        h("div.dim", { style: { fontSize: "10.5px", marginTop: "10px" } }, "Every shortcut is a desktop.* call the menus also make, and the map lives in the document — remap it, and this sheet follows.")));
   }
 
   // ── keyboard ──────────────────────────────────────────────────────────────
@@ -399,41 +428,66 @@ export function createScreen({ ctx = {} } = {}) {
   // An OS you can only drive with a mouse is a mock-up of one. Every shortcut
   // below is the same `desktop.*` call the menus make.
 
+  /** What each keyboard action does. One place, so the map is the whole story. */
+  const ACTIONS = {
+    spotlight: () => showOverlay("spotlight", spotlight),
+    cheatSheet: () => toggleOverlay("keys", cheatSheet),
+    notifications: () => toggleOverlay("notifs", notifPanel),
+    toggleDnd: () => {
+      const on = !os.doc.shell.notifications.dnd;
+      call("shellSet", { notifications: { dnd: on } })
+        .then(() => toast(on ? "Do not disturb" : "Notifications on", {
+          body: on ? "Everything is still recorded; nothing will interrupt you." : "Interruptions are back.",
+          timeout: 2600,
+        }))
+        .catch((err) => toastError("Could not change that", err));
+    },
+    closeWindow: (win) => win && call("close", { id: win.id }),
+    minimizeWindow: (win) => win && call("windowSet", { id: win.id, min: true }),
+    minimizeAll: () => call("minimizeAll", {}),
+    zoomWindow: (win) => win && call("windowSet", { id: win.id, max: !win.max }),
+    unzoomWindow: (win) => win && call("windowSet", { id: win.id, max: false }),
+    snapLeft: (win) => win && call("snap", { id: win.id, region: "left", viewport: wm.viewport() }),
+    snapRight: (win) => win && call("snap", { id: win.id, region: "right", viewport: wm.viewport() }),
+    cycleFocus: () => call("cycleFocus", { direction: "next" }),
+    cycleFocusBack: () => call("cycleFocus", { direction: "prev" }),
+  };
+
+  /** Which action this event is, according to the document's keymap. */
+  function actionFor(e) {
+    const keys = os.doc?.shell?.keys ?? {};
+    for (const [action, chord] of Object.entries(keys)) {
+      if (chord && matchesChord(chord, e)) return action;
+    }
+    return null;
+  }
+
   function onKey(e) {
-    const mod = e.metaKey || e.ctrlKey;
     if (e.key === "Escape" && openOverlay) { hideOverlay(); return; }
-    // `?` on its own opens the cheat sheet, unless you are typing somewhere.
-    if (e.key === "?" && !e.target.closest("input, textarea, select, [contenteditable], .term-screen")) { e.preventDefault(); toggleOverlay("keys", cheatSheet); return; }
-    if (!mod) return;
+    const typing = !!e.target.closest("input, textarea, select, [contenteditable], .term-screen");
 
-    const k = e.key.toLowerCase();
-    const win = wm.focused();
+    const action = actionFor(e);
+    if (action && ACTIONS[action]) {
+      // A bare key (like `?`) belongs to whatever you are typing into; a chord
+      // with a modifier belongs to the OS.
+      if (typing && !/(?:^|\+)(?:mod|alt)\+/.test(os.doc.shell.keys[action] ?? "")) return;
+      const win = wm.focused();
+      const needsWindow = ["closeWindow", "minimizeWindow", "zoomWindow", "unzoomWindow", "snapLeft", "snapRight"].includes(action);
+      if (needsWindow && !win) return;
+      e.preventDefault();
+      ACTIONS[action](win);
+      return;
+    }
 
-    if (k === "k") { e.preventDefault(); showOverlay("spotlight", spotlight); return; }
-    if (e.key === "?" || (e.key === "/" && e.shiftKey)) { e.preventDefault(); toggleOverlay("keys", cheatSheet); return; }
-
-    // ⌘1…⌘9 — workspaces. Left alone when the OS has fewer.
-    if (/^[1-9]$/.test(e.key)) {
+    // ⌘1…⌘9 — workspaces. Not in the map: they are positional, not named, and
+    // there are as many of them as the document has workspaces.
+    if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
       const n = Number(e.key);
       if (os.doc.workspaces.some((w) => w.n === n)) {
         e.preventDefault();
         call("workspaceSwitch", { n });
       }
-      return;
     }
-
-    if (!win) return;
-    if (k === "w") { e.preventDefault(); call("close", { id: win.id }); return; }
-    if (k === "m") { e.preventDefault(); call("windowSet", { id: win.id, min: true }); return; }
-    if (k === "d" && e.shiftKey) { e.preventDefault(); call("minimizeAll", {}); return; }
-    if (e.key === "ArrowUp") { e.preventDefault(); call("windowSet", { id: win.id, max: !win.max }); return; }
-    if (e.key === "ArrowDown") { e.preventDefault(); call("windowSet", { id: win.id, max: false }); return; }
-    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-      e.preventDefault();
-      call("snap", { id: win.id, region: e.key === "ArrowLeft" ? "left" : "right", viewport: wm.viewport() });
-      return;
-    }
-    if (e.key === "`") { e.preventDefault(); call("cycleFocus", { direction: e.shiftKey ? "prev" : "next" }); }
   }
 
   // ── wiring ────────────────────────────────────────────────────────────────

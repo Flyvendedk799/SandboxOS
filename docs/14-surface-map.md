@@ -59,7 +59,7 @@ All require a grant on that Sandbox.
 | `GET` | `/:slug/studio` | the OS builder |
 | `GET` | `/:slug/os/doc` | the OS document + resolved theme/motion + catalogs |
 | `GET` | `/:slug/os/events` | SSE: every desktop change, with the new document; catalog and bundle changes too |
-| `GET` | `/static/js/os/lib/*.js` | the pure OS modules (layout, themes, animations, summary) served from `packages/os` |
+| `GET` | `/static/js/os/lib/*.js` | the pure OS modules (layout, themes, animations, summary, keys) served from `packages/os` |
 | `GET` | `/:slug/os/theme.css` | the active theme and motion, compiled |
 | `POST` | `/:slug/os/apps/:id/session` | open a capability session for an app frame |
 | `GET` | `/:slug/os/apps/:id/*` | a custom app's files (sandboxed frame, closed CSP) |
@@ -159,6 +159,14 @@ Notifications: `notify` (with an `action` deep link) `notificationsRead`
 `notificationsClear` (all, or `id`). Distros: `distroList` (the gallery: `q`, `scope`)
 `distroPublish` (`visibility`, `tags`, composition) `distroSet` `distroFork`
 `distroExport` `distroImport`.
+Review: `propose` (ops are desktop tool calls; nothing happens until someone applies
+it) `proposals` `applyProposal` (runs them as *you*, in order, reporting where it
+stopped) `discardProposal`. Checkpoints: `checkpoint` `checkpoints`
+`checkpointRestore` `checkpointDiff` `checkpointRemove` — a named copy of the whole
+document, kept outside the forty-revision window. Keyboard: `keyList` `keySet`
+(`shell.keys` is the map; a collision or an unreadable chord is refused). Apps as
+principals: `appLedger` (declared, granted, withheld, and every call it made)
+`appSuspend` (revokes its tokens, mints no new session, keeps the window and source).
 Every mutation normalizes the document, bumps its revision, pushes the previous version
 onto the undo history and announces itself on `/:slug/os/events`. See docs/15.
 

@@ -206,6 +206,42 @@ export function revertOs(sandbox, rev) {
   return writeDoc(sandbox, entry.doc, { op: "revert", label: `revert to rev ${rev}` });
 }
 
+// ---- checkpoints -----------------------------------------------------------
+//
+// History answers "what did I just do"; a checkpoint answers "take me back to
+// the desktop I liked". It is a named copy of the whole document, kept outside
+// the forty-revision window so it cannot be pruned away, and the document holds
+// only the index (goal.md T2.4).
+
+const checkpointDir = (sandbox) => path.join(osDir(sandbox), "checkpoints");
+const checkpointPath = (sandbox, id) => path.join(checkpointDir(sandbox), `${id}.json`);
+
+/** Store the document under a checkpoint id. Returns false if it cannot. */
+export function writeCheckpoint(sandbox, id, doc) {
+  try { writeJsonAtomic(checkpointPath(sandbox, id), doc); return true; }
+  catch { return false; }
+}
+
+export function readCheckpoint(sandbox, id) {
+  return readJson(checkpointPath(sandbox, id));
+}
+
+export function removeCheckpoint(sandbox, id) {
+  try { fs.rmSync(checkpointPath(sandbox, id), { force: true }); return true; }
+  catch { return false; }
+}
+
+/** Restore a checkpoint as a new revision: going back is itself undoable. */
+export function restoreCheckpoint(sandbox, id, { label = null } = {}) {
+  const doc = readCheckpoint(sandbox, id);
+  if (!doc) throw new Error(`no such checkpoint: ${id}`);
+  const current = loadOs(sandbox);
+  // The index travels with the current document, not with the snapshot:
+  // restoring a state from last week must not delete the checkpoints made
+  // since, or the way back would disappear behind you.
+  return writeDoc(sandbox, { ...doc, checkpoints: current.checkpoints }, { op: "checkpointRestore", label: label ?? `restore ${id}` });
+}
+
 /** Delete everything the OS owns for a Sandbox: document, history and every
  *  custom app's source. Called when the Sandbox itself is deleted — bundles can
  *  run to megabytes, and a deleted machine should not leave its desktop behind. */

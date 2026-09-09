@@ -15,6 +15,9 @@ import { BUILTIN_THEMES, DEFAULT_THEME, cleanTokens, isWallpaper } from "./theme
 import { BUILTIN_ANIMATIONS, DEFAULT_ANIMATION, cleanAnimation } from "./animations.js";
 import { builtinApp, builtinWidget } from "./catalog.js";
 import { reconcileTree } from "./layout.js";
+// The keyboard grammar is shared with the browser (served from packages/os),
+// so the shell that matches a key and the tool that validates one agree.
+import { DEFAULT_KEYS, cleanKeys } from "./keys.js";
 
 export const OS_DOC_VERSION = 1;
 
@@ -34,6 +37,9 @@ export const LIMITS = {
   proposals: 8,
   proposalOps: 24,
   history: 40,
+  // Named states of the whole desktop. Few, on purpose: a checkpoint is a
+  // place you meant to come back to, not an autosave.
+  checkpoints: 12,
   nameLen: 64,
   titleLen: 120,
   docBytes: 512 * 1024,
@@ -54,6 +60,10 @@ export const ID_RE = /^[a-z0-9][a-z0-9_-]{0,47}$/;
 export const isId = (v) => typeof v === "string" && ID_RE.test(v);
 
 export const DOCK_POSITIONS = ["bottom", "left", "right", "top", "hidden"];
+
+/** Who may interrupt you while do-not-disturb is on. A closed vocabulary. */
+export const NOTIFY_KINDS = ["agents", "procs", "apps", "system"];
+
 export const WM_MODES = ["floating", "tiling"];
 
 export function defaultDoc(name = "untitled-os") {
@@ -77,7 +87,13 @@ export function defaultDoc(name = "untitled-os") {
         pinned: ["files", "terminal", "assistant", "metrics", "settings"],
       },
       spotlight: { enabled: true },
-      notifications: { enabled: true },
+      // Attention is the user's: `dnd` keeps notifications out of your face
+      // without throwing them away, and `allow` says which kinds get through
+      // even then (an agent coming back usually should).
+      notifications: { enabled: true, dnd: false, allow: ["agents"] },
+      // The keyboard is a document field, so it can be remapped, travel with a
+      // distro, and be read back by the cheat sheet instead of hardcoded twice.
+      keys: { ...DEFAULT_KEYS },
       wallpaperFit: "cover",
       // "Open with": extension → app id. An OS that opens a .png in a text editor
       // is technically correct and practically wrong, and which app wins should be
@@ -97,6 +113,7 @@ export function defaultDoc(name = "untitled-os") {
     widgetKinds: {},  // custom widget definitions, keyed by kind
     notifications: [],
     proposals: [],    // changes proposed for review (goal.md T2.3)
+    checkpoints: [],  // named states of the whole desktop (goal.md T2.4)
   };
 }
 
@@ -332,6 +349,10 @@ function normNotification(n) {
   return {
     id: isId(n.id) ? n.id : rid("n"),
     app: str(n.app, LIMITS.nameLen, "system"),
+    // Who is talking (for do-not-disturb), and whether this one was recorded
+    // without interrupting anyone.
+    source: oneOf(n.source, NOTIFY_KINDS, "system"),
+    ...(n.quiet ? { quiet: true } : {}),
     title: str(n.title, LIMITS.titleLen, ""),
     body: str(n.body, 600),
     kind: oneOf(n.kind, ["ok", "warn", "err", "info", "accent"], "info"),
@@ -424,7 +445,13 @@ export function normalizeDoc(input, { name } = {}) {
       pinned,
     },
     spotlight: { enabled: bool(input.shell?.spotlight?.enabled, true) },
-    notifications: { enabled: bool(input.shell?.notifications?.enabled, true) },
+    notifications: {
+      enabled: bool(input.shell?.notifications?.enabled, true),
+      dnd: bool(input.shell?.notifications?.dnd, false),
+      allow: (Array.isArray(input.shell?.notifications?.allow) ? input.shell.notifications.allow : ["agents"])
+        .filter((k) => NOTIFY_KINDS.includes(k)).slice(0, NOTIFY_KINDS.length),
+    },
+    keys: cleanKeys(input.shell?.keys),
     wallpaperFit: oneOf(input.shell?.wallpaperFit, ["cover", "contain", "tile"], "cover"),
     associations: cleanAssociations(input.shell?.associations ?? base.shell.associations),
   };
@@ -483,6 +510,20 @@ export function normalizeDoc(input, { name } = {}) {
 
   doc.proposals = (Array.isArray(input.proposals) ? input.proposals : [])
     .slice(-LIMITS.proposals).map(normProposal).filter(Boolean);
+
+  // Checkpoints are an *index*: the documents themselves live beside the OS
+  // document, so a named state survives history being pruned.
+  doc.checkpoints = (Array.isArray(input.checkpoints) ? input.checkpoints : [])
+    .slice(-LIMITS.checkpoints)
+    .map((c) => (c && typeof c === "object" && isId(c.id)
+      ? {
+          id: c.id,
+          name: str(c.name, LIMITS.nameLen, c.id),
+          rev: num(c.rev, 0, Number.MAX_SAFE_INTEGER, 0),
+          ts: num(c.ts, 0, Number.MAX_SAFE_INTEGER, Date.now()),
+        }
+      : null))
+    .filter(Boolean);
 
   return doc;
 }

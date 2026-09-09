@@ -30,17 +30,26 @@ export function hasOs(sandbox) {
  *
  * @returns {boolean} whether it was delivered
  */
-export function notifyOs(sandbox, { app = "system", title, body = "", kind = "info" } = {}) {
+export function notifyOs(sandbox, { app = "system", title, body = "", kind = "info", source = "system", action = null } = {}) {
   if (!sandbox || !title || !hasOs(sandbox)) return false;
   try {
     mutateOs(sandbox, (d) => {
       if (d.shell?.notifications?.enabled === false) return;
+      // Do-not-disturb does not throw anything away: the notification is
+      // recorded exactly as it would have been, and marked `quiet` so no
+      // surface interrupts anyone with it. The decision is made here, once, so
+      // a phone, a second tab and the terminal renderer all agree (T3.3).
+      const n = d.shell?.notifications ?? {};
+      const quiet = !!n.dnd && !(n.allow ?? []).includes(source);
       d.notifications.push({
         id: rid("n"),
         app: String(app).slice(0, LIMITS.nameLen),
         title: String(title).slice(0, LIMITS.titleLen),
         body: String(body).slice(0, 600),
         kind: ["ok", "warn", "err", "info", "accent"].includes(kind) ? kind : "info",
+        source: ["agents", "procs", "apps", "system"].includes(source) ? source : "system",
+        ...(quiet ? { quiet: true } : {}),
+        ...(action ? { action } : {}),
         ts: Date.now(),
         read: false,
       });
@@ -57,6 +66,7 @@ export function notifyJobEnded(sandbox, job) {
   const ok = job.state === "exited" && (job.code === 0 || job.code == null);
   return notifyOs(sandbox, {
     app: "Processes",
+    source: "procs",
     kind: ok ? "ok" : job.state === "stopped" ? "info" : "err",
     title: ok ? `${job.name} finished` : job.state === "stopped" ? `${job.name} stopped` : `${job.name} failed`,
     body: job.state === "stopped"
@@ -68,8 +78,11 @@ export function notifyJobEnded(sandbox, job) {
 /** The notification an agent earns when it comes back. */
 export function notifyAgentEnded(sandbox, agent, state) {
   const kind = state === "done" ? "accent" : state === "killed" ? "info" : "err";
+  // An agent coming back is the interruption most people do want through a
+  // do-not-disturb, which is why `allow: ["agents"]` is the default.
   return notifyOs(sandbox, {
     app: "Agents",
+    source: "agents",
     kind,
     title: `${agent.name ?? "Agent"} ${state}`,
     body: state === "done"

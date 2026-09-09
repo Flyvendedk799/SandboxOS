@@ -1323,3 +1323,15 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
 .ledger .v.ok { color: var(--os-ok); }
 .ledger .v.warn { color: var(--os-warn); }
 .ledger-calls { max-height: 200px; overflow: auto; border: 1px solid var(--os-line); border-radius: 8px; padding: 6px 0; }
+
+/* Do-not-disturb: the bell says so rather than the machine just going quiet. */
+.icon-btn.dnd { color: var(--os-text-3); }
+.icon-btn.dnd::after {
+  content: ""; position: absolute; left: 4px; right: 4px; top: 50%;
+  height: 1px; background: currentColor; transform: rotate(-20deg);
+}
+.icon-btn { position: relative; }
+.os-badge.quiet { background: var(--os-chip); color: var(--os-text-3); }
+
+.app-btn.chord { font-family: var(--mono); min-width: 72px; }
+.app-btn.chord.listening { border-color: var(--os-accent); color: var(--os-accent); }
