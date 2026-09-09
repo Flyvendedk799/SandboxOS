@@ -117,7 +117,42 @@ try {
   page.on("pageerror", (e) => pageErrors.push(`pageerror: ${e.message}`));
   page.on("console", (m) => { if (m.type() === "error") pageErrors.push(`console: ${m.text()}`); });
   await page.goto(`${base}/${sandbox.slug}/os`);
-  await page.waitForSelector(".os-window", { timeout: 25_000 });
+
+  // ── 0 · First run ─────────────────────────────────────────────────────────
+  //
+  // Before the day there is the first minute. A machine nobody has set up shows
+  // one screen, and finishing it has to leave the machine *doing something* —
+  // that is the whole of T5.1, and it is checked here rather than described.
+  scene(0, "First run: one screen, a seed, and a machine that is already working");
+  await page.waitForSelector(".fr-panel", { timeout: 25_000 });
+  check((await page.$$(".fr-card")).length === 4, "the one idea is explained on one screen");
+  const seedNames = await page.$$eval(".fr-seed .fr-seed-name", (els) => els.map((e) => e.textContent));
+  check(seedNames.length >= 4, `and there is a seed to pick (${seedNames.join(", ")})`);
+  await page.click(".fr-seed:has-text('Developer Box')");
+  await page.click(".fr-go");
+  await page.waitForSelector(".os-window", { timeout: 60_000 });
+  await page.waitForTimeout(1200);
+
+  const afterSetup = (await desktop("state")).doc;
+  check(afterSetup.setup?.done && afterSetup.setup.seed === "dev", `the machine records that it has been set up (${JSON.stringify(afterSetup.setup)})`);
+  const welcomeJob = (await mcp("proc", "jobs", {})).jobs.find((j) => j.name === "welcome");
+  check(welcomeJob?.state === "running", `something is running when you first look at it (${welcomeJob?.state ?? "nothing"})`);
+  const welcomePort = (await mcp("ports", "list", {})).ports.find((p) => p.name === "welcome");
+  check(!!welcomePort, "at an address under your own slug");
+  if (welcomePort) {
+    const r = await fetch(`${base}/${sandbox.slug}/p/${welcomePort.port}/`, { headers: { cookie } });
+    check(r.ok && (await r.text()).includes("volume"), "and the page it serves is a file in your volume");
+  }
+  const wrote = await mcp("fs", "list", { path: "welcome" });
+  check(wrote.entries.some((e) => e.name === "index.html"), `made of ordinary files you can open (${wrote.entries.map((e) => e.name).join(", ")})`);
+  const note = await mcp("fs", "read", { path: "notes/first-day.md" });
+  check(/desktop is a document/i.test(note.content), "with a note that says what the machine is");
+  await shot(page, "00-first-run");
+
+  // The day proper starts from a clean desktop: what first run left behind is
+  // its own act, checked above.
+  for (const j of (await mcp("proc", "jobs", {})).jobs.filter((j) => j.state === "running")) await mcp("proc", "stop", { id: j.id });
+  if (welcomePort) await mcp("ports", "unexpose", { port: welcomePort.port });
   for (const w of (await desktop("state")).doc.windows) await desktop("close", { id: w.id });
 
   // ── 1 · Files ─────────────────────────────────────────────────────────────

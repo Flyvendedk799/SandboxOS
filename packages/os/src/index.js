@@ -19,3 +19,4 @@ export * from "./distro.js";
 export * from "./store.js";
 export * from "./notify.js";
 export * from "./manual.js";
+export * from "./first-run.js";

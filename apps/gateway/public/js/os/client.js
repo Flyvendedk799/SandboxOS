@@ -27,10 +27,27 @@ export function onOs(fn) { listeners.add(fn); return () => listeners.delete(fn);
 
 // ── reading ─────────────────────────────────────────────────────────────────
 
+/**
+ * Take a full snapshot — document plus catalogs.
+ *
+ * The rev guard is not paranoia. `loadOs()` is a fetch, and the event stream
+ * keeps arriving while it is in flight: a write that lands mid-request would be
+ * *undone* here by the older document the request answers with, and the next
+ * conditional write would then be refused as stale. To a person that reads as
+ * "someone else changed it first" when nobody did — precisely the confusion an
+ * honest stale check exists to prevent. So the newer document wins, and the
+ * catalogs are taken either way.
+ */
 function adopt(snapshot) {
+  const have = os.doc?.rev ?? -1;
+  const incoming = snapshot?.doc?.rev ?? 0;
   os.snap = snapshot;
-  os.doc = snapshot.doc;
-  applyThemeLink(snapshot.themeKey);
+  if (os.doc && incoming < have) {
+    os.snap.doc = os.doc;
+  } else {
+    os.doc = snapshot.doc;
+    applyThemeLink(snapshot.themeKey);
+  }
   emit("doc");
 }
 
@@ -43,8 +60,11 @@ export async function loadOs() {
 /** Re-read the document without re-reading the catalogs (cheap and frequent). */
 export async function refreshDoc() {
   const r = await api.mcp("desktop", "state", {});
-  if (os.snap) { os.snap.doc = r.doc; os.doc = r.doc; applyThemeLink(r.themeKey); emit("doc"); }
-  return r.doc;
+  // The same race as adopt(): a cheap poll must not rewind the desktop either.
+  if (os.snap && (r.doc?.rev ?? 0) >= (os.doc?.rev ?? -1)) {
+    os.snap.doc = r.doc; os.doc = r.doc; applyThemeLink(r.themeKey); emit("doc");
+  }
+  return os.doc ?? r.doc;
 }
 
 // ── writing ─────────────────────────────────────────────────────────────────

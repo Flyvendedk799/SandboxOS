@@ -194,6 +194,41 @@ it on, the assistant's `desktop.*` *writes* are captured into one proposal per t
 sensible about it), the system prompt says so, and the panel shows each proposal as a
 list of calls with Apply and Discard.
 
+### First run: one screen, and a machine already working
+
+A machine nobody has set up carries `setup: { done: false }` in its document — a
+fact about the machine, not a flag in a browser, so a second tab and a phone agree
+about it. The OS shows one screen before the desktop paints: the single idea in
+four cards, the seeds to start from, and a way to skip.
+
+`desktop.setupSeeds` offers the seeds. `desktop.setup { seed }` then does the work,
+in order: adopt the seed as this machine's desktop; write a `welcome/` folder and a
+first note into the volume; ask the Cell what it has that can serve a folder (node,
+python3, python, busybox — in that order, by running each one); start it as a
+supervised job called `welcome`; wait, and look again, because a static server's
+usual failure is EADDRINUSE a few milliseconds after it spawns; expose the port;
+open the Browser on it beside the Manual; and mark the machine set up. One revision
+for the document part.
+
+It returns a `steps` list — what, whether, and why not — and the welcome screen
+prints exactly that. An image with no Node and no Python cannot serve a folder, and
+the honest version of that is a named failure with the folder still sitting there,
+not a spinner. A partial setup offers "take me to the desktop anyway" rather than
+standing in the way. If every ordinary port is already in use, it says so instead
+of handing back a port the server would die on.
+
+`desktop.reset` keeps `setup`. Someone clearing their windows and their theme is not
+a new user, and greeting them with onboarding again answers a question they did not
+ask.
+
+Two things fell out of building it, both of the same family as the rest of Track 0.
+The desktop no longer paints behind the welcome screen: mounting the seed's apps
+under the panel had the Terminal writing its session into a document first run was
+about to replace, which surfaced as "someone else changed it first" on a machine
+nobody else had ever touched. And `loadOs()` can no longer rewind the client: a full
+read that raced an event on the stream used to adopt the older document it answered
+with, and the next conditional write was then refused as stale.
+
 ### The Manual is an app, and it reads this build
 
 `help` is a built-in app with two halves and one search box. The **manual** is

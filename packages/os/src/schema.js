@@ -75,6 +75,11 @@ export function defaultDoc(name = "untitled-os") {
     rev: 0,
     updatedAt: Date.now(),
     distro: null,
+    // First run: which seed was adopted, and whether the welcome screen is done
+    // with. A field rather than a browser flag, because "have I set this machine
+    // up" is a fact about the machine, not about the tab you happen to be in
+    // (goal.md T5.1).
+    setup: { done: false, seed: null, at: null },
     theme: { base: DEFAULT_THEME, tokens: {}, custom: {} },
     // reducedMotion: "auto" honours the viewer's prefers-reduced-motion setting;
     // "ignore" plays the preset regardless. A document choice, so it travels.
@@ -378,6 +383,15 @@ export function normalizeDoc(input, { name } = {}) {
   doc.name = str(input.name, LIMITS.nameLen, base.name) || base.name;
   doc.rev = num(input.rev, 0, Number.MAX_SAFE_INTEGER, 0);
   doc.updatedAt = num(input.updatedAt, 0, Number.MAX_SAFE_INTEGER, Date.now());
+  doc.setup = input.setup && typeof input.setup === "object"
+    ? {
+        // bool(), like every other flag here: only a real boolean counts, so a
+        // document that arrived from somewhere else cannot fake having been set up.
+        done: bool(input.setup.done),
+        seed: str(input.setup.seed, 64) || null,
+        at: input.setup.at ? num(input.setup.at, 0, Number.MAX_SAFE_INTEGER, 0) : null,
+      }
+    : { done: false, seed: null, at: null };
   doc.distro = input.distro && typeof input.distro === "object"
     ? {
         id: str(input.distro.id, 64),

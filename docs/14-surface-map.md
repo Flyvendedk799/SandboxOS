@@ -145,6 +145,7 @@ Exposure lives in the manifest, so it survives hibernate/wake and travels with a
 **`desktop`** — the OS itself. Document: `get` `state` `summarize` `silhouette` `set`
 `patch` `rename` `history` (with `rev` → a structural diff) `revert` (whole, or
 `only: ["windows"]` to take back one part and leave the rest) `revertScopes` `reset`.
+First run: `setupSeeds` `setup` (adopt a seed, write a welcome project, serve it as a job, report every step).
 Appearance: `themeList` `themeSet` `themeDefine` `themeRemove` `wallpaperSet`
 `animationList` `animationSet` `animationDefine` `animationRemove`. Chrome: `dockSet`
 `dockPin` `shellSet` `layoutSet` (mode, gap, grid, and the tiling tree: `preset` or

@@ -131,9 +131,19 @@ export function saveOs(sandbox, doc, opts = {}) {
   return mutateOs(sandbox, () => doc, { op: "set", ...opts });
 }
 
-/** Throw the desktop away and start again from the first-run seed. */
+/**
+ * Throw the desktop away and start again from the first-run seed.
+ *
+ * `setup` survives it. Whether this machine has been through first run is a fact
+ * about the machine, not part of the desktop: someone clearing their windows and
+ * their theme is not a new user, and greeting them with the welcome screen again
+ * would be answering a question they did not ask.
+ */
 export function resetOs(sandbox, { name } = {}) {
-  return writeDoc(sandbox, firstRunDoc(name ?? sandbox.name ?? "my-os"), { op: "reset", label: "reset" });
+  const prior = loadOs(sandbox);
+  const fresh = firstRunDoc(name ?? sandbox.name ?? "my-os");
+  if (prior?.setup?.done) fresh.setup = { ...prior.setup };
+  return writeDoc(sandbox, fresh, { op: "reset", label: "reset" });
 }
 
 // ---- history ---------------------------------------------------------------

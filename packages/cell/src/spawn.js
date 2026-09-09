@@ -9,7 +9,7 @@
 // repository calls `spawn` directly any more: it calls one of these, and the
 // listener is attached before the event loop can turn.
 
-import { spawn, execFile } from "node:child_process";
+import { spawn, spawnSync, execFile } from "node:child_process";
 
 /**
  * Spawn with an `'error'` listener attached at birth. The error is also stashed
@@ -71,12 +71,21 @@ export function killTree(pid, signal = "SIGTERM", child = null) {
     const force = signal === "SIGKILL" || signal === "SIGTERM";
     // `/T` walks the tree from this pid *down*, so the wrapper shell must still
     // be alive when taskkill reads it: killing our own child first orphans the
-    // grandchild and leaves the dev server holding its port. Only if taskkill
-    // itself cannot start do we fall back to killing what we can reach.
-    const killer = detachedSpawn("taskkill", ["/PID", String(pid), "/T", ...(force ? ["/F"] : [])]);
-    if (!killer) { try { child?.kill(signal); } catch { /* already gone */ } return false; }
-    killer.on("error", () => { try { child?.kill(signal); } catch { /* already gone */ } });
-    killer.on("exit", (code) => { if (code !== 0) { try { child?.kill(signal); } catch { /* already gone */ } } });
+    // grandchild and leaves the dev server holding its port.
+    //
+    // And it runs *synchronously*. An asynchronous taskkill is a promise that
+    // something will be killed shortly, which is not what a caller shutting the
+    // host down is asking for: the Gateway's exit path, a test's teardown and a
+    // `proc.stop` all mean "it is stopped when this returns". Handing the kill
+    // to a detached process and then exiting left dev servers holding their
+    // ports until the machine rebooted. It costs tens of milliseconds on a path
+    // that is already ending something.
+    const r = spawnSync("taskkill", ["/PID", String(pid), "/T", ...(force ? ["/F"] : [])], {
+      stdio: "ignore", timeout: 5000, windowsHide: true,
+    });
+    // taskkill could not run at all, or refused: fall back to what we can reach
+    // ourselves, which at least ends our own child.
+    if (r.error || r.status !== 0) { try { child?.kill(signal); } catch { /* already gone */ } return !r.error; }
     return true;
   }
   try {

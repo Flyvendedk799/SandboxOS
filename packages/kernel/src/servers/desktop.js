@@ -37,6 +37,7 @@ import {
   summarizeDoc, silhouetteSvg, READ_ONLY_DESKTOP_TOOLS,
   writeCheckpoint, readCheckpoint, removeCheckpoint, restoreCheckpoint,
   KEY_ACTIONS, DEFAULT_KEYS, isChord, NOTIFY_KINDS, prettyChord,
+  firstRunFiles, firstRunServer, firstRunPort,
 } from "../../../os/src/index.js";
 import { loadManifest, saveManifest } from "../../../manifest/src/manifest.js";
 import { CATALOG } from "../catalog.js";
@@ -320,6 +321,147 @@ export function desktopServer(deps) {
           const next = revertOs(sandbox, a.rev, { only });
           await syncServers();
           return { ok: true, rev: next.rev, restored: Number(a.rev), ...(only ? { only } : {}) };
+        },
+      },
+
+      // ── first run: ten minutes to useful (goal.md T5.1) ─────────────────
+      //
+      // A new machine used to open on a tidy but idle desktop. This makes the
+      // first thing you see the machine doing work: a seed you picked, a small
+      // project written into the volume, a static server supervised as a job,
+      // and that page open in the Browser under your own slug.
+      //
+      // Every step reports whether it happened and why not, because an
+      // onboarding that quietly does three of five things is how a person learns
+      // not to trust the thing they just installed.
+
+      setupSeeds: {
+        description: "The seeds first run can start from, with what each one opens.",
+        inputSchema: obj({}),
+        async handler() {
+          return {
+            seeds: builtinDistroList().map((d) => ({ id: d.id, name: d.name, description: d.description, hue: d.hue, theme: d.theme })),
+            setup: doc().setup,
+          };
+        },
+      },
+
+      setup: {
+        description:
+          "First run: adopt a seed, write a small project into the volume, serve it as a supervised job, and open it. " +
+          "Reports every step and what this host could not do. skip:true just marks the machine set up.",
+        inputSchema: obj({
+          seed: S, name: S,
+          serve: { type: "boolean", description: "Start a static server for the project (default true)." },
+          skip: { type: "boolean", description: "Mark first run done without changing anything." },
+        }),
+        async handler(ctx, a) {
+          const mark = (d, seed) => { d.setup = { done: true, seed: seed ?? null, at: Date.now() }; };
+
+          if (a.skip) {
+            const next = mutate((d) => mark(d, null), "setup", "first run: skipped");
+            return { ok: true, rev: next.rev, skipped: true, steps: [] };
+          }
+
+          const seedId = a.seed ?? "dev";
+          const seed = BUILTIN_DISTROS.find((x) => x.id === seedId);
+          if (!seed) throw new Error(`no such seed: ${seedId} — try ${BUILTIN_DISTROS.map((x) => x.id).join(", ")}`);
+
+          const steps = [];
+          const step = (what, ok, why = null) => { steps.push({ what, ok, ...(why ? { why } : {}) }); return ok; };
+          const asMe = (server, tool, args) => kernel.call({
+            principalId: ctx?.principalId ?? null, heldPatterns: ctx?.heldPatterns ?? [],
+            onBehalfOf: "first-run", server, tool, args,
+          });
+
+          // 1 · the desktop the seed describes, wearing this machine's name.
+          const current = doc();
+          saveOs(sandbox, docFromDistroSpec(seed, { name: a.name ?? current.name }), { label: `first run: ${seed.name}` });
+          step(`adopt the ${seed.name} seed`, true);
+
+          // 2 · a project in the volume. Files, not a database: everything here
+          //     is an ordinary file you can open, edit and delete.
+          const files = firstRunFiles(a.name ?? current.name, seed);
+          let wrote = 0;
+          let writeWhy = null;
+          for (const [rel, content] of Object.entries(files)) {
+            const r = await asMe("fs", "write", { path: rel, content });
+            if (r.ok) wrote += 1; else writeWhy = r.error;
+          }
+          step(`write ${Object.keys(files).length} files into the volume`, wrote === Object.keys(files).length, writeWhy);
+
+          // 3 · serve it, if this host can. The Cell may be an image with no
+          //     Node and no Python; that is a fact to report, not a failure to
+          //     hide behind a spinner.
+          let port = null;
+          let job = null;
+          if (a.serve !== false && wrote) {
+            const found = await firstRunServer(asMe);
+            if (!found.cmd) step("serve the project", false, found.why);
+            else if (!(port = await firstRunPort(asMe))) {
+              step("serve the project", false, "every port it tried is already in use on this host — expose one yourself from Ports");
+            } else {
+              const started = await asMe("proc", "start", { cmd: found.cmd(port), name: "welcome" });
+              if (!started.ok) step(`serve the project with ${found.label}`, false, started.error);
+              else {
+                job = started.result;
+                // proc.start returns as soon as the process is spawned, and a
+                // static server's usual failure — the port is already taken —
+                // happens a few milliseconds later. Reporting "serving" and then
+                // handing over a dead job is the exact shape of a silent success,
+                // so look again before saying it worked.
+                await new Promise((r) => setTimeout(r, 700));
+                const after = await asMe("proc", "logs", { id: job.id, tail: 6 });
+                const alive = after.ok && after.result.state === "running";
+                const why = alive ? null
+                  : ((after.result?.logs ?? []).map((l) => l.text).filter(Boolean).at(-1)
+                    ?? `it exited with code ${after.result?.code ?? "?"}`);
+                if (!step(`serve the project with ${found.label} on :${port}`, alive, why)) {
+                  port = null;
+                } else {
+                  const exposed = await asMe("ports", "expose", { port, name: "welcome" });
+                  step(`expose :${port} under /${sandbox.slug}/p/${port}/`, exposed.ok, exposed.ok ? null : exposed.error);
+                  if (!exposed.ok) port = null;
+                }
+              }
+            }
+          }
+
+          // 4 · open it, and mark the machine set up. One revision.
+          const next = mutate((d) => {
+            const open = (app, props = {}, box = {}) => {
+              const meta = appDescriptor(d, app);
+              if (!meta) return;
+              d.windows.push({
+                id: rid("w"), app, title: meta.name, props,
+                x: box.x ?? 60, y: box.y ?? 60, w: box.w ?? meta.window.w, h: box.h ?? meta.window.h,
+                z: ++d.zTop, ws: d.activeWorkspace, min: false, max: false,
+              });
+            };
+            if (port) open("browser", { port, path: "/" }, { x: 60, y: 60, w: 620, h: 420 });
+            // The seed already opened a Files window in most cases; point that
+            // one at the welcome folder rather than stacking a second one on it.
+            const existingFiles = d.windows.find((w) => w.app === "files");
+            if (existingFiles) existingFiles.props = { ...existingFiles.props, path: "welcome" };
+            else open("files", { path: "welcome" }, { x: 700, y: 60, w: 480, h: 300 });
+            open("help", {}, { x: 700, y: 380, w: 620, h: 380 });
+            d.notifications = [{
+              id: rid("n"), app: "SandboxOS", kind: "accent",
+              title: port ? "Your machine is serving something" : "Your machine is ready",
+              body: port
+                ? `The welcome page is a folder in your volume, served by a job you can stop. Everything you see is one document.`
+                : `The welcome folder is in your volume. This host could not start a server for it — the Manual says what else to try.`,
+              ts: Date.now(), read: false,
+            }];
+            mark(d, seed.id);
+          }, "setup", `first run: ${seed.name}`);
+
+          await syncServers();
+          return {
+            ok: true, rev: next.rev, seed: seed.id, steps,
+            ...(port ? { port, url: `/${sandbox.slug}/p/${port}/` } : {}),
+            ...(job ? { job: { id: job.id, name: job.name } } : {}),
+          };
         },
       },
 

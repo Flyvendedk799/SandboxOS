@@ -57,6 +57,19 @@ try {
   // ── The OS ────────────────────────────────────────────────────────────────
   console.log("OS");
   await desktop("reset", {});
+
+  // A machine nobody has set up shows the welcome screen first (goal.md T5.1),
+  // so the smoke sees that, then skips it. `npm run day` drives the real setup.
+  const firstPage = await ctx.newPage();
+  watch(firstPage, "first-run");
+  await firstPage.goto(`${base}/${sandbox.slug}/os`);
+  await firstPage.waitForSelector(".fr-panel", { timeout: 15_000 });
+  check((await firstPage.$$(".fr-seed")).length >= 4, "a new machine asks what it should start as");
+  check((await firstPage.$$(".fr-card")).length === 4, "and explains the document model on one screen");
+  check(!!(await firstPage.$(".fr-skip")), "with a way to skip it");
+  await firstPage.close();
+  await desktop("setup", { skip: true });
+
   const page = await ctx.newPage();
   watch(page, "os");
   await page.goto(`${base}/${sandbox.slug}/os`);
