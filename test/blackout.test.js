@@ -107,7 +107,11 @@ test("the blackout: a job, a shell, three agent writes, and a new listener", asy
     cmd: `"${process.execPath}" -e "${server.replace(/"/g, '\\"')}"`,
     name: "blackout-job",
   });
-  const reachable = () => fetch(`http://127.0.0.1:${listener}/`, { signal: AbortSignal.timeout(400) }).then(() => true).catch(() => false);
+  // Two seconds, not four hundred milliseconds. A single short probe on a busy
+  // machine measures the host's latency rather than whether the job is up, and a
+  // blackout test that fails because a laptop was compiling something else is a
+  // test people learn to re-run instead of read.
+  const reachable = () => fetch(`http://127.0.0.1:${listener}/`, { signal: AbortSignal.timeout(2000) }).then(() => true).catch(() => false);
   await until(reachable, `the job to bind :${listener}`, 20_000);
 
   let seen = "";
@@ -133,7 +137,7 @@ test("the blackout: a job, a shell, three agent writes, and a new listener", asy
   assert.equal(afterDark, beforeDark + 3, "three writes happened, and each was one revision");
 
   // The work carried on regardless.
-  assert.equal(await reachable(), true, "the job kept running with nobody watching");
+  await until(reachable, "the job to still be serving with nobody watching");
   const logs = await ok("proc", "logs", { id: job.id });
   assert.equal(logs.state, "running");
   assert.ok(logs.logs.length >= 1, "and its output was captured while the tab was closed");

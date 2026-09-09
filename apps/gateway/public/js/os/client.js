@@ -160,6 +160,15 @@ export function connect() {
     try { at = JSON.parse(e.data)?.rev ?? null; } catch { /* an unreadable hello is still a hello */ }
     if (at != null && at !== (os.doc?.rev ?? null)) loadOs().catch(() => {});
   });
+  // Every keepalive says where the document is. If that is ahead of us, an
+  // event was lost between the Gateway and this tab, and the desktop on screen is
+  // quietly wrong — so pull, rather than wait for the next write to notice.
+  source.addEventListener("tick", (e) => {
+    os.connected = true;
+    let at = null;
+    try { at = JSON.parse(e.data)?.rev ?? null; } catch { /* an unreadable tick is still a tick */ }
+    if (at != null && at > (os.doc?.rev ?? 0)) refreshDoc().catch(() => {});
+  });
   source.onerror = () => { os.connected = false; emit("conn"); };
   source.onmessage = (e) => {
     let ev;

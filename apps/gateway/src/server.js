@@ -285,11 +285,34 @@ async function serveBundleFile(req, res, { sandbox, slug, isWidget, id, rest, pr
   return res.end(body);
 }
 
+/**
+ * The largest body any route here wants.
+ *
+ * The biggest legitimate payload is a distro or a machine backup, and the OS
+ * document alone is capped at 512 KB; a megabyte is comfortably above anything
+ * real and comfortably below "an authenticated caller can make the Gateway hold
+ * whatever it likes in memory". Requests that announce more are refused before
+ * routing (see `handle`), and `readBody` stops reading at the cap for one that
+ * does not announce it honestly.
+ */
+export const MAX_BODY_BYTES = 1024 * 1024;
+
 function readBody(req) {
   return new Promise((resolve) => {
     let data = "";
-    req.on("data", (c) => (data += c));
+    let over = false;
+    req.on("data", (c) => {
+      if (over) return;
+      data += c;
+      // A body that lied about its length: stop accumulating and hand the
+      // handler an empty object, which every route already answers with a
+      // sentence naming the field it wanted.
+      if (data.length > MAX_BODY_BYTES) { over = true; data = ""; }
+    });
     req.on("end", () => { try { resolve(data ? JSON.parse(data) : {}); } catch { resolve({}); } });
+    // A socket that dies mid-body must not leave a handler waiting forever.
+    req.on("aborted", () => resolve({}));
+    req.on("error", () => resolve({}));
   });
 }
 
@@ -1414,7 +1437,16 @@ async function handle(req, res) {
     const bus = osEvents(sandbox.id);
     const onChange = (ev) => res.write(`data: ${JSON.stringify(ev)}\n\n`);
     bus.on("change", onChange);
-    const keepalive = setInterval(() => res.write(": ping\n\n"), 25_000);
+    // The keepalive carries the revision (goal.md T0.6). A comment would keep the
+    // connection open just as well, but a *silent* divergence — the stream is up,
+    // an event was lost somewhere between here and the tab — would then last
+    // until the next write. With a rev on every tick it lasts one ping, and the
+    // client pulls without anybody noticing. It is twenty-odd bytes every 25
+    // seconds against a desktop that would otherwise be quietly wrong.
+    const keepalive = setInterval(() => {
+      try { res.write(`event: tick\ndata: ${JSON.stringify({ rev: loadOs(sandbox).rev })}\n\n`); }
+      catch { /* the socket went; 'close' will clean up */ }
+    }, 25_000);
     req.on("close", () => { bus.off("change", onChange); clearInterval(keepalive); });
     return;
   }
@@ -1712,6 +1744,17 @@ async function handleUpgrade(req, socket, head) {
 
 export function createServer() {
   const srv = http.createServer((req, res) => {
+    // Refused at the door, before any route sees it: a declared body larger than
+    // anything here wants is answered rather than buffered (goal.md T0.4).
+    const declared = Number(req.headers["content-length"]);
+    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+      req.resume();   // drain, so the client is not left writing into a closed pipe
+      sendJson(res, 413, {
+        ok: false, code: "too_large",
+        error: `body too large: ${declared} bytes (max ${MAX_BODY_BYTES})`,
+      });
+      return;
+    }
     handle(req, res).catch((err) => {
       if (!res.headersSent) sendJson(res, 500, { ok: false, error: err?.message ?? "internal error" });
       else res.end();
