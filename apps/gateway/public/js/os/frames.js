@@ -155,12 +155,61 @@ export function broadcast(event, detail) {
   }
 }
 
+// ── the watchdog ────────────────────────────────────────────────────────────
+//
+// An app is code we did not write, running in a frame we cannot reach into. If
+// it locks up, the window it is in must not become a dead rectangle with no
+// explanation — and the shell around it must stay usable (goal.md T4.3). So the
+// broker pings every live frame and watches for the answer: a frame that has
+// stopped replying is *reported*, and the window manager paints a card over it
+// offering a reload, a close, and a way to its source.
+
+const PING_MS = 4000;
+const STUCK_AFTER_MS = 9000;
+const health = new Map();      // appId → { lastSeen, stuck }
+const healthWatchers = new Set();
+
+export function frameHealth(id) {
+  return health.get(id) ?? { lastSeen: 0, stuck: false };
+}
+
+/** Watch apps becoming stuck or coming back. Returns an unsubscribe. */
+export function onFrameHealth(fn) { healthWatchers.add(fn); return () => healthWatchers.delete(fn); }
+
+function setStuck(id, stuck) {
+  const h = health.get(id) ?? { lastSeen: 0, stuck: false };
+  if (h.stuck === stuck) return;
+  h.stuck = stuck;
+  health.set(id, h);
+  for (const fn of healthWatchers) { try { fn(id, stuck); } catch { /* a watcher is not the point */ } }
+}
+
+let watchdog = null;
+function startWatchdog() {
+  if (watchdog) return;
+  watchdog = setInterval(() => {
+    if (document.hidden) return;    // a background tab is not a stuck app
+    const now = Date.now();
+    for (const entry of frames) {
+      if (!entry.el.isConnected || entry.el.hidden) continue;
+      if (!entry.el.dataset.ready) continue;   // it has not painted yet; that is not stuck
+      const h = health.get(entry.id) ?? { lastSeen: now, stuck: false };
+      health.set(entry.id, h);
+      try { entry.el.contentWindow?.postMessage({ __sbx: 1, id: "event", type: "event", event: "ping" }, "*"); }
+      catch { /* frame gone */ }
+      setStuck(entry.id, now - h.lastSeen > STUCK_AFTER_MS);
+    }
+  }, PING_MS);
+  watchdog.unref?.();
+}
+
 let started = false;
 
 /** Start the broker. Idempotent; both the OS and the Studio call it. */
 export function startBroker({ notify, closeWindowForFrame } = {}) {
   if (started) return;
   started = true;
+  startWatchdog();
 
   window.addEventListener("message", async (e) => {
     const m = e.data;
@@ -182,7 +231,17 @@ export function startBroker({ notify, closeWindowForFrame } = {}) {
     switch (m.type) {
       case "ready":
         entry.el.dataset.ready = "1";
+        health.set(entry.id, { lastSeen: Date.now(), stuck: false });
         return;
+
+      // The answer to the watchdog's ping. One-way, like a log.
+      case "pong": {
+        const h = health.get(entry.id) ?? { lastSeen: 0, stuck: false };
+        h.lastSeen = Date.now();
+        health.set(entry.id, h);
+        setStuck(entry.id, false);
+        return;
+      }
 
       // One-way: an app reporting what went wrong inside it. No reply, and it
       // reaches the Studio's console rather than a place nobody looks.

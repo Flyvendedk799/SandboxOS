@@ -188,15 +188,22 @@ export class Kernel {
     }
 
     // 3. Execute + 4. Audit.
+    //
+    // The clock starts here: how long a tool took is part of what happened, and
+    // an operator asking "what is slow" should not have to infer it from
+    // timestamps two rows apart.
+    const startedAt = performance.now();
     try {
       const result = await t.handler({ kernel: this, cell: this.cell, sandbox: this.sandbox, principalId, heldPatterns, onBehalfOf }, args);
-      const ev = appendAudit({ ...base, resultKind: "ok", capability });
-      this._emit({ ...base, resultKind: "ok", capability, ...ev });
+      const ms = performance.now() - startedAt;
+      const ev = appendAudit({ ...base, resultKind: "ok", capability, ms });
+      this._emit({ ...base, resultKind: "ok", capability, ms, ...ev });
       return { ok: true, result };
     } catch (err) {
       const message = err?.message ?? String(err);
-      const ev = appendAudit({ ...base, resultKind: "error", error: message, capability });
-      this._emit({ ...base, resultKind: "error", error: message, capability, ...ev });
+      const ms = performance.now() - startedAt;
+      const ev = appendAudit({ ...base, resultKind: "error", error: message, capability, ms });
+      this._emit({ ...base, resultKind: "error", error: message, capability, ms, ...ev });
       // A tool that knows *what kind* of failure this was says so, and the code
       // travels to the caller: a conditional write that lost its race refreshes
       // and retries (`stale_rev`), a host that cannot run commands is not a

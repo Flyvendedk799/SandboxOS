@@ -178,10 +178,14 @@ export function portsServer(deps) {
               parse: (out) => { for (const l of out.split("\n")) { const m = l.match(/^\s*TCP\s+\S+:(\d{1,5})\s+\S+\s+LISTENING/i); if (m) add(Number(m[1])); } },
             },
           ];
+          // A host that cannot run commands at all is the strongest answer there
+          // is: stop, and say so, rather than trying two more spellings of the
+          // same impossibility.
+          let cannotRun = null;
           for (const s of strategies) {
             if (found.size) break;
             const r = await cell.exec(s.cmd);
-            if (r.failure) { tried.push(`${s.needs}: ${r.failure.message}`); break; }
+            if (r.failure) { cannotRun = r.failure.message; tried.push(`${s.needs}: ${r.failure.message}`); break; }
             if (!r.stdout) { tried.push(`${s.needs}: no output`); continue; }
             s.parse(r.stdout);
             if (!found.size) tried.push(`${s.needs}: nothing listening`);
@@ -191,9 +195,12 @@ export function portsServer(deps) {
           const listening = [...found].sort((a, b) => a - b).map((port) => ({ port, exposed: exposed.has(port) }));
           // Honesty over emptiness: when nothing could look, say so, so a caller
           // can show "cannot scan here" rather than "nothing is listening".
-          if (!listening.length && tried.length === strategies.length && tried.every((t) => !t.includes("nothing listening"))) {
-            return { listening, unavailable: `cannot list listening ports on this host (tried ${strategies.map((s) => s.needs).join(", ")})`, tried };
-          }
+          const nothingCouldLook = cannotRun
+            ? `cannot list listening ports: ${cannotRun}`
+            : (!listening.length && tried.length === strategies.length && tried.every((t) => !t.includes("nothing listening"))
+              ? `cannot list listening ports on this host (tried ${strategies.map((s) => s.needs).join(", ")})`
+              : null);
+          if (nothingCouldLook) return { listening, unavailable: nothingCouldLook, tried };
           return { listening };
         },
       },

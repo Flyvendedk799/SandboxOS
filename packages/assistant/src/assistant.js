@@ -162,6 +162,9 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
   }
 
   const proposed = [];   // review mode: the desktop changes the model asked for
+  // What this turn cost, in the only unit we can count honestly. The caller
+  // records it; a price depends on a plan we may not be able to see (T3.5).
+  const usage = { provider: credential.provider, model: model ?? credential.modelDefault, tokens: 0 };
   const servers = [...kernel.servers.keys()];
   const defs = toolDefs(kernel.listTools(), heldPatterns, credential.wire);
   const maxSteps = MAX_STEPS();
@@ -193,9 +196,9 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
   emit({ type: "turn_start", provider: credential.provider, model: model ?? credential.modelDefault, tools: defs.length, propose });
 
   for (let step = 0; step < maxSteps; step += 1) {
-    if (signal?.aborted) { await flushProposal(); emit({ type: "stopped", reason: "cancelled" }); return { messages: appended, stopped: "cancelled" }; }
+    if (signal?.aborted) { await flushProposal(); emit({ type: "stopped", reason: "cancelled" }); return { messages: appended, stopped: "cancelled", usage }; }
     if (Date.now() > deadline) { emit({ type: "stopped", reason: "time_budget" }); return { messages: appended, stopped: "time_budget" }; }
-    if (tokens > maxTokens) { emit({ type: "stopped", reason: "token_budget" }); return { messages: appended, stopped: "token_budget" }; }
+    if (tokens > maxTokens) { emit({ type: "stopped", reason: "token_budget" }); return { messages: appended, stopped: "token_budget", usage }; }
 
     emit({ type: "step", step: step + 1 });
 
@@ -252,6 +255,7 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
         }
         case "usage":
           tokens += (ev.input ?? 0) + (ev.output ?? 0);
+          usage.tokens = tokens;
           break;
         case "stop":
           stopReason = ev.reason;
@@ -291,7 +295,7 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
     if (!parsed.length) {
       await flushProposal();
       emit({ type: "done", stopReason: stopReason ?? "end_turn", tokens, steps: step + 1 });
-      return { messages: appended, stopped: "end_turn" };
+      return { messages: appended, stopped: "end_turn", usage };
     }
 
     // ── Run the tools through the Kernel ────────────────────────────────────
@@ -338,7 +342,7 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
 
   await flushProposal();
   emit({ type: "stopped", reason: "max_steps", steps: maxSteps });
-  return { messages: appended, stopped: "max_steps" };
+  return { messages: appended, stopped: "max_steps", usage };
 }
 
 /** Flatten a provider-shaped transcript into what a UI wants to render. */

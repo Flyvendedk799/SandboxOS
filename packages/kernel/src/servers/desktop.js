@@ -18,6 +18,10 @@
 //     it. A tool that needed to know the pixel size of the screen would be a
 //     tool in the wrong layer.
 
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+
 import {
   loadOs, mutateOs, saveOs, resetOs, osHistory, osHistoryEntry, revertOs, announce,
   normalizeDoc, normApp, normWidgetKind, cleanTokens, cleanAnimation, cleanPatterns,
@@ -29,6 +33,7 @@ import {
   writeBundleFile, readBundleFile, listBundleFiles, removeBundleFile, removeBundle,
   exportBundle, importBundle, starterApp, starterAppCss, starterAppJs, starterWidget, starterServerJs, starterAppToolsJs,
   exportPayload, importPayload, builtinDistroList, docFromDistroSpec, RESERVED_SERVER_NAMES,
+  machinePayload, compareVolume,
   summarizeDoc, silhouetteSvg, READ_ONLY_DESKTOP_TOOLS,
   writeCheckpoint, readCheckpoint, removeCheckpoint, restoreCheckpoint,
   KEY_ACTIONS, DEFAULT_KEYS, isChord, NOTIFY_KINDS, prettyChord,
@@ -1426,6 +1431,76 @@ export function desktopServer(deps) {
         },
       },
 
+      // ── backup and restore: the machine, not just its face ────────────────
+      //
+      // A distro is what you hand to someone else. A backup is what you keep:
+      // the same desktop and apps and composition, plus your named checkpoints
+      // and a manifest of the volume — names, sizes and hashes, so a restore can
+      // say what is missing instead of pretending the bytes came back (T3.4).
+
+      machineExport: {
+        description:
+          "Back this machine up: the desktop, every custom app's source, the Cell's composition, your named checkpoints, " +
+          "and a manifest of the volume (names, sizes, hashes — not contents).",
+        inputSchema: obj({ name: S, volume: B }),
+        async handler(_ctx, a) {
+          const d = doc();
+          const base = exportPayload(d, { ...collectBundles(d), name: a.name ?? d.name, manifest: loadManifest(sandbox), keepNotifications: false });
+          const checkpoints = (d.checkpoints ?? []).map((c) => ({ ...c, doc: readCheckpoint(sandbox, c.id) })).filter((c) => c.doc);
+          const volume = a.volume === false ? null : volumeManifest(kernel?.cell?.root ?? null);
+          let tide = null;
+          try {
+            const ws = await kernel?.call?.({ principalId: null, heldPatterns: ["tide.*"], server: "tide", tool: "listWorkspaces", args: {} });
+            const first = ws?.result?.workspaces?.[0];
+            if (first) tide = { workspace: typeof first === "string" ? first : first.name, head: first?.head ?? null };
+          } catch { /* a machine without Tide is a machine without Tide */ }
+          return { payload: machinePayload({ payload: base, checkpoints, volume, tide }) };
+        },
+      },
+
+      machineRestore: {
+        description:
+          "Restore a machine backup. With plan: true it changes nothing and reports what it would do — including which volume files " +
+          "the manifest expects and this machine no longer has. File contents are never in a backup; Tide moves those.",
+        inputSchema: obj({ payload: { type: "object" }, plan: B, applyManifest: B }, ["payload"]),
+        async handler(_ctx, a) {
+          const size = JSON.stringify(a.payload ?? {}).length;
+          if (size > MAX_PAYLOAD_BYTES) throw new Error(`backup too large: ${size} bytes (max ${MAX_PAYLOAD_BYTES})`);
+          const { doc: incoming, bundles, manifest } = importPayload(a.payload, {});
+          const current = doc();
+          const volume = compareVolume(a.payload?.volume?.files ?? [], volumeManifest(kernel?.cell?.root ?? null)?.files ?? []);
+          const plan = {
+            desktop: structuralDiff(current, incoming),
+            apps: Object.keys(bundles.apps ?? {}).length,
+            widgets: Object.keys(bundles.widgets ?? {}).length,
+            checkpoints: (a.payload?.checkpoints ?? []).length,
+            composition: a.applyManifest ? Object.keys(manifest?.servers ?? {}).length : 0,
+            volume,
+            // Said plainly, because the alternative is someone believing a backup
+            // restored files it never carried.
+            note: "a backup carries the desktop, the apps and the composition. File contents are not in it: a missing file is missing.",
+          };
+          if (a.plan) return { plan, applied: false };
+
+          for (const [id, files] of Object.entries(bundles.apps ?? {})) importBundle(sandbox, "app", id, files);
+          for (const [kind, files] of Object.entries(bundles.widgets ?? {})) importBundle(sandbox, "widget", kind, files);
+          // Checkpoints come back as files plus an index, so the restored machine
+          // has its own way back as well.
+          const index = [];
+          for (const c of a.payload?.checkpoints ?? []) {
+            if (!c?.id || !c.doc) continue;
+            if (writeCheckpoint(sandbox, c.id, c.doc)) index.push({ id: c.id, name: c.name ?? c.id, rev: c.rev ?? 0, ts: c.ts ?? Date.now() });
+          }
+          const composition = a.applyManifest ? applyPortableManifest(manifest) : null;
+          const next = saveOs(sandbox, { ...incoming, checkpoints: index }, { label: "restore" });
+          await syncServers();
+          return {
+            ok: true, rev: next.rev, applied: true, plan,
+            ...(composition ? { composition } : {}),
+          };
+        },
+      },
+
       distroExport: {
         description: "Export this OS as a portable payload (document + every custom app's source).",
         inputSchema: obj({ name: S, description: S }),
@@ -1728,6 +1803,42 @@ export function desktopServer(deps) {
   };
 
   return self;
+}
+
+/**
+ * A manifest of the Cell volume: relative path, size, and a hash of the contents.
+ *
+ * Bounded on purpose — 5000 files, and no hash for anything over 8 MB — because a
+ * backup of the desktop should not become a scan of a node_modules tree. What it
+ * is for is answering "is this the machine I saved?", not moving the bytes.
+ */
+function volumeManifest(root, { maxFiles = 5000, hashUnder = 8 * 1024 * 1024 } = {}) {
+  if (!root) return null;
+  const files = [];
+  let truncated = false;
+  const skip = new Set(["node_modules", ".git", ".mcp-packages", ".tide"]);
+  const walk = (dir, rel) => {
+    if (truncated) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (files.length >= maxFiles) { truncated = true; return; }
+      if (e.isSymbolicLink()) continue;   // a link is not contents
+      const abs = path.join(dir, e.name);
+      const at = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) { if (!skip.has(e.name)) walk(abs, at); continue; }
+      try {
+        const st = fs.statSync(abs);
+        const entry = { path: at, size: st.size };
+        if (st.size <= hashUnder) {
+          entry.sha256 = crypto.createHash("sha256").update(fs.readFileSync(abs)).digest("hex");
+        }
+        files.push(entry);
+      } catch { /* unreadable is not in the manifest */ }
+    }
+  };
+  walk(root, "");
+  return { files, truncated, skipped: [...skip], at: Date.now() };
 }
 
 /** Recursive merge for `desktop.patch`. A null value deletes the key. */

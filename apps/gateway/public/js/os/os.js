@@ -33,7 +33,11 @@ function mountSpecial(appId, host, win, ctx) {
 const screen = createScreen({
   ctx: {
     mountSpecial,
-    openStudio: () => { location.href = `/${slug}/studio`; },
+    openStudio: (opts) => {
+      // The Studio reads this hash on boot and opens Code on that app, so
+      // "open its source" lands on the file rather than on the front page.
+      location.href = opts?.code ? `/${slug}/studio#code=app:${encodeURIComponent(opts.code)}` : `/${slug}/studio`;
+    },
     onSelect: (id, kind) => select(id, kind),
   },
 });

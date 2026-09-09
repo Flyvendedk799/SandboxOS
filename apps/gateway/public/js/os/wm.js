@@ -14,7 +14,7 @@ import { h, fill, icon, api, dialog, toast, toastError } from "../core.js";
 import { os, call, localPatch, select, appMeta, widgetMeta, onOs } from "./client.js";
 import { mountApp } from "./builtins.js";
 import { mountWidget } from "./widgets.js";
-import { createFrame, destroyFrame, appSession, reloadFramesFor } from "./frames.js";
+import { createFrame, destroyFrame, appSession, reloadFramesFor, onFrameHealth, frameHealth } from "./frames.js";
 import { iconName } from "./sprite.js";
 import { pruneTree, treeBoxes, treeSashes } from "./lib/layout.js";
 
@@ -768,6 +768,34 @@ export function createDesktop({ root, ctx = {} }) {
   const ro = new ResizeObserver(() => render());
   ro.observe(root);
 
+  // An app that has stopped answering the watchdog is *said*, not left as a dead
+  // rectangle: a card over the frame with the three things you might want, and a
+  // window that still drags, closes and zooms because the shell is not the app
+  // (goal.md T4.3).
+  function paintStuck(entry, stuck) {
+    if (!entry) return;
+    const existing = entry.el.querySelector(".os-stuck");
+    if (!stuck) { existing?.remove(); return; }
+    if (existing) return;
+    const card = h("div.os-stuck", null,
+      h("div.card", null,
+        icon("bell", 20),
+        h("h3", `${appMeta(entry.app)?.name ?? entry.app} stopped responding`),
+        h("p", "It has not answered the shell for a few seconds. Its window still works; the app inside it is busy or stuck."),
+        h("div.row", null,
+          h("button.app-btn", { onclick: () => { reloadFramesFor(entry.app); paintStuck(entry, false); } }, "Reload it"),
+          h("button.app-btn", { onclick: () => ctx.openStudio?.({ code: entry.app }) }, "Open its source"),
+          h("button.app-btn.danger", { onclick: () => closeWindow(entry.id ?? entry.el.dataset.id) }, "Close the window"))));
+    entry.el.append(card);
+  }
+
+  const offHealth = onFrameHealth((appId, stuck) => {
+    for (const [id, entry] of wins) {
+      if (entry.app !== appId) continue;
+      paintStuck({ ...entry, id }, stuck);
+    }
+  });
+
   // An app whose source just changed should show the change. This is what closes
   // the loop when the agent (or you, in the Studio's Code tab) writes a file.
   const offBundle = onOs((kind) => {
@@ -784,6 +812,7 @@ export function createDesktop({ root, ctx = {} }) {
     destroy() {
       ro.disconnect();
       offBundle();
+      offHealth();
       document.removeEventListener("keydown", onNudgeKey);
       window.removeEventListener("blur", onBlur);
       for (const e of wins.values()) { e.stop?.(); e.el.remove(); }

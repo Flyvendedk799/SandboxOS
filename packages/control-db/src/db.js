@@ -293,6 +293,24 @@ const MIGRATIONS = [
   // Wave D: a gallery. Visibility decides who can see and fork a row; tags and
   // a preview let a card be drawn without loading the (up to 8 MB) payload.
   "ALTER TABLE distros ADD COLUMN visibility TEXT NOT NULL DEFAULT 'tenant'",
+  // Phase 35: model usage, recorded per turn. Tokens are the only unit we can
+  // measure honestly — a price depends on a plan we may not be able to see — so
+  // this counts tokens by provider and model and lets the UI say so.
+  `CREATE TABLE IF NOT EXISTS model_usage (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts         INTEGER NOT NULL,
+    tenant_id  TEXT NOT NULL,
+    sandbox_id TEXT,
+    principal_id TEXT,
+    provider   TEXT NOT NULL,
+    model      TEXT,
+    tokens     INTEGER NOT NULL DEFAULT 0,
+    kind       TEXT NOT NULL DEFAULT 'assistant'
+  )`,
+  "CREATE INDEX IF NOT EXISTS idx_model_usage_tenant ON model_usage(tenant_id, ts)",
+  // Phase 35: how long a call took. Nullable, so every existing row stays valid
+  // and a reader can tell "not recorded" from "instant".
+  "ALTER TABLE audit ADD COLUMN ms INTEGER",
   "ALTER TABLE distros ADD COLUMN tags TEXT",
   "ALTER TABLE distros ADD COLUMN preview TEXT",
   "ALTER TABLE distros ADD COLUMN publisher TEXT",

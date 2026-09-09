@@ -13,7 +13,7 @@ import {
   ensureSeed, grantsFor, isOperator, setOperator,
   createTenant, createAccount, verifyAccount,
   createSession, resolveSession, purgeExpiredSessions,
-  mintMachineToken, appendAudit, queryAudit, verifyAuditChain,
+  mintMachineToken, appendAudit, queryAudit, verifyAuditChain, auditHash,
   deleteSandbox, createSandboxForTenant, getPrincipal,
 } from "../packages/control-db/src/registry.js";
 import { getKernel } from "../packages/kernel/src/kernel.js";
@@ -155,13 +155,9 @@ function _repairAuditChain(db) {
   const rows = db.prepare("SELECT * FROM audit ORDER BY id ASC").all();
   let prevHash = "";
   for (const row of rows) {
-    const payload = JSON.stringify({
-      ts: row.ts, sandbox_id: row.sandbox_id ?? null, principal_id: row.principal_id ?? null,
-      on_behalf_of: row.on_behalf_of ?? null, server: row.server, tool: row.tool,
-      args: row.args_json ?? null, result_kind: row.result_kind, error: row.error ?? null,
-      capability: row.capability ?? null, prevHash,
-    });
-    const hash = crypto.createHash("sha256").update(prevHash + payload).digest("hex");
+    // `auditHash` is the definition of the chain; using it here is what keeps
+    // this helper from rotting the next time the row grows a column.
+    const hash = auditHash(row, prevHash);
     db.prepare("UPDATE audit SET prev_hash=?, hash=? WHERE id=?").run(prevHash, hash, row.id);
     prevHash = hash;
   }

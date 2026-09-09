@@ -87,7 +87,15 @@
 
   window.addEventListener("message", (e) => {
     const m = e.data;
-    if (!m || m.__sbx !== 1 || !m.id) return;
+    if (!m || m.__sbx !== 1) return;
+    // The shell's liveness check. Answering it costs a message; not answering
+    // it is how the shell knows this app has stopped responding — a frame
+    // stuck in a loop cannot reply, because it cannot run this handler.
+    if (m.type === "event" && m.event === "ping") {
+      try { parent.postMessage({ __sbx: 1, app: appId, kind, type: "pong", at: Date.now() }, "*"); } catch { /* detached */ }
+      return;
+    }
+    if (!m.id) return;
     const p = pending.get(m.id);
     if (!p) {
       if (m.type === "event") {

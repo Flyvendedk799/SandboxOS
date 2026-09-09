@@ -143,6 +143,47 @@ export function exportPayload(doc, { apps = {}, widgets = {}, name, description,
   };
 }
 
+/**
+ * A whole machine, not just its face (goal.md T3.4).
+ *
+ * A distro payload is the desktop plus the apps plus the Cell's composition — what
+ * you hand to someone else. A *backup* is that plus the parts that are yours
+ * alone: the named checkpoints, and a manifest of the volume so a restore can say
+ * what is missing rather than pretend the files came back.
+ *
+ * The manifest is names, sizes and hashes — deliberately not contents. Bytes
+ * belong to Tide (or to whatever the operator backs the volume up with); what this
+ * adds is the ability to answer "is this the machine I saved?" honestly.
+ */
+export function machinePayload({ payload, checkpoints = [], volume = null, tide = null }) {
+  return {
+    ...payload,
+    kind: "machine",
+    checkpoints,
+    ...(volume ? { volume } : {}),
+    ...(tide ? { tide } : {}),
+  };
+}
+
+/**
+ * Compare a saved volume manifest against what is on disk now. Three answers,
+ * because "restored" is not one of them: present and identical, present and
+ * different, gone.
+ */
+export function compareVolume(manifest, current) {
+  const now = new Map((current ?? []).map((f) => [f.path, f]));
+  const missing = [];
+  const changed = [];
+  for (const f of manifest ?? []) {
+    const seen = now.get(f.path);
+    if (!seen) { missing.push(f.path); continue; }
+    if (seen.sha256 && f.sha256 && seen.sha256 !== f.sha256) changed.push(f.path);
+    else if (!seen.sha256 && seen.size !== f.size) changed.push(f.path);
+  }
+  const added = [...now.keys()].filter((p) => !(manifest ?? []).some((f) => f.path === p));
+  return { files: (manifest ?? []).length, missing, changed, added };
+}
+
 /** The part of a Sandboxfile that makes sense on another machine. */
 export function portableManifest(m) {
   if (!m || typeof m !== "object") return null;

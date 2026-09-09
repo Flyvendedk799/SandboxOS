@@ -1335,3 +1335,33 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
 
 .app-btn.chord { font-family: var(--mono); min-width: 72px; }
 .app-btn.chord.listening { border-color: var(--os-accent); color: var(--os-accent); }
+
+/* ── An app that stopped answering ───────────────────────────────────────────
+   The shell is not the app: the window still drags, closes and zooms, and the
+   card says what happened rather than leaving a dead rectangle. */
+
+.os-stuck {
+  position: absolute; inset: 0; z-index: 4; display: flex; align-items: center; justify-content: center;
+  padding: 16px; background: color-mix(in srgb, var(--os-bg-0) 82%, transparent);
+  backdrop-filter: blur(3px);
+}
+.os-stuck .card {
+  max-width: 320px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 8px;
+  color: var(--os-text-2);
+}
+.os-stuck .card h3 { margin: 0; font-size: 12.5px; color: var(--os-text); }
+.os-stuck .card p { margin: 0; font-size: 11px; line-height: 1.6; }
+.os-stuck .card svg { color: var(--os-warn); }
+.os-stuck .row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin-top: 4px; }
+.app-btn.danger { border-color: color-mix(in srgb, var(--os-err) 45%, var(--os-line)); color: var(--os-err); }
+
+/* Observability: what the machine is being asked to do. */
+.obs-table { display: flex; flex-direction: column; padding: 0 8px 8px; }
+.obs-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 3px 6px;
+  border: 0; border-radius: 6px; background: transparent; text-align: left;
+  font-size: 11px; color: var(--os-text-2);
+}
+.obs-row:hover { background: var(--os-chip); color: var(--os-text); }
+.obs-row .mono { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.obs-row .n { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--os-text); }

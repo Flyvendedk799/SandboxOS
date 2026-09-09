@@ -19,7 +19,7 @@ import {
   createDistro, getDistro, getDistroByName, listDistros, deleteDistro, sandboxCountForTenant,
   createTenant, totalSandboxCount, tenantAgentStats, getAgent,
   listSandboxesForTenant, deleteSandbox,
-  getQuota, setQuota, runningAgentCount, isOperator,
+  getQuota, setQuota, runningAgentCount, isOperator, recordModelUsage,
   getTenant, getTenantProfile, updateTenantProfile, LLM_PROVIDERS,
   appendAudit,
   listSandboxAccess, revokeSandboxAccess, shareSandbox, listMachineTokens,
@@ -1198,12 +1198,21 @@ async function handle(req, res) {
       }
 
       try {
-        const { messages, stopped } = await runTurn({
+        const { messages, stopped, usage } = await runTurn({
           kernel, sandbox, principalId: principal.id, heldPatterns: held,
           history, input: String(input), model, emit: send, signal: controller.signal,
           propose: !!propose,
         });
         if (messages.length) appendConversationMessages(chat.id, messages);
+        // What the turn cost, in tokens, against this tenant (goal.md T3.5).
+        if (usage?.tokens) {
+          try {
+            recordModelUsage({
+              tenantId: principal.tenant_id, sandboxId: sandbox.id, principalId: principal.id,
+              provider: usage.provider, model: usage.model, tokens: usage.tokens,
+            });
+          } catch { /* accounting must never fail the conversation */ }
+        }
         send({ type: "end", stopped });
       } catch (e) {
         send({ type: "error", error: e?.message ?? "assistant failed" });

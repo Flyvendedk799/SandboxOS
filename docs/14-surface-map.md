@@ -158,7 +158,10 @@ app's live tools) `appDefine` (`mcp` for a tool face, `starter: "tools"` for a c
 Notifications: `notify` (with an `action` deep link) `notificationsRead`
 `notificationsClear` (all, or `id`). Distros: `distroList` (the gallery: `q`, `scope`)
 `distroPublish` (`visibility`, `tags`, composition) `distroSet` `distroFork`
-`distroExport` `distroImport`.
+`distroExport` `distroImport`. Backup: `machineExport` (desktop + apps + composition +
+checkpoints + a manifest of the volume) `machineRestore` (`plan: true` changes nothing
+and reports what it would do, including which volume files the manifest expects and this
+machine no longer has).
 Review: `propose` (ops are desktop tool calls; nothing happens until someone applies
 it) `proposals` `applyProposal` (runs them as *you*, in order, reporting where it
 stopped) `discardProposal`. Checkpoints: `checkpoint` `checkpoints`
@@ -184,7 +187,10 @@ and an agent can do what Command Central and the CLI could. Sharing and minting 
 attenuated against the caller's own grants; revoking yourself is refused.
 **`kernel`** — `whoami` `capabilities` `tools` `auditQuery` (filtered: `server`,
 `tool`, `principalId`, `resultKind`, `after`, `cursor`) `auditVerify` (the hash chain)
-`manifestGet` `manifestSet`
+`limits` (the tenant's quota, live usage, measured disk, and model tokens by provider —
+tokens rather than money, and it says so) `manifestGet` `manifestSet`
+Every audit row carries `ms`, the time its call took, covered by the hash like every
+other column.
 
 Marketplace servers appear under the name they were installed as. Their code runs
 **out of process** with no handle to the control plane; the Kernel registers a proxy, so

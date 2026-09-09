@@ -477,11 +477,21 @@ const metrics = {
     const sparkLoad = h("div.spark", { title: "load, last 24 samples" });
     const sparkMem = h("div.spark.mem", { title: "memory, last 24 samples" });
     const foot = h("div.metrics-foot");
+    const note = h("div.ops-error", { hidden: true });
+    // What the machine is actually being asked to do: which tools, how often,
+    // how many refusals, and the slowest calls of the window (goal.md T1.9).
+    const busiest = h("div.obs-table");
+    const slowest = h("div.obs-table");
     const recent = h("div.w-feed", { style: { padding: "0 12px 12px", marginTop: "0" } });
-    fill(host, h("div.app", null, h("div.app-body", null, grid,
+    const openAudit = (filter) => ctx?.launch?.("audit", filter ?? {});
+    fill(host, h("div.app", null, h("div.app-body", null, note, grid,
       h("div.spark-label", "Load"), sparkLoad, h("div.spark-label", "Memory"), sparkMem, foot,
+      h("div.spark-label", { style: { display: "flex", justifyContent: "space-between" } }, h("span", "Busiest tools, last hour"),
+        h("button.app-btn", { onclick: () => openAudit() }, "Audit")),
+      busiest,
+      h("div.spark-label", "Slowest calls"), slowest,
       h("div.spark-label", { style: { display: "flex", justifyContent: "space-between" } }, h("span", "Recent calls"),
-        h("a", { href: `/${slug}#activity`, title: "Open the audit explorer in Command Central" }, "audit explorer →")),
+        h("button.app-btn", { onclick: () => openAudit() }, "Every call →")),
       recent)));
 
     const stat = (k, v, sub) => h("div.stat", null, h("div.k", k), h("div.v", v), sub ? h("div.s", sub) : null);
@@ -491,11 +501,15 @@ const metrics = {
     async function tick() {
       if (!alive || document.hidden) return;
       try {
-        const [m, hist, audit] = await Promise.all([
+        const [m, hist, audit, act] = await Promise.all([
           api.mcp("metrics", "snapshot", {}),
           api.tryMcp("metrics", "history", { limit: 24 }),
-          api.tryMcp("metrics", "recent", { limit: 6 }),
+          api.tryMcp("metrics", "recent", { limit: 60 }),
+          api.tryMcp("metrics", "activity", { windowMs: 3_600_000 }),
         ]);
+        // A reading nothing could take is said, not shown as a zero.
+        note.hidden = !m.unavailable;
+        if (m.unavailable) fill(note, icon("bell", 13), h("span", m.unavailable));
         const mem = m.memory;
         fill(grid,
           stat("Load", m.load?.[0]?.toFixed(2) ?? "—", m.load ? `${m.load[1]?.toFixed(2)} · ${m.load[2]?.toFixed(2)}` : null),
@@ -506,7 +520,34 @@ const metrics = {
         bars(sparkLoad, samples.map((s2) => s2.load ?? 0), Math.max(0.01, ...samples.map((s2) => s2.load ?? 0)));
         bars(sparkMem, samples.map((s2) => s2.memory?.used ?? s2.mem ?? 0), Math.max(1, ...samples.map((s2) => s2.memory?.used ?? s2.mem ?? 0)));
         foot.textContent = `${m.servers?.length ?? 0} servers · ports ${m.ports?.join(", ") || "none"} · ${m.disk?.files ?? "—"} files${m.disk?.bytes ? ` · ${fmtBytes(m.disk.bytes)}` : ""}`;
+        // Busiest and slowest, from the same audit rollup the explorer reads.
+        const byTool = act?.byTool ?? [];
+        fill(busiest, ...(byTool.length
+          ? byTool.slice(0, 6).map((t) => {
+            const name = t.tool?.includes(".") ? t.tool : `${t.server ?? ""}.${t.tool ?? ""}`;
+            const denied = t.denied ?? 0;
+            const errors = t.errors ?? 0;
+            const avg = Number.isFinite(t.avgMs) ? Math.round(t.avgMs) : null;
+            return h("button.obs-row", { onclick: () => openAudit({ server: t.server, tool: t.tool }) },
+              h("span.mono", name),
+              h("span.n", String(t.n ?? 0)),
+              avg != null ? h("span.dim", `${avg} ms avg`) : null,
+              denied ? h("span.ops-pill.warn", `${denied} denied`) : null,
+              errors ? h("span.ops-pill.err", `${errors} failed`) : null);
+          })
+          : [h("span.dim", { style: { fontSize: "10px", padding: "0 12px" } }, "nothing in the last hour")]));
+
         const events = audit?.events ?? audit?.recent ?? [];
+        // The slowest individual calls of the window — a different list from the
+        // busiest tools, and usually the more interesting one.
+        const slow = act?.slowest ?? [];
+        fill(slowest, ...(slow.length
+          ? slow.slice(0, 5).map((e) => h("button.obs-row", { onclick: () => openAudit({ server: e.server, tool: e.tool }) },
+              h("span.mono", `${e.server}.${e.tool}`),
+              h("span.n", `${Math.round(e.ms)} ms`),
+              e.kind && e.kind !== "ok" ? h("span.ops-pill.err", e.kind) : null))
+          : [h("span.dim", { style: { fontSize: "10px", padding: "0 12px" } }, "nothing timed in this window yet")]));
+
         fill(recent, ...(events.length ? events.slice(0, 6).map((e) => h("div.line", null,
           h("span", { class: e.result_kind ?? e.resultKind ?? "" }, e.result_kind ?? e.resultKind ?? "?"),
           h("span.what", `${e.server}.${e.tool}`),
@@ -809,6 +850,18 @@ const settings = {
         })(),
       ];
 
+      // The tenant's quota and this machine's usage. Read once per render of the
+      // Machine tab rather than polled: it changes when you change it.
+      let limits = null;
+      let limitsAt = 0;
+      async function loadLimits() {
+        if (Date.now() - limitsAt < 10_000) return;
+        limitsAt = Date.now();
+        try { limits = await api.mcp("kernel", "limits", {}); }
+        catch (e) { limits = { using: { unavailable: e.message }, quota: {}, model: { total: 0, byModel: [], windowDays: 30, note: e.message } }; }
+        if (section === "machine") render();
+      }
+
       /** Capture a chord by listening for the next keypress, honestly. */
       function keyField(action, chord) {
         const btn = h("button.app-btn.chord", { title: "Click, then press the keys" }, chord ? prettyChord(chord) : "unbound");
@@ -870,6 +923,28 @@ const settings = {
         row("Custom apps", h("span.v", `${Object.keys(d.apps).length}${Object.values(d.apps).filter((a) => a.mcp).length ? ` (${Object.values(d.apps).filter((a) => a.mcp).length} with tools)` : ""}`)),
         row("Distro", h("span.v", d.distro?.name ? `${d.distro.name}${d.distro.tenant ? " · another tenant" : ""}` : "none")),
         row("Server build", buildEl),
+
+        // What this machine may use, and what it is using. Power that silently
+        // hits an invisible ceiling is not power (goal.md T3.5).
+        label("Allowance"),
+        ...(limits
+          ? [
+            row("Agents", h("span.v", `${limits.using.agentsRunning} running of ${limits.quota.agents}`)),
+            row("Sandboxes", h("span.v", `${limits.using.sandboxes} of ${limits.quota.sandboxes}`)),
+            row("Cell power", h("span.v", `${limits.quota.memMb} MB · ${limits.quota.cpuShares} CPU`)),
+            row("Shells open", h("span.v", String(limits.using.sessions))),
+            row("Disk", h("span.v", limits.using.unavailable
+              ? limits.using.unavailable
+              : `${fmtBytes(limits.using.volumeBytes ?? 0)} in the volume · ${fmtBytes(limits.using.osBytes ?? 0)} for the desktop`)),
+            label("Model use"),
+            row(`Tokens, last ${limits.model.windowDays} days`, h("span.v", limits.model.total.toLocaleString())),
+            ...(limits.model.byModel.length
+              ? limits.model.byModel.slice(0, 4).map((m) => row(`  ${m.provider}${m.model ? ` · ${m.model}` : ""}`,
+                h("span.v", `${(m.tokens ?? 0).toLocaleString()} · ${m.turns} turn${m.turns === 1 ? "" : "s"}`)))
+              : [h("div.dim", { style: { padding: "0 11px", fontSize: "11px" } }, "No model calls yet.")]),
+            h("div.dim", { style: { padding: "6px 11px 10px", fontSize: "11px", lineHeight: "1.6" } }, limits.model.note),
+          ]
+          : [h("div.dim", { style: { padding: "0 11px", fontSize: "11px" } }, "Reading the allowance…")]),
         h("div", { style: { padding: "10px", display: "flex", gap: "8px", flexWrap: "wrap" } },
           h("button.app-btn", { onclick: () => ctx.openStudio?.() }, "Open Studio"),
           h("button.app-btn", { onclick: () => (location.href = `/${slug}`) }, "Command Central"),
@@ -886,6 +961,8 @@ const settings = {
       fill(body,
         h("div.chip-row", { style: { padding: "4px 6px 8px" } }, tab("desktop", "Desktop"), tab("machine", "Machine")),
         ...(section === "machine" ? machineSection : desktopSection));
+      // The allowance is read when the tab that shows it is on screen.
+      if (section === "machine") loadLimits();
     }
 
     render();
