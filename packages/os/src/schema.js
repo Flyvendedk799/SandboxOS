@@ -19,7 +19,34 @@ import { reconcileTree } from "./layout.js";
 // so the shell that matches a key and the tool that validates one agree.
 import { DEFAULT_KEYS, cleanKeys } from "./keys.js";
 
+/**
+ * The document's shape version.
+ *
+ * Still 1, deliberately (goal.md T5.4). Everything the document has gained since
+ * — the keymap, do-not-disturb, proposals, checkpoints, first-run state, an app's
+ * suspended flag — is *additive*, and `normalizeDoc` fills each one in from the
+ * defaults when it is absent. No field changed meaning or shape, so there is no
+ * migration to write and nothing a v2 would tell a reader that it does not
+ * already know. A version bump whose only content is a larger number teaches
+ * everyone downstream to ignore the number.
+ *
+ * What was missing was not a bump but the machinery a bump will need, so that is
+ * what exists now: the version is *read* (see `docCompatibility`), and a document
+ * from a build newer than this one is refused at the boundary where it would
+ * otherwise be silently truncated — importing a distro or restoring a backup —
+ * rather than quietly losing the fields this build has never heard of.
+ */
 export const OS_DOC_VERSION = 1;
+
+/**
+ * What this build can say about a document's shape version. `newer` means it was
+ * written by a build that knows fields this one would drop.
+ */
+export function docCompatibility(input) {
+  const raw = Number(input?.version);
+  const version = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 1;
+  return { version, current: OS_DOC_VERSION, newer: version > OS_DOC_VERSION, older: version < OS_DOC_VERSION };
+}
 
 /** Ceilings. Generous enough that nobody meets them by building; low enough that
  *  a runaway agent cannot turn the document into a denial-of-service payload. */

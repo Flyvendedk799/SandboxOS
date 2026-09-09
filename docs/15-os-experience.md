@@ -194,6 +194,37 @@ it on, the assistant's `desktop.*` *writes* are captured into one proposal per t
 sensible about it), the system prompt says so, and the panel shows each proposal as a
 list of calls with Apply and Discard.
 
+### Why the document is still v1
+
+`OS_DOC_VERSION` is 1, and T5.4 of `goal.md` asked for v2 "when, and only when, it
+is earned". It has not been.
+
+Everything the document has gained — the keymap, do-not-disturb, proposals,
+checkpoints, first-run state, an app's suspended flag, the tiling tree, "open
+with", reduced motion, distro lineage — is *additive*. `normalizeDoc` fills each one
+from the defaults when it is absent, and no field has changed meaning or shape, so
+there is no migration to write. A v2 would tell a reader nothing that the presence
+of the fields does not already tell it, and a bump whose only content is a larger
+number teaches everyone downstream to ignore the number.
+
+What was actually missing was not the bump but the machinery a bump will need, and
+that now exists. `docCompatibility(doc)` reads the version and says whether a
+document came from a build newer than this one. Where that matters — importing a
+distro, restoring a backup — a newer document is **refused** with
+`code: "newer_document"`, because `normalizeDoc` keeps only the fields this build
+knows, which is exactly what makes it safe against a hostile document and exactly
+what would make forking a newer person's desktop a silent, partial, unexplained
+loss. A newer payload envelope is refused the same way.
+
+`test/phase40.test.js` is the evidence rather than the claim: documents shaped the
+way each earlier wave of this project wrote them — the earliest windows-and-a-dock
+desktops, then custom apps and widgets, then tiling and companion servers and
+lineage — are loaded and checked twice over. What they meant still survives (name,
+revision, theme and its overrides, dock, every window with its props, every custom
+app with its capabilities); what they never had arrives at its default. Today's
+ceilings still apply to a document from before them, and a machine from the future
+is named as such instead of being cut down to fit.
+
 ### First run: one screen, and a machine already working
 
 A machine nobody has set up carries `setup: { done: false }` in its document — a

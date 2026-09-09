@@ -22,6 +22,15 @@ import { createServer } from "../apps/gateway/src/server.js";
 import { attachSession, listSessions, killAllSessions } from "../packages/kernel/src/pty-sessions.js";
 import { stopAllProcs } from "../packages/kernel/src/servers/proc.js";
 import { loadOs, forgetOs } from "../packages/os/src/store.js";
+import net from "node:net";
+
+/** A port nothing is on, asked of the operating system rather than guessed.
+ *  A random number in a range collides eventually, and when it does the failure
+ *  looks like the blackout test being flaky rather than like a port clash. */
+const freePort = () => new Promise((res) => {
+  const s = net.createServer();
+  s.listen(0, "127.0.0.1", () => { const { port } = s.address(); s.close(() => res(port)); });
+});
 
 let kernel, owner, sandbox, held, session, srv, port;
 const call = (server, tool, args = {}) => kernel.call({ principalId: owner.id, heldPatterns: held, server, tool, args });
@@ -92,14 +101,14 @@ const until = async (fn, what, ms = 10_000) => {
 
 test("the blackout: a job, a shell, three agent writes, and a new listener", async () => {
   // ── 1 · start work, and watch it ─────────────────────────────────────────
-  const listener = 7_800 + Math.floor(Math.random() * 150);
+  const listener = await freePort();
   const server = `require('http').createServer((q,s)=>s.end('ok')).listen(${listener},'127.0.0.1');setInterval(()=>console.log('alive'),300)`;
   const job = await ok("proc", "start", {
     cmd: `"${process.execPath}" -e "${server.replace(/"/g, '\\"')}"`,
     name: "blackout-job",
   });
   const reachable = () => fetch(`http://127.0.0.1:${listener}/`, { signal: AbortSignal.timeout(400) }).then(() => true).catch(() => false);
-  await until(reachable, `the job to bind :${listener}`);
+  await until(reachable, `the job to bind :${listener}`, 20_000);
 
   let seen = "";
   const shell = attachSession(kernel.cell, sandbox.id, { name: "blackout-shell" }, (d) => { seen += d.toString(); }, () => {});
