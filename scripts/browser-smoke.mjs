@@ -323,6 +323,29 @@ try {
   check((await sashRatio()) > ratioBefore, `and arrow keys resize the split (${ratioBefore} → ${await sashRatio()})`);
   await desktop('layoutSet', { mode: 'floating' });
 
+  // The dock, the shelf and an app's own lists: the surfaces T4.5 names, driven
+  // with nothing but Tab and Enter. They are real buttons, which is the point —
+  // an affordance that needs a synthetic click is not keyboard-reachable.
+  const dockCount = (await desktop('state')).doc.windows.length;
+  await page.focus('.os-dock .dock-app');
+  const dockFocused = await page.evaluate(() => document.activeElement?.className ?? '');
+  check(dockFocused.includes('dock-app'), `a dock icon takes focus (${dockFocused})`);
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(700);
+  check((await desktop('state')).doc.windows.length >= dockCount, 'and Enter on it launches or focuses that app');
+
+  await kernel.call({ principalId: owner.id, heldPatterns: held, server: 'fs', tool: 'write', args: { path: 'keyboard.txt', content: 'reachable without a pointer' } });
+  await desktop('open', { app: 'files', props: { path: '.' } });
+  await page.waitForSelector('.file-list .row-line', { timeout: 8_000 });
+  await page.focus('.file-list .row-line');
+  const rowFocused = await page.evaluate(() => document.activeElement?.className ?? '');
+  check(rowFocused.includes('row-line'), 'a row in Files takes focus');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(700);
+  check(!!(await page.$('.file-pane textarea')) || !!(await page.$('.file-list .row-line')),
+    'and Enter on it opens what it points at');
+  for (const w of (await desktop('state')).doc.windows.filter((x) => x.app === 'files')) await desktop('close', { id: w.id });
+
   // An overlay takes focus, so Escape and typing mean what they look like.
   await page.keyboard.press('Control+k');
   await page.waitForSelector('.os-spotlight input');
@@ -339,6 +362,14 @@ try {
   check(visible === 1, `phone width shows one front window (${visible})`);
   check(await page.$(".os-dock"), "the dock stays reachable on a phone");
   check(await page.$(".os-shelf"), "widgets go into a shelf instead of vanishing");
+  // The shelf handle is a button, so the shelf opens without a pointer too.
+  await page.focus(".os-shelf-handle");
+  const shelfFocused = await page.evaluate(() => document.activeElement?.className ?? "");
+  check(shelfFocused.includes("os-shelf-handle"), `the shelf handle takes focus (${shelfFocused})`);
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(400);
+  check((await page.$$eval(".os-shelf-body .os-widget", (els) => els.filter((e) => !e.hidden).length)) >= 1,
+    "and Enter opens it");
   await page.click(".os-shelf-handle");
   await page.waitForTimeout(400);
   check((await page.$$eval(".os-shelf-body .os-widget", (els) => els.filter((e) => !e.hidden).length)) >= 1, "the shelf holds the workspace's widgets");

@@ -167,6 +167,21 @@ console.log("");
 if (process.env.BENCH_JSON) console.log(JSON.stringify({ at: Date.now(), results }, null, 2));
 console.log(failed ? `${failed} budget${failed === 1 ? "" : "s"} exceeded\n` : "every budget met\n");
 
+// The wire row is the one that decides T4.2 of goal.md. A delta protocol —
+// `{op, rev, patch}` for geometry-only writes, whole documents for structural
+// ones — is held in reserve for the day the document stops fitting comfortably.
+// While it fits, a second representation of the desktop would be a second thing
+// for every client to reconcile and a new class of bug where the patch and the
+// document disagree, to save bytes that are not scarce. This line is where that
+// stops being true, so the decision can be revisited on a number rather than on
+// a memory of one.
+const wire = results.find((r) => r.name.startsWith("bytes on the wire"));
+if (wire) {
+  const share = Math.round((wire.value / wire.budget) * 100);
+  console.log(`the wire is at ${share}% of its budget. Deltas (goal.md T4.2) are deliberately not`);
+  console.log("built while that stays low: they would be a second desktop to reconcile.\n");
+}
+
 srv.close();
 _resetKernels();
 closeDb();

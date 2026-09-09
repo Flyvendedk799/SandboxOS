@@ -384,6 +384,17 @@ worth keeping it that way. Two things used to make it more than that, and no lon
   drag writes one document; it used to rewrite the previous forty. An older
   single-file `history.json` is migrated the first time it is read.
 
+And one thing that was planned and is deliberately not built. T4.2 of `goal.md`
+holds a delta protocol in reserve — `{op, rev, patch}` for geometry-only writes,
+full documents for structural ones — *if* the wire budget could not be met by
+compression alone. It can. `npm run bench` measures the whole document on the wire
+at the ceiling shape (40 windows, 20 widgets) and reports about **13 KB against a
+96 KB budget**, one event per write. A delta protocol would add a second
+representation of the desktop, a second thing for every client to reconcile, and a
+new class of bug where the patch and the document disagree — to save bytes that are
+not scarce. The measurement is in the bench rather than in this paragraph, so the
+day it stops being true, CI says so and the decision can be revisited on numbers.
+
 ### The conflict policy
 
 Every write is last-write-wins **unless it says otherwise**. Writes that describe a

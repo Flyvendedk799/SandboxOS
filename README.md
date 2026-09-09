@@ -242,10 +242,11 @@ for await (const ev of sbx.assistant.ask("summarise today's changes")) {
 | 15 | [The OS experience](docs/15-os-experience.md) | The desktop as a document, the builder for it, apps with two faces, distros, the second surface |
 
 Architecture Decision Records live in [`docs/adr/`](docs/adr). Each build phase has its
-own note: `PHASE0.md` … `PHASE35.md`. [`heroplan.md`](heroplan.md) is the plan Phases
-28–30 implemented. [`goal.md`](goal.md) is what comes next — the desktop and the Studio
+own note: `PHASE0.md` … `PHASE38.md`. [`heroplan.md`](heroplan.md) is the plan Phases
+28–30 implemented. [`goal.md`](goal.md) is the one after it — the desktop and the Studio
 as software you would trust: the gaps as measured, ten promises, and the acceptance
-suite that decides when they are kept.
+suite that decides when they are kept. All four of its acceptance
+scripts pass on this host (`npm run release-check`); the Docker leg runs in CI.
 
 ## Layout
 
