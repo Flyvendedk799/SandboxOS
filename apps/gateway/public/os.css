@@ -1159,7 +1159,8 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
 /* ── Builtins, deeper (Wave E2) ──────────────────────────────────────────── */
 .file-list.second { border-left: 1px solid var(--os-line); }
 .row-line.head { color: var(--os-text-3); border-bottom: 1px solid var(--os-line); }
-.tide-badge { margin-left: auto; margin-right: 8px; padding: 0 5px; border-radius: 4px; font-size: 9px; font-weight: 700; background: var(--os-accent-dim); color: var(--os-accent); }
+.tide-badge { margin-left: auto; margin-right: 8px; padding: 0 5px; border-radius: 4px; font-size: 9px; font-weight: 700; background: var(--os-accent-dim); color: var(--os-accent); border: 0; cursor: pointer; font-family: inherit; line-height: 15px; }
+.tide-badge:hover, .tide-badge:focus-visible { background: var(--os-accent); color: var(--os-bg-0); }
 .console-entry { padding: 8px 13px; border-bottom: 1px solid var(--os-line); font-family: var(--mono); font-size: 11px; line-height: 1.6; }
 .console-entry .in { display: flex; gap: 6px; align-items: baseline; color: var(--os-accent); }
 .console-entry .in b { color: var(--os-text); font-weight: 500; white-space: pre-wrap; flex: 1; }
@@ -1518,3 +1519,9 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
   .fr-panel { padding: 20px 18px 18px; }
   .fr-actions { flex-direction: column; align-items: stretch; gap: 10px; }
 }
+
+/* A job's pane: the ports that are answering right now, so the next question
+   after "it started" has an answer in the same window. Not attributed to the job
+   — a supervised process does not tell us which ports it bound. */
+.ops-ports { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 6px 12px; border-bottom: 1px solid var(--os-line); }
+.ops-ports .dim { font-size: 10.5px; }

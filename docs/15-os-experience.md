@@ -572,6 +572,31 @@ right — because they answer the same kind of question, and each one says when 
 is *unavailable* rather than showing a plausible zero: a port scan that could not look
 says so, a job whose shell never started says "never started" instead of "failed".
 
+### Getting from one app to the next
+
+Each of the seven does its own job; several clauses of Track 1 were about the seams
+between them, and a machine where every answer lives in a window you have to know
+about is a machine that makes you do the work twice.
+
+- **A job's notification goes back to the job.** `notifyJobEnded` carries
+  `action: { app: "jobs", props: { job, follow: true } }`, so "build failed" opens Jobs
+  on that job, following its log. An agent's does the same for its transcript.
+- **A job's pane shows the ports that are answering**, each one a button that opens the
+  Browser. Deliberately not attributed to the job: a supervised process does not tell
+  the machine which ports it bound, and guessing would be a confident lie. What it says
+  is "answering now", which is true and is what you wanted after starting a dev server.
+- **Sharing a port is sharing the machine, narrowly.** The proxy URL sits behind this
+  machine's own sign-in, so the honest one-click share is `access.share` with the
+  narrowest grant that lets somebody load the page — and then it puts you in Access,
+  where you can revoke it.
+- **An agent can be re-run with edits.** The spawn dialog takes a previous agent and
+  fills in its command, its kind and its capabilities. The original stays in the list
+  with its own transcript.
+- **A Tide badge opens Sync** on the workspace the badge came from — it is a button, so
+  a keyboard reaches it, and it does not also open the file underneath.
+- **A spike leads to its rows.** Observability's per-tool and slowest-call rows open the
+  audit log filtered to that tool.
+
 ### A terminal is a session, not a socket
 
 A pty used to belong to a WebSocket: closing the window killed the shell, so "close this"

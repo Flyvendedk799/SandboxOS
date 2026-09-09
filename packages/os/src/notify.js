@@ -72,6 +72,10 @@ export function notifyJobEnded(sandbox, job) {
     body: job.state === "stopped"
       ? `Job ${job.id} was stopped.`
       : `Job ${job.id} exited with code ${job.code ?? "?"}.`,
+    // Clicking it goes back to the job it is about, following its log (T1.1). A
+    // notification that tells you something failed and then leaves you to find
+    // it is a notification that made you do the work twice.
+    action: { app: "jobs", props: { job: job.id, follow: true } },
   });
 }
 
@@ -88,5 +92,7 @@ export function notifyAgentEnded(sandbox, agent, state) {
     body: state === "done"
       ? String(agent.result ?? "").slice(0, 200) || "Finished with no output."
       : String(agent.error ?? "").slice(0, 200) || `The agent ${state}.`,
+    // …and back to the agent, with its transcript and its tool calls.
+    action: { app: "agents", props: { agent: agent.id } },
   });
 }

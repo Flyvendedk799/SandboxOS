@@ -52,10 +52,12 @@ const files = {
     // Tide: which files changed since the last mark, as a badge, when the
     // machine has a workspace. No workspace, no badges — not fake ones.
     let changed = new Map();
+    let tideWorkspace = null;
     async function tideStatus() {
       const ws = await api.tryMcp("tide", "listWorkspaces", {});
       const first = ws?.workspaces?.[0];
       const name = typeof first === "string" ? first : first?.name;
+      tideWorkspace = name ?? null;
       if (!name) { changed = new Map(); return; }
       const st = await api.tryMcp("tide", "status", { workspace: name });
       changed = new Map((st?.changes ?? []).map((c) => [String(c.path ?? c.file ?? c).replace(/^\.\//, ""), c.kind ?? c.status ?? "changed"]));
@@ -124,7 +126,15 @@ const files = {
           ondblclick: () => { if (e.type !== "dir") launchWith(p); },
           oncontextmenu: (ev) => { ev.preventDefault(); rowMenu(ev, e, p); },
         }, h("span", e.type === "dir" ? `${e.name}/` : e.name),
-          changed.has(p) ? h("span.tide-badge", { title: `Tide: ${changed.get(p)} since the last mark` }, changed.get(p)[0].toUpperCase()) : null,
+          // The badge is a button, and it goes where the change lives: Sync, on
+          // the workspace it belongs to (T1.4). A badge that only tells you
+          // something changed leaves you to go and find it.
+          changed.has(p)
+            ? h("button.tide-badge", {
+                title: `Tide: ${changed.get(p)} since the last mark — open Sync`,
+                onclick: (ev) => { ev.stopPropagation(); ctx.launch?.("sync", { workspace: tideWorkspace }); },
+              }, changed.get(p)[0].toUpperCase())
+            : null,
           h("span.sz", e.type === "dir" ? "" : fmtBytes(e.size)));
       }));
     }

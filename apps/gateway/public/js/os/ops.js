@@ -67,6 +67,11 @@ const jobs = {
     let jobList = [];
     let sessions = [];
     let crons = [];
+    // Exposed ports that answer. Deliberately not claimed as "this job's": a
+    // supervised process does not tell the machine which ports it bound, and
+    // guessing would be a confident lie. What a person wants after starting a dev
+    // server is the URL, and this is where they are looking.
+    let openPorts = [];
     let selected = win.props?.job ?? null;
     let follow = win.props?.follow !== false;
     let filter = "";
@@ -92,14 +97,16 @@ const jobs = {
 
     async function refresh() {
       try {
-        const [j, s, c] = await Promise.all([
+        const [j, s, c, p] = await Promise.all([
           api.mcp("proc", "jobs", {}),
           api.tryMcp("proc", "sessions", {}),
           api.tryMcp("cron", "list", {}),
+          api.tryMcp("ports", "list", {}),
         ]);
         jobList = j.jobs ?? [];
         sessions = s?.sessions ?? [];
         crons = c?.jobs ?? c?.schedule ?? [];
+        openPorts = (p?.ports ?? []).filter((x) => x.up);
         error = null;
       } catch (e) { error = e; }
       if (selected && follow) await loadLogs();
@@ -231,6 +238,14 @@ const jobs = {
             : h("button.app-btn", { onclick: () => act(() => api.mcp("proc", "start", { cmd: rec.cmd, name: rec.name })) }, "Start again"),
         ),
         rec.failure ? h("div.ops-error", null, icon("bell", 14), h("span", `${rec.failure.message} — the command never ran`)) : null,
+        openPorts.length
+          ? h("div.ops-ports", null,
+              h("span.dim", "answering now:"),
+              ...openPorts.map((p) => h("button.app-btn", {
+                title: `Open :${p.port} in the Browser`,
+                onclick: () => ctx.launch?.("browser", { port: Number(p.port), path: "/" }),
+              }, `:${p.port}`, p.name ? h("span.dim", ` ${p.name}`) : null)))
+          : null,
         h("div.ops-log", null, ...(shown.length
           ? shown.map((l) => h("div.ops-line", { class: l.stream === "stderr" ? "err" : "" },
               h("span.t", clock(l.ts)), h("span.m", l.text)))
@@ -312,6 +327,31 @@ const ports = {
 
     const urlFor = (port) => `${location.origin}/${slug}/p/${port}/`;
 
+    /**
+     * Sharing a port is sharing the machine, narrowly. The URL is behind the same
+     * authentication as everything else, so the honest one-click share is a grant
+     * — and the narrowest one that lets somebody load the page.
+     */
+    async function shareDialog(port) {
+      const got = await dialog({
+        title: `Share :${port}`,
+        message: `${urlFor(port)} is behind this machine's own sign-in, so sharing it means giving someone access. This gives them the narrowest grant that lets them load it, and nothing else.`,
+        fields: [
+          { name: "username", label: "Their username", placeholder: "someone" },
+          { name: "patterns", label: "What they may call", value: "ports.list",
+            hint: "the proxy needs no tool of its own; this lets them see what is exposed" },
+        ],
+        confirmLabel: "Share",
+      });
+      if (!got?.username) return;
+      const patterns = String(got.patterns ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+      try {
+        await api.mcp("access", "share", { username: got.username.trim(), ...(patterns.length ? { patterns } : {}) });
+        toast(`${got.username} can reach :${port}`, { body: "Manage it in Access.", kind: "ok", timeout: 3200 });
+        ctx.launch?.("access");
+      } catch (e) { toastError("Could not share it", e); }
+    }
+
     function paint() {
       const exposedPorts = new Set(exposed.map((p) => Number(p.port)));
       fill(listEl,
@@ -333,6 +373,10 @@ const ports = {
             menu({ x: e.clientX, y: e.clientY }, [
               { label: "Open in the Browser", run: () => preview(Number(p.port)) },
               { label: "Copy the URL", run: () => navigator.clipboard?.writeText(urlFor(p.port)).then(() => toast("URL copied", { timeout: 1800 })) },
+              // The URL is only reachable by someone who can reach this machine,
+              // so "share this port" is really "give that person access" — which
+              // is the Access app, not a link (T1.2 → T1.6).
+              { label: "Share it with someone…", icon: "shield", run: () => shareDialog(Number(p.port)) },
               { label: "Check it", run: () => check(Number(p.port)) },
               "-",
               { label: "Unexpose", danger: true, run: async () => { try { await api.mcp("ports", "unexpose", { port: Number(p.port) }); refresh(); } catch (err) { toastError("Could not unexpose", err); } } },
@@ -398,20 +442,31 @@ const agents = {
       catch (e) { detail = { error: e.message }; }
     }
 
-    async function spawnDialog() {
+    /**
+     * Spawn, or re-run. Passing a previous agent fills the dialog with what it
+     * was: the same command, the same capabilities, the same kind — so "run that
+     * again, but with one word changed" is one dialog rather than a retyping
+     * exercise (T1.3).
+     */
+    async function spawnDialog(from = null) {
       const mine = await api.tryMcp("kernel", "capabilities", {});
+      const prior = from
+        ? { name: from.name ?? "", kind: from.kind ?? "shell", cmd: from.cmd ?? from.prompt ?? "", patterns: (from.patterns ?? from.capabilities ?? []).join(", ") }
+        : { name: "", kind: "shell", cmd: "", patterns: "" };
       const got = await dialog({
-        title: "Spawn an agent",
-        message: "It runs with the capabilities you give it and nothing else — a subset of your own, checked by the Kernel.",
+        title: from ? `Run ${prior.name || "it"} again` : "Spawn an agent",
+        message: from
+          ? "Change anything before it goes. The original stays in the list with its own transcript."
+          : "It runs with the capabilities you give it and nothing else — a subset of your own, checked by the Kernel.",
         fields: [
-          { name: "name", label: "Name", placeholder: "build" },
-          { name: "kind", label: "Kind", type: "select", value: "shell",
+          { name: "name", label: "Name", placeholder: "build", value: prior.name },
+          { name: "kind", label: "Kind", type: "select", value: prior.kind,
             options: [{ value: "shell", label: "shell — run a command" }, { value: "ai", label: "ai — drive a tool loop" }] },
-          { name: "cmd", label: "Command or prompt", type: "textarea", rows: 3, placeholder: "npm test" },
-          { name: "patterns", label: "Capabilities", placeholder: "proc.exec, fs.read",
+          { name: "cmd", label: "Command or prompt", type: "textarea", rows: 3, placeholder: "npm test", value: prior.cmd },
+          { name: "patterns", label: "Capabilities", placeholder: "proc.exec, fs.read", value: prior.patterns,
             hint: `you hold: ${(mine?.capabilities ?? ["—"]).join(", ").slice(0, 90)}` },
         ],
-        confirmLabel: "Spawn",
+        confirmLabel: from ? "Run it again" : "Spawn",
       });
       if (!got?.name) return;
       const patterns = String(got.patterns ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -435,6 +490,7 @@ const agents = {
           oncontextmenu: (e) => {
             e.preventDefault();
             menu({ x: e.clientX, y: e.clientY }, [
+              { label: "Run again with edits…", icon: "refresh", run: () => spawnDialog(a) },
               { label: "Kill", danger: true, disabled: a.state !== "running" && a.state !== "queued",
                 run: async () => { try { await api.mcp("agents", "kill", { id: a.id }); refresh(); } catch (err) { toastError("Could not kill it", err); } } },
             ]);
