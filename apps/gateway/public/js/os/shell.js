@@ -19,10 +19,14 @@ const clockText = () => { const d = new Date(); return `${pad2(d.getHours())}:${
 
 export function createScreen({ ctx = {} } = {}) {
   // ── DOM skeleton ──────────────────────────────────────────────────────────
-  const menubar = h("div.os-menubar");
-  const desktopEl = h("div.os-desktop");
-  const dock = h("div.os-dock");
-  const overlays = h("div", { style: { position: "absolute", inset: "0", pointerEvents: "none", zIndex: "20" } });
+  // Roles and names on every piece of chrome (goal.md T4.5). They are not
+  // decoration: without them the dock is a row of unlabelled buttons and the
+  // desktop is an unnamed div, and a keyboard-only path through the OS has
+  // nothing to announce.
+  const menubar = h("div.os-menubar", { role: "menubar", "aria-label": "Menu bar" });
+  const desktopEl = h("div.os-desktop", { role: "main", "aria-label": "Desktop" });
+  const dock = h("div.os-dock", { role: "toolbar", "aria-label": "Dock" });
+  const overlays = h("div", { role: "region", "aria-label": "Overlays", style: { position: "absolute", inset: "0", pointerEvents: "none", zIndex: "20" } });
   const el = h("div.os-screen", null, menubar, desktopEl, dock, overlays);
 
   const launch = (appId, props) =>
@@ -57,6 +61,16 @@ export function createScreen({ ctx = {} } = {}) {
     openOverlay = name;
     overlays.style.pointerEvents = "auto";
     fill(overlays, typeof node === "function" ? node() : node);
+    // Focus goes into what just opened — the first thing you would have
+    // clicked — because an overlay you cannot reach with the keyboard is a
+    // dialog only a mouse can answer.
+    const panel = overlays.querySelector(".os-panel, .os-spotlight");
+    if (panel) {
+      panel.setAttribute("role", "dialog");
+      panel.setAttribute("aria-modal", "true");
+      const first = panel.querySelector("input, textarea, button, [tabindex]");
+      (first ?? panel).focus?.();
+    }
   }
   function hideOverlay() {
     openOverlay = null;

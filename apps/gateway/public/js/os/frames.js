@@ -75,7 +75,7 @@ const covers = (held, wanted) => {
  * @param opts.onResize called when the app asks for a size
  * @param opts.onClose  called when the app closes itself
  */
-export function createFrame({ id, kind = "app", onTitle, onResize, onClose }) {
+export function createFrame({ id, kind = "app", onTitle, onResize, onClose, onFocusOut }) {
   const path = kind === "widget" ? "widgets" : "apps";
   const frame = h("iframe", {
     sandbox: "allow-scripts allow-forms allow-popups allow-modals",
@@ -95,7 +95,7 @@ export function createFrame({ id, kind = "app", onTitle, onResize, onClose }) {
   // Registered by ELEMENT, not by contentWindow: an app's first message can beat
   // the iframe's load event, and a frame whose very first call is dropped as
   // "not one of ours" is a bug that only shows up on fast machines.
-  frames.add({ id, kind, el: frame, onTitle, onResize, onClose });
+  frames.add({ id, kind, el: frame, onTitle, onResize, onClose, onFocusOut });
   return frame;
 }
 
@@ -235,6 +235,11 @@ export function startBroker({ notify, closeWindowForFrame } = {}) {
         return;
 
       // The answer to the watchdog's ping. One-way, like a log.
+      // Escape inside a frame: give the keyboard back to the shell.
+      case "focusOut":
+        entry.onFocusOut?.();
+        return;
+
       case "pong": {
         const h = health.get(entry.id) ?? { lastSeen: 0, stuck: false };
         h.lastSeen = Date.now();

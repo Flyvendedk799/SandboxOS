@@ -27,7 +27,7 @@ import {
   normalizeDoc, normApp, normWidgetKind, cleanTokens, cleanAnimation, cleanPatterns,
   isId, rid, LIMITS, DOCK_POSITIONS, WM_MODES, resolveAlias,
   buildTree, treeBoxes, treeLeaves, splitFor, setRatio, setDir, swapLeaves, normalizeTree, describeTree, TREE_PRESETS,
-  BUILTIN_THEMES, listThemes, resolveTheme, themeKey,
+  BUILTIN_THEMES, listThemes, resolveTheme, themeKey, checkContrast, contrastRatio,
   BUILTIN_ANIMATIONS, listAnimations, resolveAnimation,
   builtinApp, builtinWidget, appDescriptor, widgetDescriptor, listApps, listWidgetKinds,
   writeBundleFile, readBundleFile, listBundleFiles, removeBundleFile, removeBundle,
@@ -371,7 +371,24 @@ export function desktopServer(deps) {
               tokens: { ...(d.theme.custom[a.key]?.tokens ?? {}), ...cleanTokens(a.tokens ?? {}) },
             };
           }, "themeDefine", `theme ${a.key}`);
-          return { ok: true, key: a.key, themes: listThemes(next).length, rev: next.rev };
+          // A theme nobody can read is a theme that shipped a bug into every
+          // window at once. The check is advice, not a veto — it is your
+          // machine — except when the body text is genuinely invisible on its
+          // own panels, which is refused before it becomes the whole desktop.
+          const resolved = resolveTheme({ theme: { base: a.key, custom: next.theme.custom, tokens: {} } });
+          const readability = checkContrast(resolved);
+          if (readability.unreadable.length) {
+            // Take it back out rather than leave an unusable theme behind.
+            const reverted = mutate((d) => { delete d.theme.custom[a.key]; }, "themeDefine", `refused ${a.key}`);
+            const err = new Error(`refused: ${readability.unreadable[0].text} — text on a panel has to be readable`);
+            err.code = "unreadable_theme";
+            void reverted;
+            throw err;
+          }
+          return {
+            ok: true, key: a.key, themes: listThemes(next).length, rev: next.rev,
+            ...(readability.warnings.length ? { warnings: readability.warnings } : {}),
+          };
         },
       },
 
@@ -1074,10 +1091,24 @@ export function desktopServer(deps) {
               if (Object.values(d.apps).some((x) => x.id !== a.id && x.mcp?.name === name)) throw new Error(`another app already serves as ${name}`);
             }
             const permissions = a.permissions ?? prior?.permissions ?? [];
+            // An *update* only overwrites what it names. Spreading the whole
+            // argument object would hand `normApp` an unreadable value (a colour
+            // that is not one, say) and get the *default* back — quietly
+            // replacing a good value with a different one, which is worse than
+            // refusing. So a field arriving as junk leaves the prior value alone.
+            const named = Object.fromEntries(Object.entries(a).filter(([, v]) => v !== undefined));
             const app = normApp({
-              ...(prior ?? {}), ...a, id: a.id, createdAt: prior?.createdAt, updatedAt: Date.now(),
+              ...(prior ?? {}), ...named, id: a.id, createdAt: prior?.createdAt, updatedAt: Date.now(),
               mcp, permissions: wantsTools && !prior ? [...new Set([...permissions, `${a.id}.*`])] : permissions,
             });
+            if (prior) {
+              // Keep what the caller did not (validly) change: normApp's defaults
+              // are for a *new* app, not for a field someone typed badly.
+              const HUE = /^#[0-9a-f]{3,8}$/i;
+              if (a.hue !== undefined && !HUE.test(String(a.hue))) app.hue = prior.hue;
+              if (a.icon !== undefined && !String(a.icon).trim()) app.icon = prior.icon;
+              if (a.name !== undefined && !String(a.name).trim()) app.name = prior.name;
+            }
             if (!app) throw new Error("invalid app definition");
             if (mcp && !app.mcp) throw new Error("the mcp block needs an entrypoint (a .js file in the bundle) or at least one proxy tool");
             if (app.kind === "url" && !app.url) throw new Error("kind='url' needs a http(s) url");

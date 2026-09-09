@@ -141,6 +141,66 @@ export function themeKey(doc) {
   return `${h.toString(36)}${payload.length.toString(36)}`;
 }
 
+// ── readability, measured ───────────────────────────────────────────────────
+//
+// Every built-in theme passes a contrast check in the test suite. A theme *you*
+// (or your agent) invent should get the same treatment — but as advice, not as a
+// refusal, because it is your machine: `themeDefine` returns the warnings and
+// only refuses a theme whose own text is genuinely unreadable on its own panels
+// (goal.md T4.5).
+
+const channel = (v) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+
+/** WCAG relative luminance of a hex colour. */
+export function luminance(hex) {
+  if (!HEX.test(hex ?? "") || hex.length < 7) return null;
+  const n = parseInt(hex.slice(1, 7), 16);
+  return 0.2126 * channel((n >> 16) & 255) + 0.7152 * channel((n >> 8) & 255) + 0.0722 * channel(n & 255);
+}
+
+/** WCAG contrast ratio between two hex colours, or null if either is not one. */
+export function contrastRatio(a, b) {
+  const la = luminance(a);
+  const lb = luminance(b);
+  if (la == null || lb == null) return null;
+  const [hi, lo] = la > lb ? [la, lb] : [lb, la];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/** The pairs a theme has to get right, and the ratio each one needs. */
+export const CONTRAST_RULES = [
+  { fg: "text", bg: "bg1", min: 4.5, what: "body text on a panel" },
+  { fg: "text2", bg: "bg1", min: 4.5, what: "secondary text on a panel" },
+  { fg: "text3", bg: "bg1", min: 3, what: "muted text on a panel" },
+  { fg: "accent", bg: "bg1", min: 3, what: "the accent on a panel" },
+  { fg: "ok", bg: "bg1", min: 3, what: "a running job" },
+  { fg: "warn", bg: "bg1", min: 3, what: "a warning" },
+  { fg: "err", bg: "bg1", min: 3, what: "a refusal" },
+];
+
+/**
+ * Check a resolved theme's readability.
+ *
+ * Returns one entry per rule that falls short, with the ratio it got and the
+ * ratio it needed — the sentence a UI can print. `unreadable` is the subset
+ * nobody could work with (body text under 2:1), which is the only case
+ * `themeDefine` refuses outright.
+ */
+export function checkContrast(theme) {
+  const warnings = [];
+  for (const rule of CONTRAST_RULES) {
+    const ratio = contrastRatio(theme?.[rule.fg], theme?.[rule.bg]);
+    if (ratio == null || ratio >= rule.min) continue;
+    warnings.push({
+      fg: rule.fg, bg: rule.bg, what: rule.what,
+      ratio: Math.round(ratio * 100) / 100, min: rule.min,
+      text: `${rule.what} is ${ratio.toFixed(2)}:1 (wants ${rule.min}:1)`,
+    });
+  }
+  const unreadable = warnings.filter((w) => w.fg === "text" && w.ratio < 2);
+  return { ok: warnings.length === 0, warnings, unreadable };
+}
+
 /** Every theme the document can switch to right now — built-in plus custom. */
 export function listThemes(doc) {
   const out = Object.entries(BUILTIN_THEMES).map(([key, th]) => ({ key, name: th.name, scheme: th.scheme, builtin: true, tokens: th }));

@@ -1365,3 +1365,18 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
 .obs-row:hover { background: var(--os-chip); color: var(--os-text); }
 .obs-row .mono { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .obs-row .n { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--os-text); }
+
+/* Publishing: what travels, and what does not. */
+.publish-what { display: flex; gap: 18px; margin: 4px 0 10px; }
+.publish-what .col { flex: 1; min-width: 0; }
+.publish-what .kv { display: flex; gap: 8px; padding: 3px 0; font-size: 11px; }
+.publish-what .kv .k { flex: none; min-width: 108px; color: var(--os-text-3); }
+.publish-what .kv .v { color: var(--os-text-2); }
+
+/* The inspector's definition section: the fields behind a custom app. */
+.app-section { margin: 4px 0 14px; }
+.stx-inspector .field.row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.stx-inspector .field.row label { margin: 0; }
+.stx-inspector .kv { display: flex; gap: 8px; padding: 3px 0; font-size: 10.5px; }
+.stx-inspector .kv .k { flex: none; min-width: 96px; color: var(--stx-text-3); }
+.stx-inspector .kv .v { color: var(--stx-text-2); }

@@ -85,6 +85,15 @@
     });
   }
 
+  // Focus must never be trapped inside an app (goal.md T4.5). Tab belongs to
+  // the app's own form; Escape hands focus back to the window around it, and
+  // the shell then has the keyboard again. An app that wants Escape for itself
+  // can call preventDefault before this runs.
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || e.defaultPrevented) return;
+    try { parent.postMessage({ __sbx: 1, app: appId, kind, type: "focusOut" }, "*"); } catch { /* detached */ }
+  });
+
   window.addEventListener("message", (e) => {
     const m = e.data;
     if (!m || m.__sbx !== 1) return;

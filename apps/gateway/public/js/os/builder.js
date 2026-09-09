@@ -6,7 +6,7 @@
 // the change lands. That is why the Studio and the running OS can be open in two
 // tabs, or the agent can be building while you are, without either going stale.
 
-import { h, fill, icon, dialog, confirmDialog, menu, toast, toastError, fmtBytes } from "../core.js";
+import { h, fill, icon, api, dialog, confirmDialog, menu, toast, toastError, fmtBytes } from "../core.js";
 import { os, call, select, selected, loadOs, tint, onOs } from "./client.js";
 import { iconName, ICON_NAMES } from "./sprite.js";
 import { dropSession } from "./frames.js";
@@ -249,9 +249,41 @@ export function createBuilder({ onOpenCode } = {}) {
   }
 
   async function publish() {
+    // What travels, what does not, and the hash that will identify it — before
+    // you press the button, not in the docs (goal.md T2.6). The numbers come
+    // from a real export of this machine rather than from a description of one.
+    let manifest = null;
+    try { manifest = (await api.mcp("desktop", "distroExport", {})).payload; } catch { /* the preview is a courtesy */ }
+    const appCount = Object.keys(manifest?.bundles?.apps ?? {}).length;
+    const toolful = Object.values(os.doc.apps ?? {}).filter((a) => a.mcp).length;
+    const serverCount = Object.keys(manifest?.manifest?.servers ?? {}).length;
+    const bundleHashes = Object.keys(manifest?.integrity?.bundles ?? manifest?.integrity ?? {}).length;
+
+    const travels = [
+      ["The desktop", `${os.doc.windows.length} windows, ${os.doc.widgets.length} widgets, the theme and the motion`],
+      ["Custom apps", appCount ? `${appCount} with their source${toolful ? `, ${toolful} with tools` : ""}` : "none"],
+      ["Composition", serverCount ? `${serverCount} servers, by name and configuration` : "not included"],
+      ["Integrity", bundleHashes ? `SHA-256 per bundle (${bundleHashes})` : "no bundles to hash"],
+    ];
+    const staysBehind = [
+      ["Secrets", "never travel — not the values, not the names"],
+      ["Machine tokens", "never travel; a forker mints their own"],
+      ["Your files", "the Cell's volume is not in a distro (Tide moves files)"],
+      ["Checkpoints", "yours alone — use Settings → Machine to back those up"],
+      ["Companion servers", "arrive switched off for whoever forks it"],
+    ];
+
     const got = await dialog({
       title: "Publish this OS as a distro",
+      wide: true,
       message: "The desktop, the source and tools of every custom app, and the Cell's server composition travel together.",
+      render: () => h("div.publish-what", null,
+        h("div.col", null,
+          h("div.os-label", "What travels"),
+          ...travels.map(([k, v]) => h("div.kv", null, h("span.k", k), h("span.v", v)))),
+        h("div.col", null,
+          h("div.os-label", "What stays behind"),
+          ...staysBehind.map(([k, v]) => h("div.kv", null, h("span.k", k), h("span.v.dim", v))))),
       fields: [
         { name: "name", label: "Name", value: os.doc.name },
         { name: "description", label: "Description", placeholder: "What is this machine for?" },
@@ -721,6 +753,74 @@ export function createInspector() {
 
   // ── one thing selected: the property sheet ───────────────────────────────
 
+  /**
+   * The definition behind a custom app or widget — not just its geometry.
+   *
+   * Everything here is a field `appDefine` / `widgetDefine` accepts, so an agent
+   * and a person are editing the same document through the same door, and the
+   * ceilings are printed rather than discovered by hitting them (goal.md T2.5).
+   */
+  function appSection(kind, item, meta) {
+    const isWidget = kind === "widget";
+    const def = isWidget ? os.doc.widgetKinds[item.kind] : os.doc.apps[item.app];
+    if (!def) return null;
+    const tool = isWidget ? "widgetDefine" : "appDefine";
+    const key = isWidget ? { kind: def.kind } : { id: def.id };
+    const write = (args) => call(tool, { ...key, ...args }).catch((e) => toastError("Could not apply", e));
+
+    const text = (label, value, apply, { hint = null, max = null } = {}) => {
+      const input = h("input", { value: value ?? "", ...(max ? { maxlength: String(max) } : {}) });
+      input.addEventListener("change", () => apply(input.value.trim()));
+      return h("div.field", null, h("label", label), input, hint ? h("span.dim", { style: { fontSize: "10.5px" } }, hint) : null);
+    };
+    const numberField = (label, value, apply, hint) => {
+      const input = h("input", { type: "number", value: value ?? 0 });
+      input.addEventListener("change", () => apply(Number(input.value) || 0));
+      return h("div.field", null, h("label", label), input, hint ? h("span.dim", { style: { fontSize: "10.5px" } }, hint) : null);
+    };
+    const toggle = (label, on, apply) =>
+      h("div.field.row", null, h("label", label),
+        h("button.ghost", { class: on ? "on" : "", onclick: () => apply(!on) }, on ? "yes" : "no"));
+
+    const iconSel = h("select", null, ...ICON_NAMES.map((n) => h("option", { value: n, selected: n === def.icon }, n)));
+    iconSel.addEventListener("change", () => write({ icon: iconSel.value }));
+
+    const permsInput = h("input", { value: (def.permissions ?? []).join(", "), placeholder: "fs.read, ports.list" });
+    permsInput.addEventListener("change", () => write({
+      permissions: permsInput.value.split(/[,\s]+/).map((p) => p.trim()).filter(Boolean),
+    }));
+
+    return h("div.app-section", null,
+      h("div.section-label", isWidget ? "This widget kind" : "This app"),
+      text("Name", def.name, (v) => write({ name: v }), { max: 64, hint: "64 characters" }),
+      h("div.field", null, h("label", "Icon"), iconSel),
+      text("Accent", def.hue, (v) => write({ hue: v }), { hint: "a hex colour; anything else is refused" }),
+      text("Description", def.description, (v) => write({ description: v }), { max: 300, hint: "300 characters" }),
+      h("div.field", null, h("label", "Capabilities"), permsInput,
+        h("span.dim", { style: { fontSize: "10.5px" } },
+          `server.tool or server.* · up to 32 · granted only as far as you hold them${(meta.withheld ?? []).length ? ` · withheld now: ${meta.withheld.join(", ")}` : ""}`)),
+      isWidget
+        ? numberField("Refresh every (ms)", def.refreshMs ?? 0, (v) => write({ refreshMs: v }), "0 never ticks · the host keeps the clock and pauses it off-screen")
+        : toggle("One window at a time", !!def.window?.singleton, (v) => write({ window: { ...(def.window ?? {}), singleton: v } })),
+      !isWidget && def.kind === "alias"
+        ? text("Points at", def.target, (v) => write({ target: v }), { hint: "an app id · a ring of aliases is refused" })
+        : null,
+      !isWidget && def.kind === "url" ? text("URL", def.url, (v) => write({ url: v }), { hint: "http or https" }) : null,
+      h("div.kv", null, h("span.k", "Source lives in"), h("span.v", def.origin === "volume"
+        ? `the Cell (${def.volumePath}) — Tide versions it, and a process inside can rewrite it`
+        : "the OS store, beside the document — not writable from inside the Cell")),
+      def.mcp ? h("div.kv", null, h("span.k", "Tool face"), h("span.v", `${def.mcp.name}${def.mcp.entrypoint ? " · companion" : " · façade"}${def.mcp.enabled === false ? " · switched off" : ""}`)) : null,
+      h("div.align-grid.two", { style: { marginTop: "10px" } },
+        h("button.ghost", { onclick: () => onOpenCodeGlobal?.(isWidget ? "widget" : "app", isWidget ? def.kind : def.id) }, "Edit source"),
+        h("button.ghost", {
+          class: def.suspended ? "on" : "",
+          title: def.suspended ? "Let it hold capabilities again" : "Revoke its tokens; keep the window and the source",
+          onclick: () => call("appSuspend", { id: isWidget ? def.kind : def.id, suspended: !def.suspended })
+            .catch((e) => toastError("Could not change that", e)),
+        }, def.suspended ? "Suspended" : "Suspend")),
+    );
+  }
+
   function render() {
     const d = os.doc;
     if (!d) return;
@@ -787,11 +887,7 @@ export function createInspector() {
       h("button.ghost", { class: item.min ? "on" : "", onclick: () => call("windowSet", { id, min: !item.min }) }, item.min ? "Restore" : "Minimise"),
       h("button.ghost", { onclick: () => call("windowSet", { id, max: !item.max }) }, item.max ? "Unzoom" : "Zoom")) : null;
 
-    const appLine = meta && !meta.builtin ? h("div.note", { style: { marginTop: "0", marginBottom: "12px" } },
-      `${meta.kind} app · capabilities: ${meta.permissions?.join(", ") || "none"}`,
-      meta.window?.singleton ? " · one window at a time" : "",
-      h("div", { style: { marginTop: "6px" } },
-        h("button.ghost", { onclick: () => onOpenCodeGlobal?.("app", meta.id) }, "Edit source"))) : null;
+    const appLine = meta && !meta.builtin ? appSection(kind, item, meta) : null;
 
     fill(body,
       h("div", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "16px" } },

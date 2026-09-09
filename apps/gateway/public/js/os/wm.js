@@ -109,9 +109,27 @@ export function createDesktop({ root, ctx = {} }) {
   function paintSashes(sashes) {
     if (!sashes?.length) { sashLayer.replaceChildren(); return; }
     sashLayer.replaceChildren(...sashes.map((s) => {
-      const el = h("div.os-sash", { class: s.dir });
+      const el = h("div.os-sash", {
+        class: s.dir,
+        tabindex: "0",
+        role: "separator",
+        "aria-orientation": s.dir === "row" ? "vertical" : "horizontal",
+        "aria-valuenow": String(Math.round((s.ratio ?? 0.5) * 100)),
+        "aria-label": "Resize the split",
+      });
       Object.assign(el.style, { left: `${s.x}px`, top: `${s.y}px`, width: `${s.w}px`, height: `${s.h}px` });
       el.addEventListener("pointerdown", (e) => startSash(e, s));
+      // The same commit as a drag, from the keyboard: one `tile` per keypress,
+      // which is one intention and one audit row.
+      el.addEventListener("keydown", (e) => {
+        const forward = s.dir === "row" ? "ArrowRight" : "ArrowDown";
+        const back = s.dir === "row" ? "ArrowLeft" : "ArrowUp";
+        if (e.key !== forward && e.key !== back) return;
+        e.preventDefault();
+        const by = (e.shiftKey ? 0.1 : 0.02) * (e.key === forward ? 1 : -1);
+        const ratio = Math.min(0.9, Math.max(0.1, Math.round(((s.ratio ?? 0.5) + by) * 1000) / 1000));
+        call("tile", { id: s.a, with: s.b, ratio }).catch((err) => { if (err?.code !== "stale_rev") toastError("Could not resize the split", err); });
+      });
       return el;
     }));
   }
@@ -343,6 +361,9 @@ export function createDesktop({ root, ctx = {} }) {
       onTitle: (title) => call("windowSet", { id: win.id, title }).catch(() => {}),
       onResize: (w, hh) => call("resize", { id: win.id, ...(w ? { w } : {}), ...(hh ? { h: hh } : {}) }).catch(() => {}),
       onClose: () => call("close", { id: win.id }).catch(() => {}),
+      // Escape inside the app: focus comes back out to the window's title bar,
+      // so the keyboard is the shell's again (goal.md T4.5).
+      onFocusOut: () => wins.get(win.id)?.bar?.focus?.(),
     });
     fill(body, frame);
     appSession(win.app).then((s) => {
@@ -405,7 +426,36 @@ export function createDesktop({ root, ctx = {} }) {
     const { body, frame, stop } = appContent(win, meta);
 
     const title = h("span.os-title", win.title);
-    const bar = h("div.os-titlebar", null,
+    // A window is a group with a name, and its title bar is focusable: that is
+    // what makes a keyboard-only path to "this window" exist at all, and where
+    // focus lands when an app hands it back.
+    const bar = h("div.os-titlebar", {
+      tabindex: "0",
+      role: "toolbar",
+      "aria-label": `${win.title} — window controls`,
+      onkeydown: (e) => {
+        // The window's own keyboard, on its chrome: move it, size it, close it,
+        // without a pointer.
+        const step = e.shiftKey ? 40 : 8;
+        const w = doc().windows.find((x) => x.id === win.id);
+        if (!w) return;
+        if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") {
+          if (e.altKey) {
+            e.preventDefault();
+            const dw = e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0;
+            const dh = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
+            call("resize", { id: win.id, w: Math.max(200, w.w + dw), h: Math.max(120, w.h + dh) }).catch(() => {});
+            return;
+          }
+          e.preventDefault();
+          const dx = e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0;
+          const dy = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
+          call("move", { id: win.id, x: Math.max(0, w.x + dx), y: Math.max(0, w.y + dy) }).catch(() => {});
+          return;
+        }
+        if (e.key === "Enter") { e.preventDefault(); raise(win.id); (wins.get(win.id)?.body?.querySelector("input, textarea, button, [tabindex]") ?? bar).focus?.(); }
+      },
+    },
       h("div.os-lights", null,
         h("button.close", { title: "Close", onclick: (e) => { e.stopPropagation(); closeWindow(win.id); } }),
         h("button.min", { title: "Minimise", onclick: (e) => { e.stopPropagation(); call("windowSet", { id: win.id, min: true }); } }),
@@ -428,7 +478,10 @@ export function createDesktop({ root, ctx = {} }) {
     );
 
     const grip = h("div.os-resize");
-    const el = h("div.os-window", null, bar, body, grip);
+    const el = h("div.os-window", {
+      role: "group",
+      "aria-label": win.title,
+    }, bar, body, grip);
     el.dataset.id = win.id;
 
     bar.addEventListener("pointerdown", (e) => startDrag(e, win.id, "win"));

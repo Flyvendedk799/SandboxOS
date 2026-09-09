@@ -232,6 +232,62 @@ try {
   check(true, "⌘? shows the cheat sheet");
   await page.keyboard.press("Escape");
 
+  // ── Keyboard only, and named ──────────────────────────────────────────────
+  //
+  // An OS you can only drive with a mouse is a mock-up of one (goal.md T4.5).
+  // This drives the real thing with the keyboard and checks that the chrome
+  // announces itself.
+  const roles = await page.evaluate(() => ({
+    menubar: document.querySelector('.os-menubar')?.getAttribute('role'),
+    dock: document.querySelector('.os-dock')?.getAttribute('role'),
+    dockLabel: document.querySelector('.os-dock')?.getAttribute('aria-label'),
+    desktop: document.querySelector('.os-desktop')?.getAttribute('role'),
+    window: document.querySelector('.os-window')?.getAttribute('aria-label'),
+    titlebar: document.querySelector('.os-window .os-titlebar')?.getAttribute('tabindex'),
+  }));
+  check(roles.menubar === 'menubar' && roles.dock === 'toolbar' && roles.desktop === 'main',
+    `the chrome has roles (${roles.menubar}/${roles.dock}/${roles.desktop})`);
+  check(!!roles.window && !!roles.dockLabel, 'and names a screen reader can read');
+  check(roles.titlebar === '0', 'a window title bar is focusable');
+
+  // Move a window with the keyboard alone, through its title bar.
+  await desktop('layoutSet', { mode: 'floating' });
+  const kbWin = (await desktop('state')).doc.windows[0];
+  await page.focus(`.os-window[data-id="${kbWin.id}"] .os-titlebar`);
+  const kbBefore = (await desktop('state')).doc.windows.find((w) => w.id === kbWin.id);
+  await page.keyboard.press('ArrowRight');
+  await page.waitForTimeout(500);
+  const kbAfter = (await desktop('state')).doc.windows.find((w) => w.id === kbWin.id);
+  check(kbAfter.x === kbBefore.x + 8, `arrow keys move the focused window (${kbBefore.x} → ${kbAfter.x})`);
+  await page.keyboard.down('Alt');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.up('Alt');
+  await page.waitForTimeout(500);
+  const kbSized = (await desktop('state')).doc.windows.find((w) => w.id === kbWin.id);
+  check(kbSized.h === kbAfter.h + 8, `alt+arrow resizes it (${kbAfter.h} → ${kbSized.h})`);
+
+  // A sash is a separator you can move without a pointer.
+  await desktop('layoutSet', { mode: 'tiling', preset: 'master-stack' });
+  await page.waitForSelector('.os-sash', { timeout: 8_000 });
+  const sashRatio = () => desktop('state').then((s) => s.doc.workspaces.find((w) => w.n === s.doc.activeWorkspace).layout.ratio);
+  const ratioBefore = await sashRatio();
+  check(await page.$eval('.os-sash', (el) => el.getAttribute('role') === 'separator' && el.getAttribute('tabindex') === '0'),
+    'a sash is a focusable separator');
+  await page.focus('.os-sash');
+  await page.keyboard.press('ArrowRight');
+  await page.waitForTimeout(600);
+  check((await sashRatio()) > ratioBefore, `and arrow keys resize the split (${ratioBefore} → ${await sashRatio()})`);
+  await desktop('layoutSet', { mode: 'floating' });
+
+  // An overlay takes focus, so Escape and typing mean what they look like.
+  await page.keyboard.press('Control+k');
+  await page.waitForSelector('.os-spotlight input');
+  const focused = await page.evaluate(() => document.activeElement?.tagName?.toLowerCase());
+  check(focused === 'input', `an overlay takes focus (${focused})`);
+  check(await page.$eval('.os-spotlight', (el) => el.getAttribute('aria-modal') === 'true'), 'and says it is a dialog');
+  await page.keyboard.press('Escape');
+
+
   // Compact: 390px wide.
   await page.setViewportSize({ width: 390, height: 800 });
   await page.waitForTimeout(400);

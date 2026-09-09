@@ -337,7 +337,11 @@ Both compilers are closed by construction, because the input is agent-writable:
   set of sliders over exactly that grammar.
 
 Every built-in theme passes a contrast check in the test suite (body text AA on
-panels, muted text AA-large). `animation.reducedMotion` decides whether a viewer's
+panels, muted text AA-large) — and so does a theme *you* invent: `themeDefine` runs
+`checkContrast` and returns the warnings with its result, refusing only the case
+nobody could work with (body text under 2:1 on its own panels), which it rolls back
+rather than leaving behind. The rules and the ratio arithmetic live in
+`packages/os/src/themes.js`, shared with the browser like every other pure module. `animation.reducedMotion` decides whether a viewer's
 `prefers-reduced-motion` wins (`auto`, the default) or the preset does (`ignore`);
 the decision is per viewer and written nowhere. Chrome transitions read the motion
 tokens rather than hard-coded times, so "Instant" really is.
