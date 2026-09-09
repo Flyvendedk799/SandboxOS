@@ -1775,15 +1775,24 @@ export function desktopServer(deps) {
           const applied = [];
           let failure = null;
           for (const op of found.ops) {
-            try {
-              await self.tools[op.tool].handler(ctx, op.args ?? {});
-              applied.push(op.tool);
-            } catch (err) {
-              // Partial application is reported, not hidden: the ops that ran are
-              // each their own revision, and revert can take them back.
-              failure = { tool: op.tool, error: err?.message ?? String(err) };
-              break;
-            }
+            // Each op goes back through the Kernel rather than straight to the
+            // handler. Calling handlers directly would have made
+            // `desktop.applyProposal` a way to run every desktop tool without
+            // holding it — the hostile-day test caught exactly that. Through the
+            // Kernel, an op is authorized against the *applier's* own grants and
+            // audited as its own row, which is also better provenance: the log
+            // shows what was actually done, not one opaque "applied".
+            const r = await kernel.call({
+              principalId: ctx?.principalId ?? null,
+              heldPatterns: ctx?.heldPatterns ?? [],
+              server: "desktop", tool: op.tool, args: op.args ?? {},
+              onBehalfOf: found.by && found.by !== ctx?.principalId ? found.by : null,
+            });
+            if (r.ok) { applied.push(op.tool); continue; }
+            // Partial application is reported, not hidden: the ops that ran are
+            // each their own revision, and revert can take them back.
+            failure = { tool: op.tool, error: r.error, ...(r.code ? { code: r.code } : {}) };
+            break;
           }
           const next = mutateOs(sandbox, (d) => {
             d.proposals = (d.proposals ?? []).filter((p) => p.id !== a.id);

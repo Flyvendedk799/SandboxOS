@@ -166,3 +166,20 @@ test("what the dialog promises is what the payload does", async () => {
   const asText = JSON.stringify(payload);
   assert.equal(asText.includes("\"secrets\":{\"") && asText.includes("value"), false, "nor a secret value");
 });
+
+// ── attenuation is an intersection, and "everything" is not a declaration ───
+
+test("a declared pattern is narrowed to what the opener holds", async () => {
+  const { effectivePermissions, withheldPermissions } = await import("../packages/os/src/apps.js");
+  // The useful case: a generously-declared app is not useless to a narrow user.
+  assert.deepEqual(effectivePermissions(["fs.*"], ["fs.read"]), ["fs.read"]);
+  assert.deepEqual(effectivePermissions(["fs.*", "proc.exec"], ["fs.read", "fs.write"]), ["fs.read", "fs.write"]);
+  // Never widened.
+  assert.deepEqual(effectivePermissions(["fs.*"], ["proc.exec"]), []);
+  assert.deepEqual(effectivePermissions(["fs.read"], ["fs.*"]), ["fs.read"]);
+  // And "give me everything" is not a declaration the OS will fill in.
+  assert.deepEqual(effectivePermissions(["*"], ["fs.read", "proc.exec"]), []);
+  assert.deepEqual(effectivePermissions(["*"], ["*"]), ["*"]);
+  // What was asked for and not granted whole is still named.
+  assert.deepEqual(withheldPermissions(["fs.*", "secrets.put"], ["fs.read"]), ["fs.*", "secrets.put"]);
+});

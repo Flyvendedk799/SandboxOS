@@ -84,17 +84,40 @@ export function patternCovers(held, wanted) {
 }
 
 /**
- * The capabilities an app frame actually gets: the intersection of what it
- * declared and what the human opening it holds. An app can never be granted more
- * than the person running it, and asking for more than you hold is not an error —
- * it just does not arrive. Attenuation, applied at the door.
+ * The capabilities an app frame actually gets: the *intersection* of what it
+ * declared and what the human opening it holds.
+ *
+ * The word intersection is load-bearing, and it used not to be. An app asking
+ * for `fs.*` from someone who holds only `fs.read` got **nothing**, because the
+ * check was "is this request fully covered". That is safe but wrong: it makes a
+ * generously-declared app useless to a narrow user, and it teaches app authors
+ * to ask for less than they need. So a declared pattern is narrowed to the parts
+ * the opener actually holds — `fs.*` ∩ {`fs.read`} is `fs.read` — and never
+ * widened: an app can still never hold more than the person who opened it.
+ *
+ * One deliberate exception: a bare `*` is *not* narrowed. An app that declares
+ * "everything" has not declared anything, and the OS will not fill that in on
+ * its behalf — it gets what a literal `*` grant covers, which is to say nothing
+ * unless its opener really did hand it the whole machine. Name what you need.
  */
 export function effectivePermissions(requested, held) {
   const want = cleanPatterns(requested);
-  return want.filter((p) => held.some((h) => patternCovers(h, p)));
+  const out = new Set();
+  for (const p of want) {
+    if (held.some((h) => patternCovers(h, p))) { out.add(p); continue; }
+    if (p === "*") continue;   // "everything" is not a declaration
+    // Not covered whole; take the parts of it the opener does hold.
+    for (const h of held) if (patternCovers(p, h)) out.add(h);
+  }
+  return [...out];
 }
 
-/** Requested patterns the opener could not grant — shown in the UI, not thrown. */
+/**
+ * What the opener could not grant, as the app asked for it — shown in the UI,
+ * never thrown. A pattern that was *narrowed* rather than refused still appears
+ * here, because "you asked for fs.* and got fs.read" is something the app and
+ * the person should both be able to see.
+ */
 export function withheldPermissions(requested, held) {
   const want = cleanPatterns(requested);
   return want.filter((p) => !held.some((h) => patternCovers(h, p)));
