@@ -479,6 +479,29 @@ try {
   check(/since the last save/.test(diffText), `the diff says what has changed since the last save (${diffText.trim().slice(0, 60)})`);
   await studio.keyboard.press("Escape");
 
+  // Reviewing an agent's change without opening a second tool (goal.md T2.3).
+  // The proposal is made through the tool an assistant turn would call, because a
+  // model turn needs a credential this host may not have — what is being checked
+  // is the review, not the model.
+  await desktop("propose", {
+    label: "tidy and theme",
+    ops: [{ tool: "arrange", args: { preset: "grid", viewport: { w: 1400, h: 900 } } }, { tool: "themeSet", args: { theme: "aurora" } }],
+  });
+  await studio.waitForSelector(".proposal", { timeout: 8_000 });
+  const proposalText = await studio.textContent(".proposal");
+  check(/tidy and theme/.test(proposalText), "an agent's change waits in the Studio's agent panel");
+  check(/would change/.test(proposalText) && /windows/.test(proposalText) && /theme/.test(proposalText),
+    `it says which parts of the document it would touch (${proposalText.replace(/s+/g, " ").slice(0, 90)})`);
+  check(/desktop.arrange/.test(proposalText) && /desktop.themeSet/.test(proposalText), "and the exact calls it holds");
+  const themeBefore = (await desktop("state")).doc.theme.base;
+  await studio.click(".proposal .app-btn.primary");
+  await studio.waitForTimeout(900);
+  check((await desktop("state")).doc.theme.base === "aurora", `Apply runs them (${themeBefore} → aurora)`);
+  check(!!(await studio.$(".proposal.applied")), "and what was applied stays on screen");
+  check(!!(await studio.$(".proposal.applied .app-btn:has-text('What changed')")), "with the measured diff a click away");
+  await studio.click(".proposal.applied .app-btn:has-text('Dismiss')");
+  await desktop("themeSet", { theme: "midnight" });
+
   // Settings reshapes the desktop without the Studio.
   await desktop("open", { app: "settings" });
   await studio.waitForSelector(".stx-viewport .os-window .kv", { timeout: 8_000 });
