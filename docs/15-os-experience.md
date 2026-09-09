@@ -119,7 +119,7 @@ The syscall surface for the OS. Grouped, and complete:
 
 | group | tools |
 |---|---|
-| document | `get` · `state` · `summarize` · `silhouette` · `set` · `patch` · `rename` · `history` · `revert` · `reset` |
+| document | `get` · `state` · `summarize` · `silhouette` · `set` · `patch` · `rename` · `history` · `revert` (whole or `only:[…]`) · `revertScopes` · `reset` |
 | appearance | `themeList` · `themeSet` · `themeDefine` · `themeRemove` · `wallpaperSet` · `animationList` · `animationSet` · `animationDefine` · `animationRemove` |
 | chrome | `dockSet` · `dockPin` · `shellSet` · `layoutSet` · `tile` · `associate` |
 | workspaces | `workspaceList` · `workspaceAdd` · `workspaceRemove` · `workspaceRename` · `workspaceSwitch` |
@@ -193,6 +193,24 @@ it on, the assistant's `desktop.*` *writes* are captured into one proposal per t
 (reads pass through — an agent that cannot look at the desktop cannot propose anything
 sensible about it), the system prompt says so, and the panel shows each proposal as a
 list of calls with Apply and Discard.
+
+### An undo you can aim
+
+An agent's change is usually several revisions — it aligned the windows, then
+added a widget — and rewinding past the alignment used to take the widget with it.
+Writing the day script (§10 A of `goal.md`) made that concrete: "apply, then undo the
+alignment only" was in the specification and was not possible.
+
+`desktop.revert { rev }` still restores the whole document. `revert { rev, only:
+["windows"] }` restores just those parts and leaves everything else as it is now;
+`desktop.revertScopes` lists what can be aimed at (windows, widgets, workspaces, theme,
+animation, wm, shell, apps, widgetKinds, notifications). Restoring windows also carries
+the stacking counter forward rather than backwards, so the next window opened does not
+land underneath one already on screen. Either way the undo is itself a revision, so it
+can be undone.
+
+The Studio's History panel offers the same aim: the revert dialog lists the parts
+that actually differ in that revision, with "everything in this revision" first.
 
 ### Checkpoints: a desktop you meant to come back to
 

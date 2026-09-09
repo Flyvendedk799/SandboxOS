@@ -552,15 +552,46 @@ export function createBuilder({ onOpenCode } = {}) {
     return parts.length ? parts.join(" · ") : "identical to now";
   }
 
+  // What an undo can be aimed at, in the words the diff uses. An agent's change
+  // is usually several revisions — it aligned the windows, then added a widget —
+  // and rewinding past the alignment used to take the widget with it. So the
+  // dialog offers the parts that actually differ, and "everything" stays first.
+  const PART_LABELS = {
+    windows: "just the windows", widgets: "just the widgets", workspaces: "just the workspaces",
+    theme: "just the theme", animation: "just the motion", wm: "just the layout mode",
+    shell: "just the shell (dock, menubar, keys)", apps: "just the apps", widgetKinds: "just the widget kinds",
+  };
+
+  function changedParts(diff) {
+    if (!diff) return [];
+    const moved = (x) => !!x && (x.added || x.removed || x.changed);
+    return Object.keys(PART_LABELS).filter((k) => (Array.isArray(diff[k]) ? diff[k].length : moved(diff[k])));
+  }
+
   async function revertTo(rev) {
-    let summary = "";
-    try { summary = diffSummary((await call("history", { rev: rev.rev })).diff); } catch { /* fine */ }
-    const ok = await confirmDialog(`Go back to revision ${rev.rev}?`,
-      `${rev.label || "unlabelled"} · ${when(rev.ts)}. Restoring changes: ${summary}. The restore is itself a new revision, so it can be undone.`,
-      { confirmLabel: "Revert", danger: false });
-    if (!ok) return;
-    try { await call("revert", { rev: rev.rev }); await loadOs(); toast(`Back at r${rev.rev}`, { kind: "ok" }); }
-    catch (e) { toastError("Could not revert", e); }
+    let diff = null;
+    try { diff = (await call("history", { rev: rev.rev })).diff; } catch { /* fine */ }
+    const summary = diff ? diffSummary(diff) : "";
+    const parts = changedParts(diff);
+    const got = await dialog({
+      title: `Go back to revision ${rev.rev}?`,
+      message: `${rev.label || "unlabelled"} · ${when(rev.ts)}. Restoring changes: ${summary || "—"}. The restore is itself a new revision, so it can be undone.`,
+      fields: parts.length > 1
+        ? [{
+            name: "only", label: "Take back", type: "select", value: "",
+            options: [{ value: "", label: "everything in this revision" }, ...parts.map((p) => ({ value: p, label: PART_LABELS[p] }))],
+            hint: "Aim it at one part and everything else stays as it is now.",
+          }]
+        : [],
+      confirmLabel: "Revert",
+    });
+    if (!got) return;
+    const only = typeof got === "object" && got.only ? [got.only] : null;
+    try {
+      await call("revert", { rev: rev.rev, ...(only ? { only } : {}) });
+      await loadOs();
+      toast(only ? `${PART_LABELS[only[0]]} back at r${rev.rev}` : `Back at r${rev.rev}`, { kind: "ok" });
+    } catch (e) { toastError("Could not revert", e); }
   }
 
   async function showDiff(rev, host) {

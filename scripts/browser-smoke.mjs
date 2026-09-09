@@ -40,8 +40,9 @@ const port = srv.address().port;
 const base = `http://127.0.0.1:${port}`;
 const session = createSession(owner.id, "session");
 
-const candidates = [process.env.CHROME, "/opt/pw-browsers/chromium-1194/chrome-linux/chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"].filter(Boolean);
-const executablePath = candidates.find((p) => { try { return fs.existsSync(p); } catch { return false; } });
+const { findChrome, noChromeMessage } = await import("./lib/chrome.mjs");
+const executablePath = findChrome();
+if (!executablePath) { console.error(noChromeMessage()); process.exit(2); }
 const browser = await chromium.launch({ executablePath, args: ["--no-sandbox"] });
 const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
 await ctx.addCookies([{ name: "sbx_session", value: session, url: base }]);

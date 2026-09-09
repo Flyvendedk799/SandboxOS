@@ -198,12 +198,41 @@ export function osHistoryEntry(sandbox, rev) {
   return doc ? { ...entry, doc } : null;
 }
 
-/** Restore a previous revision. The restore is itself a new revision — history
- *  moves forward, so an undo can always be undone. */
-export function revertOs(sandbox, rev) {
+/**
+ * The parts of the document an undo can be aimed at. Everything here is a
+ * top-level section that means something on its own: taking back an alignment
+ * should not take back the widget somebody added afterwards.
+ */
+export const REVERT_SCOPES = Object.freeze([
+  "windows", "widgets", "workspaces", "theme", "animation", "wm", "shell",
+  "apps", "widgetKinds", "notifications",
+]);
+
+/**
+ * Restore a previous revision. The restore is itself a new revision — history
+ * moves forward, so an undo can always be undone.
+ *
+ * With `only`, it restores just those sections and leaves the rest of the
+ * document as it is now. That is what makes "undo the alignment, keep the
+ * widget" a thing you can actually do: an agent's change is several revisions,
+ * and being able to take back one of them without losing the others is the
+ * difference between history you can use and history you can only rewind.
+ */
+export function revertOs(sandbox, rev, { only = null } = {}) {
   const entry = osHistoryEntry(sandbox, rev);
   if (!entry) throw new Error(`no such revision: ${rev}`);
-  return writeDoc(sandbox, entry.doc, { op: "revert", label: `revert to rev ${rev}` });
+  if (!only?.length) return writeDoc(sandbox, entry.doc, { op: "revert", label: `revert to rev ${rev}` });
+
+  const scopes = [...new Set(only.map(String))];
+  const unknown = scopes.filter((k) => !REVERT_SCOPES.includes(k));
+  if (unknown.length) throw new Error(`cannot revert '${unknown.join("', '")}' — try ${REVERT_SCOPES.join(", ")}`);
+  const current = loadOs(sandbox);
+  const merged = { ...current };
+  for (const k of scopes) merged[k] = entry.doc[k];
+  // zTop follows the windows: restoring old geometry with a stale stacking
+  // counter would let the next opened window land underneath one of them.
+  if (scopes.includes("windows")) merged.zTop = Math.max(current.zTop ?? 0, entry.doc.zTop ?? 0);
+  return writeDoc(sandbox, merged, { op: "revert", label: `revert ${scopes.join(", ")} to rev ${rev}` });
 }
 
 // ---- checkpoints -----------------------------------------------------------

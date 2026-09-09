@@ -165,7 +165,13 @@ export class LocalBackend {
     proc.on("exit", () => { clearTimeout(first); cleanup(); close(); });
     return {
       write(data) { try { proc.stdin?.write(data); } catch { /* the session is going away */ } },
-      kill()      { cleanup(); try { proc.kill("SIGKILL"); } catch { /* already gone */ } },
+      // Ending a session ends what the session started. `cleanup` is the whole
+      // of it: killTree walks the tree down from the wrapper, and killing our own
+      // child alongside it would race that walk — on Windows `taskkill /T` reads
+      // the tree at the moment it runs, so a dead parent means an orphaned dev
+      // server still holding its port, which is exactly the thing "end this
+      // shell" is supposed to prevent.
+      kill()      { cleanup(); },
       resize,
     };
   }

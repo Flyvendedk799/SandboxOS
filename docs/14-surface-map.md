@@ -141,7 +141,8 @@ Exposure lives in the manifest, so it survives hibernate/wake and travels with a
 **`metrics`** — `snapshot` `history` `activity` `recent`
 **`apps`** — `list` `install` `remove` `launch` (launch mints a scoped token)
 **`desktop`** — the OS itself. Document: `get` `state` `summarize` `silhouette` `set`
-`patch` `rename` `history` (with `rev` → a structural diff) `revert` `reset`.
+`patch` `rename` `history` (with `rev` → a structural diff) `revert` (whole, or
+`only: ["windows"]` to take back one part and leave the rest) `revertScopes` `reset`.
 Appearance: `themeList` `themeSet` `themeDefine` `themeRemove` `wallpaperSet`
 `animationList` `animationSet` `animationDefine` `animationRemove`. Chrome: `dockSet`
 `dockPin` `shellSet` `layoutSet` (mode, gap, grid, and the tiling tree: `preset` or

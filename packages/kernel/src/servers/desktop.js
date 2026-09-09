@@ -23,7 +23,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 import {
-  loadOs, mutateOs, saveOs, resetOs, osHistory, osHistoryEntry, revertOs, announce,
+  loadOs, mutateOs, saveOs, resetOs, osHistory, osHistoryEntry, revertOs, REVERT_SCOPES, announce,
   normalizeDoc, normApp, normWidgetKind, cleanTokens, cleanAnimation, cleanPatterns,
   isId, rid, LIMITS, DOCK_POSITIONS, WM_MODES, resolveAlias,
   buildTree, treeBoxes, treeLeaves, splitFor, setRatio, setDir, swapLeaves, normalizeTree, describeTree, TREE_PRESETS,
@@ -311,12 +311,22 @@ export function desktopServer(deps) {
       },
 
       revert: {
-        description: "Restore a previous revision (itself recorded as a new revision).",
-        inputSchema: obj({ rev: N }, ["rev"]),
+        description:
+          "Restore a previous revision (itself recorded as a new revision). Pass only:['windows'] to take back " +
+          "just part of it — undo an alignment without losing the widget that was added after it.",
+        inputSchema: obj({ rev: N, only: { type: "array", items: { type: "string", enum: [...REVERT_SCOPES] } } }, ["rev"]),
         async handler(_ctx, a) {
-          const next = revertOs(sandbox, a.rev);
-          return { ok: true, rev: next.rev, restored: Number(a.rev) };
+          const only = Array.isArray(a.only) && a.only.length ? a.only : null;
+          const next = revertOs(sandbox, a.rev, { only });
+          await syncServers();
+          return { ok: true, rev: next.rev, restored: Number(a.rev), ...(only ? { only } : {}) };
         },
+      },
+
+      revertScopes: {
+        description: "The parts of the desktop an undo can be aimed at, for revert's only:[…].",
+        inputSchema: obj({}),
+        async handler() { return { scopes: [...REVERT_SCOPES] }; },
       },
 
       reset: {
