@@ -133,3 +133,45 @@ test("Observability rows open the audit log on that tool", () => {
   assert.match(builtins, /onclick: \(\) => openAudit\(\{ server: t\.server, tool: t\.tool \}\)/, "a per-tool row");
   assert.match(builtins, /onclick: \(\) => openAudit\(\{ server: e\.server, tool: e\.tool \}\)/, "and a slowest-call row");
 });
+
+// ── T3.3 · a routine success is recorded, not announced ────────────────────
+
+test("a job that finished cleanly is quiet; one that failed is not", async () => {
+  notifyJobEnded(sandbox, { id: "job_ok", name: "tests", state: "exited", code: 0 });
+  const clean = loadOs(sandbox).notifications.at(-1);
+  assert.equal(clean.quiet, true, "worth recording, not worth interrupting for");
+  assert.equal(clean.kind, "ok");
+
+  notifyJobEnded(sandbox, { id: "job_bad", name: "tests", state: "failed", code: 1 });
+  const bad = loadOs(sandbox).notifications.at(-1);
+  assert.equal(bad.quiet, undefined, "a failure comes through");
+
+  notifyJobEnded(sandbox, { id: "job_stop", name: "tests", state: "stopped" });
+  assert.equal(loadOs(sandbox).notifications.at(-1).quiet, undefined, "and so does a stop, which you did on purpose");
+
+  // Either way it is recorded identically: quiet is about interruption, never
+  // about the record.
+  const all = loadOs(sandbox).notifications.slice(-3);
+  assert.ok(all.every((n) => n.title && n.body && n.ts && n.action), "every one is a full row");
+});
+
+test("do-not-disturb still marks everything else quiet, and keeps it", async () => {
+  await ok("desktop", "shellSet", { notifications: { dnd: true, allow: ["agents"] } });
+  const before = loadOs(sandbox).notifications.length;
+  notifyJobEnded(sandbox, { id: "job_dnd", name: "during dnd", state: "failed", code: 2 });
+  const n = loadOs(sandbox).notifications.at(-1);
+  assert.equal(n.quiet, true, "a failure during do-not-disturb is recorded quietly, not dropped");
+  assert.equal(loadOs(sandbox).notifications.length, before + 1);
+
+  // Agents are on the allow list, so they still come through.
+  notifyAgentEnded(sandbox, { id: "agt_dnd", name: "worker" }, "done");
+  assert.equal(loadOs(sandbox).notifications.at(-1).quiet, undefined, "what you allowed still interrupts");
+  await ok("desktop", "shellSet", { notifications: { dnd: false } });
+});
+
+test("the panel shows a quiet one as recorded rather than as news", () => {
+  const shell = read("../apps/gateway/public/js/os/shell.js");
+  assert.match(shell, /\$\{n\.quiet \? " quiet" : ""\}/, "the row carries the class");
+  const css = read("../apps/gateway/public/os.css");
+  assert.match(css, /\.notif\.quiet \{ opacity/, "and it is de-emphasised rather than hidden");
+});

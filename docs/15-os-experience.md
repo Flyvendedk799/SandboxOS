@@ -283,6 +283,27 @@ have not read. A tool that takes no arguments also has a **Run**, which does.
 Spotlight itself now carries the whole catalogue, so the handoff lands on a row
 that works.
 
+### Recorded, or announced
+
+Attention is the user's, and the mechanism is one flag rather than a queue with
+timers. `notifyOs` marks a notification `quiet` when do-not-disturb is on and its
+source is not on the allow list — *or* when the caller asks for quiet on its own
+account. A supervised job that exited cleanly asks: it is worth recording and not
+worth interrupting for. A failure or a stop does not.
+
+That is what T3.3's "batched" means here. The notification centre already groups by
+who is talking — the machine's processes, agents, then each app — so a routine
+success lands where you look for it rather than in front of you, and reads as
+recorded rather than as news. Nothing in this OS toasts a notification away: the
+record is identical either way, because `quiet` is about interruption and never
+about the record.
+
+The keyboard is deliberately *not* per-workspace, which T3.2 left as a judgement
+("per-workspace where that makes sense"). Muscle memory that changes when you switch
+workspace is worse than no remapping at all. What the keymap does have is conflict
+detection: `keySet` refuses a chord that already belongs to another action and names
+the one it would have broken.
+
 ### Snapshots on a schedule
 
 A scheduled snapshot is not a new mechanism: it is a `cron` job that calls

@@ -1555,3 +1555,8 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
 .code-diff-line.add .mk, .code-diff-line.add .tx { color: var(--stx-ok, #43d17f); }
 .code-diff-line.del { background: color-mix(in srgb, var(--stx-err, #ff6b6b) 12%, transparent); }
 .code-diff-line.del .mk, .code-diff-line.del .tx { color: var(--stx-err, #ff6b6b); }
+
+/* A notification that was recorded rather than announced: present, readable, and
+   clearly not asking for anything (goal.md T3.3). */
+.notif.quiet { opacity: .68; }
+.notif.quiet .hd b { font-weight: 550; }

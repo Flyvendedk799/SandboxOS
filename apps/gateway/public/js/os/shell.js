@@ -281,7 +281,9 @@ export function createScreen({ ctx = {} } = {}) {
         list.length ? h("button.app-btn", { onclick: () => { call("notificationsClear", {}); hideOverlay(); } }, "Clear all") : null),
       ...(list.length ? [...groups.entries()].flatMap(([g, items]) => [
         h("div.os-label", { style: { marginBottom: "6px" } }, g),
-        ...items.map((n) => h("div.notif", { class: `${n.kind}${n.action || true ? " link" : ""}`, title: "Open", onclick: () => { hideOverlay(); followNotification(n); } },
+        // A quiet one is here because it was recorded, not because it wanted
+        // your attention: it reads as such rather than looking like news.
+        ...items.map((n) => h("div.notif", { class: `${n.kind} link${n.quiet ? " quiet" : ""}`, title: "Open", onclick: () => { hideOverlay(); followNotification(n); } },
           h("div.hd", null, h("b", n.title), h("span", ago(n.ts)),
             h("button.dismiss", { title: "Dismiss", "aria-label": "Dismiss", onclick: (e) => { e.stopPropagation(); call("notificationsClear", { id: n.id }).catch(() => {}); e.currentTarget.closest(".notif")?.remove(); } }, icon("x", 10))),
           n.body ? h("p", n.body) : null)),

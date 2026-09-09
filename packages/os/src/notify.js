@@ -30,7 +30,7 @@ export function hasOs(sandbox) {
  *
  * @returns {boolean} whether it was delivered
  */
-export function notifyOs(sandbox, { app = "system", title, body = "", kind = "info", source = "system", action = null } = {}) {
+export function notifyOs(sandbox, { app = "system", title, body = "", kind = "info", source = "system", action = null, quiet: askedQuiet = false } = {}) {
   if (!sandbox || !title || !hasOs(sandbox)) return false;
   try {
     mutateOs(sandbox, (d) => {
@@ -39,8 +39,13 @@ export function notifyOs(sandbox, { app = "system", title, body = "", kind = "in
       // recorded exactly as it would have been, and marked `quiet` so no
       // surface interrupts anyone with it. The decision is made here, once, so
       // a phone, a second tab and the terminal renderer all agree (T3.3).
+      // A caller can also ask for quiet on its own account: a routine success
+      // belongs in the notification centre, not in front of somebody. "Batched"
+      // in goal.md T3.3 means exactly this — collected where you look for it
+      // rather than announced — and it is one flag rather than a queue with
+      // timers, because the centre already groups by who is talking.
       const n = d.shell?.notifications ?? {};
-      const quiet = !!n.dnd && !(n.allow ?? []).includes(source);
+      const quiet = askedQuiet || (!!n.dnd && !(n.allow ?? []).includes(source));
       d.notifications.push({
         id: rid("n"),
         app: String(app).slice(0, LIMITS.nameLen),
@@ -67,6 +72,9 @@ export function notifyJobEnded(sandbox, job) {
   return notifyOs(sandbox, {
     app: "Processes",
     source: "procs",
+    // Exited cleanly: worth recording, not worth interrupting for. A failure or
+    // a stop is the other thing, and it comes through.
+    quiet: ok,
     kind: ok ? "ok" : job.state === "stopped" ? "info" : "err",
     title: ok ? `${job.name} finished` : job.state === "stopped" ? `${job.name} stopped` : `${job.name} failed`,
     body: job.state === "stopped"
