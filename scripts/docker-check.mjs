@@ -171,6 +171,34 @@ try {
   }, 15_000);
   check(released, "stopping the job frees the port inside the container");
 
+  // ── an orphan from a Gateway that is gone ─────────────────────────────────
+  //
+  // The case the shutdown path cannot cover. A Gateway that is SIGKILLed — by a
+  // supervisor, an OOM, a power cut — runs no handler, and the job it started
+  // keeps running inside the container holding its port, with nothing left that
+  // knows it exists. So the rule lives at the other end: adopting a Cell that is
+  // already up means everything in it belongs to somebody dead.
+  //
+  // Running the reaper under an identity that is not ours *is* that situation,
+  // seen from inside the container: the job carries this boot's stamp, and the
+  // reaper carries the next one's.
+  const { reapScript } = await import("../packages/cell/src/orphans.js");
+  const orphan = await ok("proc", "start", { cmd: server.cmd(8098, firstRunBindHost("docker")), name: "orphan" });
+  const holding = await until(async () => (await ok("ports", "scan", {})).listening?.some((p) => p.port === 8098));
+  check(holding, "a second server is listening, and nothing has been told to stop it");
+
+  const reaped = await ok("proc", "exec", { cmd: reapScript("00000000deadbeef") });
+  check(reaped.stdout.trim().split("\n").filter(Boolean).length > 0,
+    `the reaper found the orphan (pids ${JSON.stringify(reaped.stdout.trim())})`);
+  const freed = await until(async () => !(await ok("ports", "scan", {})).listening?.some((p) => p.port === 8098), 15_000);
+  check(freed, "adopting the Cell frees the port a dead Gateway's job was holding");
+
+  // And it is a reaper, not a bomb: the container's own init has no stamp, so it
+  // is not ours to kill — and if it had been, nothing below would answer.
+  const alive = await ok("proc", "exec", { cmd: "echo still-here" });
+  check(alive.stdout.includes("still-here"), "the container itself survived being tidied");
+  await ok("proc", "stop", { id: orphan.id }).catch(() => {});
+
   // ── a shell session in a container ────────────────────────────────────────
   let saw = "";
   const s = attachSession(kernel.cell, sandbox.id, { name: "container shell" }, (d) => { saw += d.toString(); }, () => {});

@@ -25,6 +25,7 @@ import { safeSpawn } from "./spawn.js";
 import config from "../../config/src/config.js";
 import { allocateTap, releaseTap, getTapForSandbox } from "../../control-db/src/registry.js";
 import { remoteHandle, newMarker, pidFile } from "./handles.js";
+import { BOOT_ID, bootEnv, reapOrphans } from "./orphans.js";
 
 const WORKDIR = "/sandbox";
 const GUEST_IP = "172.20.0.2";
@@ -179,7 +180,10 @@ export class FirecrackerBackend {
     // Check if already running via pidfile + socket.
     if (fs.existsSync(this.pidFile) && fs.existsSync(this.socketPath)) {
       const pid = parseInt(fs.readFileSync(this.pidFile, "utf8").trim(), 10);
-      try { process.kill(pid, 0); return { state: "running" }; } catch { /* stale pidfile */ }
+      try {
+        process.kill(pid, 0);
+        return { state: "running", reaped: await this._reap() };
+      } catch { /* stale pidfile */ }
     }
 
     await this._createOverlay();
@@ -259,16 +263,25 @@ export class FirecrackerBackend {
     ];
   }
 
+  /** See DockerBackend._reap. A microVM survives a Gateway restart the same way
+   *  a container does, so it inherits the same rule. */
+  async _reap() {
+    if (this._reaped) return 0;
+    this._reaped = true;
+    return reapOrphans((script) => sh("ssh", [...this._sshArgs(), script], { timeoutMs: 20_000 }),
+      `cell ${this.sandbox?.id ?? this.root}`);
+  }
+
   async exec(command, { timeoutMs = 30_000, env = {} } = {}) {
     await this.ensureRunning();
-    const envPrefix = Object.entries(env).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(" ");
+    const envPrefix = Object.entries({ ...bootEnv(), ...env }).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(" ");
     const fullCmd = envPrefix ? `cd ${WORKDIR} && ${envPrefix} sh -c ${JSON.stringify(command)}` : `cd ${WORKDIR} && sh -c ${JSON.stringify(command)}`;
     return sh("ssh", [...this._sshArgs(), fullCmd], { timeoutMs });
   }
 
   async execStream(command, callback, { timeoutMs = 30_000, env = {} } = {}) {
     await this.ensureRunning();
-    const envPrefix = Object.entries(env).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(" ");
+    const envPrefix = Object.entries({ ...bootEnv(), ...env }).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(" ");
     const inner = envPrefix ? `${envPrefix} sh -c ${JSON.stringify(command)}` : `sh -c ${JSON.stringify(command)}`;
     // Dropping the ssh client does not kill the process in the guest, so the
     // guest shell records its pid before becoming the command; the handle
@@ -294,7 +307,7 @@ export class FirecrackerBackend {
     await this.ensureRunning();
     const envVars = Object.entries({ ...env, TERM: "xterm-256color", COLUMNS: String(cols), LINES: String(rows) })
       .map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(" ");
-    const initCmd = `${envVars} cd ${WORKDIR} && exec sh -i`;
+    const initCmd = `export SANDBOXOS_BOOT=${BOOT_ID}; ${envVars} cd ${WORKDIR} && exec sh -i`;
     // -t -t forces PTY allocation even over a non-tty stdin — gives real resize.
     const proc = safeSpawn("ssh", [...this._sshArgs(["-t", "-t"]), initCmd], {
       stdio: ["pipe", "pipe", "pipe"],

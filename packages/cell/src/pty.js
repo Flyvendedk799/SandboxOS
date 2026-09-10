@@ -32,8 +32,18 @@ export function ptyWrapper(shellCmd = "/bin/sh -i", tmp = "/tmp") {
     `M="${tmp}/.sbx-tty-$1"`,
     'if command -v script >/dev/null 2>&1; then',
     // The inner command runs via the pty's own shell: record the tty, then exec.
-    `  exec script -qfc "tty > \\"$M\\" 2>/dev/null; exec ${shellCmd}" /dev/null`,
+    //
+    // Line 2 is the pid `cleanupScript` signals, and it has to be written here
+    // rather than inside the pty: `$$` is expanded by *this* shell, before it is
+    // replaced by `script`, so the number is the shell docker/ssh started — the
+    // process-group leader, which is what takes the whole session down. Without
+    // it `sed -n 2p` read an empty line, the kill was a no-op, and every closed
+    // terminal left a live shell behind in the Cell.
+    `  exec script -qfc "tty > \\"$M\\" 2>/dev/null; echo $$ >> \\"$M\\" 2>/dev/null; exec ${shellCmd}" /dev/null`,
     "else",
+    // No pty, so no tty on line 1 — but the pid on line 2 still has to be there,
+    // or a line-mode session is the one thing cleanup cannot end.
+    `  printf '\\n%s\\n' "$$" > "$M" 2>/dev/null`,
     `  printf '%s\\n' '(line mode: this image has no script, so job control and full-screen'`,
     `  printf '%s\\n' ' programs are unavailable. Alpine: apk add util-linux. Debian: already there.'`,
     `  printf '%s\\n' ' Or point SANDBOXOS_CELL_IMAGE at an image that has it.)'`,

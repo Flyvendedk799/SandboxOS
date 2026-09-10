@@ -263,6 +263,48 @@ The container leg checks both halves of this on a real container: that `ports.sc
 `/proc/net/tcp` fallback, which the new default image is the first to need — and that
 stopping a job actually frees the port inside the container.
 
+### …and stopping it when nobody is left to ask
+
+That fix was verified against the live deployment, and the job survived anyway. The
+reason is worth writing down, because it is not a bug in the handler: the PaaS this
+project is deployed on stops a service by sending SIGTERM to the process group and
+then, in the next statement, SIGKILL to the same group. The handler is entered and
+killed roughly a microsecond later. A direct SIGTERM reaps correctly; a restart
+through the supervisor reaps nothing, every time.
+
+That is not a thing to work around. It is a thing to stop depending on. A shutdown
+handler is a courtesy the machine is not obliged to extend — SIGKILL runs none, and
+neither does a host reboot, an OOM kill, or a power cut — so any design whose only
+cleanup happens on the way out has a hole that no amount of care on the way out can
+close.
+
+So the rule moved to the other end. A Cell outlives its Gateway on purpose: the
+container is stopped only on hibernate, which is what keeps the volume warm and the
+boot cheap. That makes *adoption* the moment when a total statement is available for
+free — **anything running in a Cell that was already up was started by a Gateway that
+is gone.** Not a heuristic about ports or process names. A fact about who is alive.
+
+`packages/cell/src/orphans.js` holds both halves. Every command a backend runs in a
+Cell carries `SANDBOXOS_BOOT`, this Gateway's identity for the length of one process;
+adopting a running Cell kills everything carrying anybody else's. The environment is
+the right place for the stamp: children inherit it, it survives the `exec` that makes
+a recorded pid *be* the command, and unlike a pid file it cannot be claimed by an
+unrelated process handed the same number. A process with no stamp — the container's
+own init, something you started by hand in a shell we do not own — is not ours to
+kill. The marker files under `/tmp/.sbx-*` get a second sweep, through the same
+environment check, so a Cell that has been up since before the stamp existed still
+empties instead of staying immortal.
+
+Two smaller holes closed with it. `cleanupScript` had always signalled the pid on
+line 2 of the pty marker file, and nothing had ever written line 2 — so every closed
+Terminal left a live shell in the Cell. And a Cell's pid 1 was `tail -f /dev/null`,
+which never calls `wait()`: the live deployment had six zombies sitting in its process
+table. Containers now run under `--init`.
+
+The container leg proves the whole of it on a real container: a job left running, a
+reaper wearing the next boot's identity, the port freed, and the container still
+answering afterwards.
+
 ### Where a served folder binds
 
 `cell.endpoint(port)` says how the Gateway reaches something inside a Cell: the local
