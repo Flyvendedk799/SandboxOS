@@ -47,6 +47,12 @@ export class DockerBackend {
     return r.stdout.trim() === "true" ? "running" : "stopped";
   }
 
+  /** The image this container was actually created from, or null if it is gone. */
+  async _image() {
+    const r = await docker(["inspect", "-f", "{{.Config.Image}}", this.container]);
+    return r.code === 0 ? r.stdout.trim() : null;
+  }
+
   /**
    * Cold-boot (or resume) the container, attaching the persistent volume.
    * Concurrent callers share one in-flight boot (a slug-open and the first exec
@@ -61,7 +67,22 @@ export class DockerBackend {
 
   async _doEnsure() {
     fs.mkdirSync(this.root, { recursive: true });
-    const state = await this._state();
+    let state = await this._state();
+
+    // Changing SANDBOXOS_CELL_IMAGE used to do nothing at all: an existing
+    // container was started whatever it had been built from, so the setting
+    // looked broken and the old image's limitations survived every restart.
+    // A container is a cache of an image; the volume is a bind mount and is the
+    // part that must not be thrown away, and it is untouched by this.
+    if (state !== "absent") {
+      const was = await this._image();
+      if (was && was !== config.cellImage) {
+        this.recreatedFrom = was;
+        await docker(["rm", "-f", this.container]);
+        state = "absent";
+      }
+    }
+
     if (state === "running") return { state: "running" };
     if (state === "stopped") {
       await docker(["start", this.container]);
@@ -85,6 +106,11 @@ export class DockerBackend {
         return { state: "running" };
       }
       throw new Error(`cell boot failed: ${run.stderr.trim()}`);
+    }
+    if (this.recreatedFrom) {
+      const from = this.recreatedFrom;
+      this.recreatedFrom = null;
+      return { state: "running", recreated: { from, to: config.cellImage } };
     }
     return { state: "running" };
   }

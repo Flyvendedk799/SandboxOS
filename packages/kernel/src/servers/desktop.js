@@ -349,11 +349,16 @@ export function desktopServer(deps) {
       setup: {
         description:
           "First run: adopt a seed, write a small project into the volume, serve it as a supervised job, and open it. " +
-          "Reports every step and what this host could not do. skip:true just marks the machine set up.",
+          "Reports every step and what this host could not do. skip:true just marks the machine set up; " +
+          "keepDesktop:true does the project and the server without touching the desktop you already have.",
         inputSchema: obj({
           seed: S, name: S,
           serve: { type: "boolean", description: "Start a static server for the project (default true)." },
           skip: { type: "boolean", description: "Mark first run done without changing anything." },
+          keepDesktop: {
+            type: "boolean",
+            description: "Do not adopt a seed or rearrange anything — only write the project and serve it. For a machine whose first run could not start a server.",
+          },
         }),
         async handler(ctx, a) {
           const mark = (d, seed) => { d.setup = { done: true, seed: seed ?? null, at: Date.now() }; };
@@ -363,8 +368,17 @@ export function desktopServer(deps) {
             return { ok: true, rev: next.rev, skipped: true, steps: [] };
           }
 
+          // Running it a second time on a machine somebody has since made their
+          // own must not throw that away. `keepDesktop` is for exactly the case
+          // this option was written for: a first run whose serve step failed —
+          // because the image had nothing that could serve a folder, or because
+          // the probe asked the wrong question — leaving a set-up machine with
+          // nothing listening and no way to ask again except by resetting.
+          const keepDesktop = !!a.keepDesktop;
           const seedId = a.seed ?? "dev";
-          const seed = BUILTIN_DISTROS.find((x) => x.id === seedId);
+          const seed = keepDesktop
+            ? (BUILTIN_DISTROS.find((x) => x.id === (a.seed ?? doc().setup?.seed)) ?? { id: null, name: "this machine" })
+            : BUILTIN_DISTROS.find((x) => x.id === seedId);
           if (!seed) throw new Error(`no such seed: ${seedId} — try ${BUILTIN_DISTROS.map((x) => x.id).join(", ")}`);
 
           const steps = [];
@@ -376,8 +390,12 @@ export function desktopServer(deps) {
 
           // 1 · the desktop the seed describes, wearing this machine's name.
           const current = doc();
-          saveOs(sandbox, docFromDistroSpec(seed, { name: a.name ?? current.name }), { label: `first run: ${seed.name}` });
-          step(`adopt the ${seed.name} seed`, true);
+          if (!keepDesktop) {
+            saveOs(sandbox, docFromDistroSpec(seed, { name: a.name ?? current.name }), { label: `first run: ${seed.name}` });
+            step(`adopt the ${seed.name} seed`, true);
+          } else {
+            step("keep the desktop you have", true);
+          }
 
           // 2 · a project in the volume. Files, not a database: everything here
           //     is an ordinary file you can open, edit and delete.
@@ -429,6 +447,9 @@ export function desktopServer(deps) {
 
           // 4 · open it, and mark the machine set up. One revision.
           const next = mutate((d) => {
+            // Nothing here rearranges a desktop somebody already made theirs; the
+            // Browser is opened on the page that is now serving, because that is
+            // the thing they asked for, and nothing else moves.
             const open = (app, props = {}, box = {}) => {
               const meta = appDescriptor(d, app);
               if (!meta) return;
@@ -439,22 +460,27 @@ export function desktopServer(deps) {
               });
             };
             if (port) open("browser", { port, path: "/" }, { x: 60, y: 60, w: 620, h: 420 });
-            // The seed already opened a Files window in most cases; point that
-            // one at the welcome folder rather than stacking a second one on it.
-            const existingFiles = d.windows.find((w) => w.app === "files");
-            if (existingFiles) existingFiles.props = { ...existingFiles.props, path: "welcome" };
-            else open("files", { path: "welcome" }, { x: 700, y: 60, w: 480, h: 300 });
-            open("help", {}, { x: 700, y: 380, w: 620, h: 380 });
-            d.notifications = [{
+            if (!keepDesktop) {
+              // The seed already opened a Files window in most cases; point that
+              // one at the welcome folder rather than stacking a second one on it.
+              const existingFiles = d.windows.find((w) => w.app === "files");
+              if (existingFiles) existingFiles.props = { ...existingFiles.props, path: "welcome" };
+              else open("files", { path: "welcome" }, { x: 700, y: 60, w: 480, h: 300 });
+              open("help", {}, { x: 700, y: 380, w: 620, h: 380 });
+            }
+            const said = {
               id: rid("n"), app: "SandboxOS", kind: "accent",
               title: port ? "Your machine is serving something" : "Your machine is ready",
               body: port
                 ? `The welcome page is a folder in your volume, served by a job you can stop. Everything you see is one document.`
                 : `The welcome folder is in your volume. This host could not start a server for it — the Manual says what else to try.`,
               ts: Date.now(), read: false,
-            }];
-            mark(d, seed.id);
-          }, "setup", `first run: ${seed.name}`);
+            };
+            // A first run owns the notification list; a second pass on a machine
+            // somebody has been using joins it.
+            d.notifications = keepDesktop ? [...(d.notifications ?? []), said] : [said];
+            mark(d, keepDesktop ? (d.setup?.seed ?? null) : seed.id);
+          }, "setup", keepDesktop ? "set up the welcome project" : `first run: ${seed.name}`);
 
           await syncServers();
           return {

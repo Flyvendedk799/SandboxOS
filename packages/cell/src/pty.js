@@ -2,14 +2,21 @@
 //
 // Node cannot allocate a pseudo-terminal by itself, and `docker exec -t` needs
 // a TTY on *our* side. Both problems have the same answer: `script`, which
-// every Linux (util-linux) and every busybox image ships, allocates a pty for
-// the command it runs. So the shell runs under `script`, records the path of
-// its tty in a marker file, and resizing is `stty` against that path — which
-// also delivers SIGWINCH to whatever is in the foreground. Job control works,
-// vim paints, and "can't access tty" is gone.
+// allocates a pty for the command it runs. So the shell runs under `script`,
+// records the path of its tty in a marker file, and resizing is `stty` against
+// that path — which also delivers SIGWINCH to whatever is in the foreground.
+// Job control works, vim paints, and "can't access tty" is gone.
 //
-// If `script` is missing in an image, the shell still runs, over pipes, and
-// says so once, honestly, at the top.
+// `script` is not everywhere, whatever this comment used to claim. On Debian it
+// comes from `bsdutils`, which is Essential, so every Debian image has it. On
+// Alpine it is in `util-linux`, which is not installed by default, and Alpine's
+// busybox is built without the `script` applet — so `alpine:latest`, which was
+// this project's default cell image, handed every Docker deployment a line-mode
+// terminal and a message most people read as a bug in the terminal rather than
+// as a fact about their image.
+//
+// Where it is missing the shell still runs, over pipes, and says so once at the
+// top — naming the package, not the symptom.
 
 import crypto from "node:crypto";
 
@@ -27,7 +34,9 @@ export function ptyWrapper(shellCmd = "/bin/sh -i", tmp = "/tmp") {
     // The inner command runs via the pty's own shell: record the tty, then exec.
     `  exec script -qfc "tty > \\"$M\\" 2>/dev/null; exec ${shellCmd}" /dev/null`,
     "else",
-    `  printf '%s\\n' '(no pseudo-terminal: install util-linux or busybox "script" in this image for job control and full-screen programs)'`,
+    `  printf '%s\\n' '(line mode: this image has no script, so job control and full-screen'`,
+    `  printf '%s\\n' ' programs are unavailable. Alpine: apk add util-linux. Debian: already there.'`,
+    `  printf '%s\\n' ' Or point SANDBOXOS_CELL_IMAGE at an image that has it.)'`,
     `  exec ${shellCmd}`,
     "fi",
   ].join("\n");

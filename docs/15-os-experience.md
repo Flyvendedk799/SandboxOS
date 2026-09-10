@@ -241,6 +241,37 @@ app with its capabilities); what they never had arrives at its default. Today's
 ceilings still apply to a document from before them, and a machine from the future
 is named as such instead of being cut down to fit.
 
+### What a cell image has to have
+
+Three things, and the default image did not have two of them:
+
+- **`script`**, so the Terminal gets a real pseudo-terminal — job control, vim,
+  full-screen programs. On Debian it comes from `bsdutils` (Essential, so it is in
+  every Debian image). On Alpine it is in `util-linux`, which is not installed by
+  default, and Alpine's busybox is built without the applet.
+- **Something that can serve a folder** — Node, Python, or a busybox with `httpd`
+  — or first run has nothing to put up and the Browser is right to say nothing is
+  listening.
+- **A package manager**, if anybody is going to add to it later.
+
+The default was `alpine:latest`, which has the shell and none of the rest: eight
+megabytes that bought a machine unable to do the two things people open a machine
+to do. It is `node:22-slim` now — Debian, so `script` is there, and Node, so a dev
+server and the welcome page both work. `SANDBOXOS_CELL_IMAGE` still chooses, and
+`docker/cell.Dockerfile` is an Alpine build with `util-linux` and `nodejs` in it for
+people who would rather have the megabytes.
+
+Changing that setting now does something: a Cell whose container was built from a
+different image is **recreated** on its next boot rather than started as it was.
+The volume is a bind mount, so the files are untouched; what is thrown away is a
+container, which is a cache of an image. Before this, the setting could be changed
+and nothing whatever happened, which reads as the setting being broken.
+
+`pkg` asks the image which package manager it has — `apk`, `apt` or `dnf` — rather
+than assuming `apk`, and an image with none of them gets a sentence naming what was
+looked for. It used to be a hardcoded table with one entry, so on any non-Alpine
+image the first install failed with "cannot read properties of undefined".
+
 ### First run: one screen, and a machine already working
 
 A machine nobody has set up carries `setup: { done: false }` in its document — a
@@ -263,6 +294,14 @@ the honest version of that is a named failure with the folder still sitting ther
 not a spinner. A partial setup offers "take me to the desktop anyway" rather than
 standing in the way. If every ordinary port is already in use, it says so instead
 of handing back a port the server would die on.
+
+`desktop.setup { keepDesktop: true }` runs the project half again without touching a
+desktop somebody has since made theirs — Settings → Machine has the button. It exists
+because first run can complete with its serve step failed, which left a machine marked
+set up, with nothing listening, and no way to ask again short of resetting the desktop.
+
+First run is the machine's, not one door's: `/studio` shows the same screen `/os` does.
+Landing on the Studio first used to mean the machine was never set up at all.
 
 `desktop.reset` keeps `setup`. Someone clearing their windows and their theme is not
 a new user, and greeting them with onboarding again answers a question they did not

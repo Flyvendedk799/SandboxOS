@@ -6,7 +6,7 @@
 // thing you are dragging is the thing your machine will look like from a phone
 // ten minutes from now.
 
-import { $, h, fill, icon, slug, toast, toastError } from "../core.js";
+import { $, h, fill, icon, api, slug, toast, toastError } from "../core.js";
 import { mountSprite } from "./sprite.js";
 import { os, loadOs, connect, onOs, call, select } from "./client.js";
 import { createScreen } from "./shell.js";
@@ -14,6 +14,7 @@ import { createBuilder, createInspector } from "./builder.js";
 import { createStudioPalette } from "./palette.js";
 import { createAgentPanel, mountAssistantWindow } from "./agent.js";
 import { startBroker } from "./frames.js";
+import { firstRun, needsFirstRun } from "./first-run.js";
 
 mountSprite();
 os.design = true;
@@ -284,6 +285,21 @@ onOs((kind) => {
   try {
     await loadOs();
     connect();
+
+    // The same one screen the desktop shows, before the Studio paints: a machine
+    // that has never been set up is a machine with nothing to build on.
+    if (needsFirstRun(os.doc)) {
+      const host = h("div", { id: "studio-first-run" });
+      root.append(host);
+      try {
+        const { seeds } = await api.mcp("desktop", "setupSeeds", {});
+        await firstRun(host, { seeds, viewport: { w: window.innerWidth, h: window.innerHeight - 64 }, onDone: () => loadOs() });
+      } catch (e) {
+        toastError("The welcome screen could not load", e);
+      }
+      host.remove();
+    }
+
     layout();
     document.title = `${os.doc.name} · SandboxOS Studio`;
   } catch (e) {

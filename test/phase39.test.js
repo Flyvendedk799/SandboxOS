@@ -142,21 +142,68 @@ test("the welcome project is files, and the server is one of them", () => {
   assert.equal(nasty["welcome/index.html"].includes("<script>alert"), false);
 });
 
-test("the server is chosen by asking the host, not by assuming", async () => {
+/**
+ * A shell that answers the way a real one would.
+ *
+ * The previous version of this fake returned 0 for any command that *started
+ * with* the name of a binary the image was supposed to have — which is not how
+ * any of these commands behave, and is why it passed while first run was silently
+ * broken on Alpine. `busybox --help` prints the applet list and exits **1**; the
+ * probe read that as "no busybox", concluded the image had nothing that could
+ * serve a folder, and left a freshly set-up machine with nothing listening.
+ *
+ * So this one models the actual contracts: `command -v X` succeeds iff X is on
+ * the path, `busybox --list` prints the applets it was built with and exits 0,
+ * and `busybox --help` exits 1 whatever is installed.
+ */
+const shellWith = (binaries, { busyboxApplets = ["sh", "httpd", "wget"] } = {}) => {
   const asked = [];
-  const has = (names) => async (_server, _tool, args) => {
-    asked.push(args.cmd);
-    return { ok: true, result: { code: names.some((n) => args.cmd.startsWith(n)) ? 0 : 127, stdout: "", stderr: "" } };
+  const run = async (_server, _tool, args) => {
+    const cmd = String(args.cmd);
+    asked.push(cmd);
+    const ok = (stdout = "") => ({ ok: true, result: { code: 0, stdout, stderr: "" } });
+    const no = () => ({ ok: true, result: { code: 1, stdout: "", stderr: "" } });
+
+    const which = /^command -v (\S+)/.exec(cmd);
+    if (which) return binaries.includes(which[1]) ? ok(`/usr/bin/${which[1]}`) : no();
+    if (cmd.startsWith("busybox --list")) {
+      if (!binaries.includes("busybox")) return no();
+      // The pipeline's exit code is grep's: does the list contain that applet?
+      const wanted = /grep -qx (\S+)/.exec(cmd)?.[1];
+      return busyboxApplets.includes(wanted) ? ok() : no();
+    }
+    if (cmd.startsWith("busybox --help")) return no();   // whatever is installed
+    return no();
   };
-  assert.equal((await firstRunServer(has(["node"]))).label, "node");
-  assert.equal((await firstRunServer(has(["python3"]))).label, "python3");
-  assert.equal((await firstRunServer(has(["busybox"]))).label, "busybox httpd");
-  assert.ok(asked.length >= 3, "it actually asked");
+  run.asked = asked;
+  return run;
+};
+
+test("the server is chosen by asking the host, not by assuming", async () => {
+  const node = shellWith(["node", "sh"]);
+  assert.equal((await firstRunServer(node)).label, "node");
+  assert.ok(node.asked.length >= 1, "it actually asked");
+  assert.equal((await firstRunServer(shellWith(["python3", "sh"]))).label, "python3");
+  assert.equal((await firstRunServer(shellWith(["python", "sh"]))).label, "python");
+
+  // Alpine: busybox is there, and `--help` exits 1. This is the case that was
+  // broken, on the default image, for every Docker deployment.
+  const alpine = shellWith(["busybox", "sh"]);
+  assert.equal((await firstRunServer(alpine)).label, "busybox httpd");
+  assert.ok(alpine.asked.some((c) => c.startsWith("busybox --list")),
+    "it asks which applets this busybox was built with, not whether busybox can print a usage message");
+
+  // A busybox built without httpd is not a server, and saying so is the point.
+  const noHttpd = shellWith(["busybox", "sh"], { busyboxApplets: ["sh", "wget"] });
+  assert.equal((await firstRunServer(noHttpd)).cmd, null);
+
+  // A standalone httpd (Debian, BSD) counts too.
+  assert.equal((await firstRunServer(shellWith(["httpd", "sh"]))).label, "httpd");
 
   // An image with none of them: named, not guessed at.
-  const none = await firstRunServer(has([]));
+  const none = await firstRunServer(shellWith(["sh"]));
   assert.equal(none.cmd, null);
-  assert.match(none.why, /this image has none of: node, python3, python, busybox httpd/);
+  assert.match(none.why, /this image has none of: node, python3, python, busybox httpd, httpd/);
 
   // A Cell that cannot run anything at all stops after the first question.
   const dead = await firstRunServer(async () => ({ ok: false, error: "no shell on this host" }));

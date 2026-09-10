@@ -902,6 +902,36 @@ const settings = {
         })(),
       ];
 
+    /**
+     * Run the project half of first run again, without touching the desktop.
+     *
+     * First run can complete with its serve step failed — an image with nothing
+     * in it that can serve a folder, or, until this was fixed, a probe that asked
+     * `busybox --help` and read its exit code as an answer. That left a machine
+     * marked set up with nothing listening and no way to ask again short of
+     * resetting the desktop, which is not a thing anybody should have to trade.
+     */
+    async function setUpProject() {
+      const go = await confirmDialog(
+        "Set up the welcome project?",
+        "It writes a welcome/ folder into your volume, serves it as a supervised job called welcome, and exposes its port. Your windows, theme and apps are left exactly as they are.",
+        { confirmLabel: "Set it up", danger: false },
+      );
+      if (!go) return;
+      try {
+        const r = await api.mcp("desktop", "setup", { keepDesktop: true });
+        const failed = (r.steps ?? []).filter((x) => !x.ok);
+        if (failed.length) {
+          toastError("Partly done", new Error(failed.map((x) => `${x.what}: ${x.why ?? "did not happen"}`).join(" · ")));
+        } else {
+          toast(r.port ? `Serving on :${r.port}` : "Set up", {
+            body: r.port ? "Open it in the Browser — it is in Ports too." : (r.steps ?? []).map((x) => x.what).join(" · "),
+            kind: "ok", timeout: 5000,
+          });
+        }
+      } catch (e) { toastError("Could not set it up", e); }
+    }
+
       /** Capture a chord by listening for the next keypress, honestly. */
       function keyField(action, chord) {
         const btn = h("button.app-btn.chord", { title: "Click, then press the keys" }, chord ? prettyChord(chord) : "unbound");
@@ -1020,6 +1050,7 @@ const settings = {
           ]
           : [h("div.dim", { style: { padding: "0 11px", fontSize: "11px" } }, "Reading the allowance…")]),
         h("div", { style: { padding: "10px", display: "flex", gap: "8px", flexWrap: "wrap" } },
+          h("button.app-btn", { onclick: () => setUpProject() }, "Set up the welcome project…"),
           h("button.app-btn", { onclick: () => ctx.openStudio?.() }, "Open Studio"),
           h("button.app-btn", { onclick: () => (location.href = `/${slug}`) }, "Command Central"),
           h("button.app-btn", { onclick: () => ctx.launch?.("terminal") }, "Terminal"),
