@@ -47,6 +47,7 @@ import {
 
 const maxSandboxes = () => Number(process.env.SANDBOXOS_MAX_SANDBOXES ?? 10);
 import { getKernel, _dropKernel } from "../../../packages/kernel/src/kernel.js";
+import { clearJobs as forgetJobs } from "../../../packages/kernel/src/servers/job-store.js";
 import { getCell } from "../../../packages/cell/src/cell.js";
 import { seedVolume } from "../../../packages/cell/src/seed.js";
 import { runCommand } from "../../../packages/command-central/src/console.js";
@@ -737,6 +738,7 @@ async function handle(req, res) {
     if (scheduler.isRunning(sb.id)) await scheduler.hibernate(sb);
     try { await getCell(sb).destroy(); } catch {}
     destroyOs(sb); // the desktop, and every custom app's source, go with the machine
+    forgetJobs(sb);  // …and so does the list of what it was running
     _dropKernel(sb.id);
     deleteSandbox(sb.id);
     return sendJson(res, 200, { ok: true, deleted: sb.slug });

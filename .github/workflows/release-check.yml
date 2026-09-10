@@ -84,6 +84,15 @@ jobs:
 
   # The alternative database driver, on the platform where it is most likely to
   # be used. Not part of the page: it is the same suite through another driver.
+  #
+  # Pinned to Node 22, and the pin is the finding rather than a workaround. On
+  # Node 24 every file in this leg passed its tests and then crashed on the way
+  # out — `Assertion failed: (env) != nullptr` in RemoveEnvironmentCleanupHook,
+  # from better-sqlite3's `Statement` destructor running after the environment it
+  # registered a hook with is gone. That is the addon and the runtime disagreeing
+  # about teardown order, not this project's code, and there is nothing here to
+  # fix: what this leg is for is "the app works through this driver", and it does.
+  # Node 22 is the version better-sqlite3 currently builds against.
   better-sqlite3:
     name: suite (better-sqlite3)
     runs-on: ubuntu-latest
@@ -92,7 +101,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 22
       - run: npm ci --no-audit --no-fund
       - run: npm install --no-save better-sqlite3
       - run: npm run test:better-sqlite3

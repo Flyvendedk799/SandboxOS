@@ -174,6 +174,26 @@ test("closing a terminal ends the shell inside the Cell", () => {
   assert.match(w, /printf '\\n%s\\n' "\$\$" > "\$M"/, "and so does line mode, with an empty tty line first");
 });
 
+test("there are two programs called script, and the wrapper knows which it has", () => {
+  // util-linux: script -qfc "<command>" <file>
+  // BSD:        script -q <file> <command> [args…]
+  //
+  // Emitting only the first is not a pty that fails to allocate — it is a
+  // `script` that prints its usage and exits, so the shell never starts. Every
+  // Terminal on a Mac died at birth with "script -p [-deq]…" where a prompt
+  // should have been, and CI's macOS leg had been red for it.
+  const w = ptyWrapper("/bin/sh -i");
+  assert.match(w, /if script -qfc true \/dev\/null >\/dev\/null 2>&1; then/,
+    "the probe is the command itself, which is the only thing that answers this");
+  assert.match(w, /exec script -qfc ".*" \/dev\/null/, "util-linux form");
+  assert.match(w, /exec script -q \/dev\/null \/bin\/sh -c ".*"/, "BSD form: file first, command as argv");
+  // Both branches record the tty and the pid, or cleanup works on one platform.
+  for (const branch of w.split("\n").filter((l) => l.includes("exec script "))) {
+    assert.match(branch, /tty > \\"\$M\\"/, branch);
+    assert.match(branch, /echo \$\$ >> \\"\$M\\"/, branch);
+  }
+});
+
 test("the recorded pid is the one that takes the session down", () => {
   const w = ptyWrapper("/bin/sh -i");
   // `$$` inside the argument to `script -qfc` is expanded by *this* shell before

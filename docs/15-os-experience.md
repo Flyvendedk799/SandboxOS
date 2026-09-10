@@ -301,9 +301,38 @@ Terminal left a live shell in the Cell. And a Cell's pid 1 was `tail -f /dev/nul
 which never calls `wait()`: the live deployment had six zombies sitting in its process
 table. Containers now run under `--init`.
 
-The container leg proves the whole of it on a real container: a job left running, a
-reaper wearing the next boot's identity, the port freed, and the container still
-answering afterwards.
+### …and starting it again
+
+Reaping on its own is half a fix, and the wrong half to ship alone. The job table had
+always been a `Map` in one process's memory, so a restart lost it — which for a long
+time was survivable in the worst possible way: the process kept running inside the
+Cell, so at least the dev server was still up. Invisible, unstoppable, holding its
+port, but up. Remove the invisible half and nothing is left: an empty Jobs list and a
+dead server, every deploy.
+
+So the list is written down, at `jobs.json` beside the Cell volume — next to `os/`,
+for the same reason the desktop document lives there rather than in Files: it is the
+machine's own bookkeeping, not your files, and it should not travel in a distro. It
+holds what a job *is* (id, name, command, timeout, state) and not what it printed:
+the logs belonged to a process that no longer exists, and a restored job starts a new
+log rather than pretending to continue an old one.
+
+Adopting a Sandbox brings back what was running, under the ids it had, so anything
+that referred to a job still does. Jobs that had finished come back as history, so
+the list is not blank. Decisions are preserved in both directions — a job you stopped
+stays stopped, or the next boot would helpfully start the very thing you just turned
+off. There is no retry: a command that fails immediately becomes a failed job you can
+read, where a restart loop would be noise.
+
+The ordering is load-bearing and free. `startJob` awaits `cell.ensureRunning()`, and
+that is where a Cell inherited from a dead Gateway is emptied — so reaping always
+finishes before the first restored job starts, and a restored dev server never races
+its predecessor's corpse for the port.
+
+The container leg proves the whole cycle on a real container: a job left running, a
+reaper wearing the next boot's identity, the port freed, the container still
+answering, and then a job that goes away with its Gateway and is serving again
+through the slug, on the port it had, under the id it had.
 
 ### Where a served folder binds
 

@@ -13,6 +13,7 @@
 import { notifyJobEnded } from "../../../os/src/notify.js";
 import { raiseFailure } from "../../../cell/src/shell.js";
 import { listSessions, killSession, renameSession, killAllSessions } from "../pty-sessions.js";
+import { loadJobs, saveJobs } from "./job-store.js";
 
 // Supervised processes, keyed by Sandbox id → job id → record. Module-level (not
 // per-server-instance) because the Kernel rebuilds its server set whenever the
@@ -89,10 +90,136 @@ export function stopAllProcsEverywhere() {
   return killed;
 }
 
+/**
+ * Start one supervised process and put it in the table.
+ *
+ * Shared by `proc.start` and by restore, because a restored job is not a
+ * different kind of thing: same id, same command, same supervision. What it does
+ * not get is the old logs — those belong to a process that no longer exists, and
+ * a fresh log is the honest account of a fresh process.
+ */
+async function startJob(cell, sandbox, sandboxId, { id, cmd, name, timeoutMs, restoredFrom = null }) {
+  await cell.ensureRunning();
+  const rec = {
+    id: id ?? nextJobId(),
+    name: name || cmd.split(/\s+/)[0],
+    cmd,
+    timeoutMs: timeoutMs ?? null,
+    state: "running",
+    startedAt: Date.now(),
+    ...(restoredFrom ? { restoredFrom } : {}),
+    logs: [],
+    pending: "",
+    handle: null,
+    pid: null,
+  };
+  const table = jobsFor(sandboxId);
+  table.set(rec.id, rec);
+  remember(sandbox, table);
+
+  // execStream is sync on the local backend and async on docker/firecracker;
+  // awaiting normalizes both.
+  const handle = await cell.execStream(cmd, (ev) => {
+    if (ev.type === "stdout" || ev.type === "stderr") pushLog(rec, ev.type, ev.chunk);
+    else if (ev.type === "done") {
+      flushLog(rec);
+      // A shell that never started is a job that never ran: say which.
+      if (ev.failure) rec.failure = ev.failure;
+      rec.state = rec.state === "stopped" ? "stopped" : ev.code === 0 ? "exited" : "failed";
+      rec.code = ev.code;
+      rec.exitedAt = Date.now();
+      remember(sandbox, table);
+      // A build that finishes while you are looking elsewhere should still be
+      // waiting for you when you come back. No-op on a Sandbox that has never
+      // been opened as an OS.
+      notifyJobEnded(sandbox, jobView(rec));
+    }
+  }, { timeoutMs: timeoutMs ?? 24 * 60 * 60 * 1000 });
+
+  rec.handle = handle;
+  rec.pid = handle?.pid ?? null;
+  return rec;
+}
+
+/** Write the table down, if this Sandbox is a real one with somewhere to put it. */
+function remember(sandbox, table) {
+  if (!sandbox?.volume_path) return;
+  try { saveJobs(sandbox, [...table.values()]); } catch { /* bookkeeping is not the job */ }
+}
+
+// Restore runs once per Sandbox per Gateway process. Not once per `procServer`
+// call: the Kernel rebuilds its server set whenever the manifest changes, and
+// starting everything again on each rebuild would be a fork bomb with a calendar.
+const _restored = new Set();
+
+/** Forget that restore has run, so a test can boot the same Sandbox twice. */
+export function _resetJobRestore() { _restored.clear(); }
+
+/**
+ * Bring back what was running when the last Gateway went away.
+ *
+ * Finished jobs come back as history, so the Jobs list is not blank; running
+ * ones are started again under their own ids. There is no retry: a command that
+ * fails immediately becomes a failed job you can read, which is information,
+ * where a restart loop would be noise.
+ *
+ * Ordering matters and is free: `startJob` awaits `cell.ensureRunning()`, and
+ * that is where a Cell adopted from a dead Gateway is emptied of its orphans. So
+ * reaping always finishes before the first restored job starts, and a restored
+ * dev server never races the corpse of its predecessor for the port.
+ */
+export async function restoreJobs(cell, sandbox) {
+  const sandboxId = sandbox?.id ?? cell?.root ?? "default";
+  if (!sandbox?.volume_path || _restored.has(sandboxId)) return { restored: 0, remembered: 0 };
+  _restored.add(sandboxId);
+
+  const saved = loadJobs(sandbox);
+  if (!saved.length) return { restored: 0, remembered: 0 };
+  const table = jobsFor(sandboxId);
+
+  // History first, so the list is complete before anything starts running in it.
+  for (const j of saved.filter((x) => x.state !== "running")) {
+    if (table.has(j.id)) continue;
+    table.set(j.id, {
+      ...j, logs: [], pending: "", handle: null, pid: null,
+      // The logs went with the Gateway that captured them; say so rather than
+      // showing an empty tail that reads like a process that printed nothing.
+      interrupted: true,
+    });
+  }
+
+  let restored = 0;
+  for (const j of saved.filter((x) => x.state === "running")) {
+    if (table.has(j.id)) continue;
+    try {
+      await startJob(cell, sandbox, sandboxId, {
+        id: j.id, cmd: j.cmd, name: j.name, timeoutMs: j.timeoutMs ?? undefined,
+        restoredFrom: j.startedAt ?? null,
+      });
+      restored += 1;
+    } catch (e) {
+      // A job that cannot be started is a job that is not running, and the list
+      // should say that rather than quietly losing the entry.
+      table.set(j.id, {
+        ...j, state: "failed", code: null, exitedAt: Date.now(),
+        failure: `could not restart: ${e.message}`,
+        logs: [], pending: "", handle: null, pid: null,
+      });
+    }
+  }
+  remember(sandbox, table);
+  if (restored) console.log(`cell ${sandboxId}: restarted ${restored} supervised process${restored === 1 ? "" : "es"} from before the restart`);
+  return { restored, remembered: saved.length };
+}
+
 export function procServer(cell, sandbox) {
   // `sandbox` is optional so existing callers that pass only a cell keep working;
   // supervised processes are then keyed by the cell's volume root.
   const sandboxId = sandbox?.id ?? cell?.root ?? "default";
+
+  // Fire-and-forget: building the server set must not wait on a container boot,
+  // and a Sandbox whose jobs cannot be restored is still a working Sandbox.
+  restoreJobs(cell, sandbox).catch((e) => console.error(`restore jobs: ${e.message}`));
 
   return {
     name: "proc",
@@ -129,40 +256,9 @@ export function procServer(cell, sandbox) {
           },
         },
         async handler(_ctx, args) {
-          await cell.ensureRunning();
-          const rec = {
-            id: nextJobId(),
-            name: args.name || args.cmd.split(/\s+/)[0],
-            cmd: args.cmd,
-            state: "running",
-            startedAt: Date.now(),
-            logs: [],
-            pending: "",
-            handle: null,
-            pid: null,
-          };
-          jobsFor(sandboxId).set(rec.id, rec);
-
-          // execStream is sync on the local backend and async on docker/firecracker;
-          // awaiting normalizes both.
-          const handle = await cell.execStream(args.cmd, (ev) => {
-            if (ev.type === "stdout" || ev.type === "stderr") pushLog(rec, ev.type, ev.chunk);
-            else if (ev.type === "done") {
-              flushLog(rec);
-              // A shell that never started is a job that never ran: say which.
-              if (ev.failure) rec.failure = ev.failure;
-              rec.state = rec.state === "stopped" ? "stopped" : ev.code === 0 ? "exited" : "failed";
-              rec.code = ev.code;
-              rec.exitedAt = Date.now();
-              // A build that finishes while you are looking elsewhere should still
-              // be waiting for you when you come back. No-op on a Sandbox that has
-              // never been opened as an OS.
-              notifyJobEnded(sandbox, jobView(rec));
-            }
-          }, { timeoutMs: args.timeoutMs ?? 24 * 60 * 60 * 1000 });
-
-          rec.handle = handle;
-          rec.pid = handle?.pid ?? null;
+          const rec = await startJob(cell, sandbox, sandboxId, {
+            cmd: args.cmd, name: args.name, timeoutMs: args.timeoutMs,
+          });
           return jobView(rec);
         },
       },
@@ -208,6 +304,10 @@ export function procServer(cell, sandbox) {
           try { rec.handle?.kill?.(args.signal || "SIGTERM"); } catch { /* raced with exit */ }
           rec.state = "stopped";
           rec.exitedAt = Date.now();
+          // Stopping something is a decision, and it has to outlive the Gateway
+          // as surely as starting it does — otherwise the next boot helpfully
+          // starts the very thing you just turned off.
+          remember(sandbox, jobsFor(sandboxId));
           return { id: rec.id, stopped: true };
         },
       },
@@ -221,6 +321,7 @@ export function procServer(cell, sandbox) {
           if (!rec) return { id: args.id, forgotten: false };
           if (rec.state === "running") throw new Error("process is still running — stop it first");
           m.delete(args.id);
+          remember(sandbox, m);
           return { id: args.id, forgotten: true };
         },
       },
