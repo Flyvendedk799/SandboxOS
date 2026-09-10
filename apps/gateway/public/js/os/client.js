@@ -77,6 +77,26 @@ let catchup = null;
  *  painted against, so a concurrent agent edit is surfaced, not overwritten. */
 const CONDITIONAL = new Set(["move", "resize", "snap", "tile", "widgetSet", "windowSet", "layoutSet", "arrange"]);
 
+/** The keys that describe where something sits. */
+const PLACE_KEYS = ["x", "y", "w", "h", "ws", "min", "max", "pin", "z"];
+
+/**
+ * Is this particular call about a *place*?
+ *
+ * `windowSet` and `widgetSet` do two jobs. The inspector and a drag use them to
+ * say where something goes — that is a place, and it must not silently overwrite
+ * somebody else's. An app uses them to record itself: the Terminal storing which
+ * session its tab is attached to, Files its folder, Jobs the log it is
+ * following. Those are not places, they are not in competition with anyone, and
+ * making them conditional meant two of an app's own writes in one tick collided
+ * with each other — reported to the owner of an untouched machine as "someone
+ * else changed it first", which is the most expensive kind of wrong.
+ */
+function describesAPlace(tool, args) {
+  if (tool !== "windowSet" && tool !== "widgetSet") return true;
+  return PLACE_KEYS.some((k) => args[k] !== undefined);
+}
+
 let staleToastAt = 0;
 
 /**
@@ -88,7 +108,8 @@ let staleToastAt = 0;
  * never retried blindly: last-write-wins is honest only when the loser knows.
  */
 export async function call(tool, args = {}, { conditional = CONDITIONAL.has(tool) } = {}) {
-  const sent = conditional && os.doc && args.expectRev === undefined ? { ...args, expectRev: os.doc.rev } : args;
+  const guard = conditional && describesAPlace(tool, args);
+  const sent = guard && os.doc && args.expectRev === undefined ? { ...args, expectRev: os.doc.rev } : args;
   try {
     const r = await api.mcp("desktop", tool, sent);
     if (typeof r?.rev === "number") {

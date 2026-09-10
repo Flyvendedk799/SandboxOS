@@ -1034,7 +1034,7 @@ const settings = {
 
       fill(body,
         h("div.chip-row", { style: { padding: "4px 6px 8px" } }, tab("desktop", "Desktop"), tab("machine", "Machine")),
-        ...(section === "machine" ? machineSection : desktopSection));
+        h("div.settings-col", null, ...(section === "machine" ? machineSection : desktopSection)));
       // The allowance is read when the tab that shows it is on screen.
       if (section === "machine") loadLimits();
     }

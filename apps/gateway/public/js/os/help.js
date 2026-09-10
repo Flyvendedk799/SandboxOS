@@ -192,7 +192,9 @@ const help = {
     let view = win.props?.page ? { kind: "page", id: win.props.page } : { kind: "welcome" };
     const pageCache = new Map();
 
-    const search = h("input.ops-search", { value: query, placeholder: "Search the manual and every tool" });
+    // The search box is the app's main control, so it takes the room the bar has
+    // rather than a fixed 90px that truncates its own placeholder.
+    const search = h("input.ops-search.grow", { value: query, placeholder: "Search the manual and every tool" });
     const listEl = h("div.ops-list.help-list");
     const paneEl = h("div.ops-pane.help-pane");
     const bar = h("div.app-bar", null,
@@ -240,7 +242,7 @@ const help = {
         fill(listEl,
           error ? h("div.ops-error", null, icon("bell", 14), h("span", error.message)) : null,
           h("div.ops-head", "The manual"),
-          ...pages.map((p) => h("button.row-line", {
+          ...pages.map((p) => h("button.row-line.wrap", {
             class: view.kind === "page" && view.id === p.id ? "on" : "",
             onclick: () => { view = { kind: "page", id: p.id }; save(); paint(); },
           }, h("span", null, h("b", p.title), h("span.dim", ` ${p.blurb}`)),
@@ -269,7 +271,7 @@ const help = {
       ];
       fill(listEl,
         h("div.ops-head", `${hits.length} match${hits.length === 1 ? "" : "es"}`),
-        ...(hits.length ? hits.map((x) => h("button.row-line", { onclick: x.run },
+        ...(hits.length ? hits.map((x) => h("button.row-line.wrap", { onclick: x.run },
           h("span", null, h("b", x.label), h("span.dim", ` ${x.sub}`)),
           h("span.sz", x.kind === "tool" ? "tool" : "manual")))
           : [h("div.dim.ops-none", "nothing in the manual or the catalogue says that")]));
@@ -327,7 +329,7 @@ const help = {
       const mine = tools.filter((t) => t.name.startsWith(`${name}.`));
       fill(paneEl,
         h("div.ops-pane-head", null, h("b", name), h("span.dim", `${mine.length} tools`)),
-        ...mine.map((t) => h("button.row-line", { onclick: () => { view = { kind: "tool", id: t.name }; paint(); } },
+        ...mine.map((t) => h("button.row-line.wrap", { onclick: () => { view = { kind: "tool", id: t.name }; paint(); } },
           h("span", null, h("b", t.name.split(".")[1]), h("span.dim", ` ${(t.description ?? "").slice(0, 80)}`)),
           h("span.sz", "open"))));
     }

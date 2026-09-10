@@ -457,6 +457,27 @@ new class of bug where the patch and the document disagree — to save bytes tha
 not scarce. The measurement is in the bench rather than in this paragraph, so the
 day it stops being true, CI says so and the decision can be revisited on numbers.
 
+### A row is a row
+
+Six of the seven ops apps and the Files listing render through one class,
+`.row-line`, and it was a flex row with no `align-items`. Every child therefore
+stretched to the row's height: a status pill with `border-radius: 999px` came out
+as a green oval the size of a button, and a label long enough to wrap pushed it
+further out of line. The rules now are the ones a table wants — children centred,
+the label taking all the slack so the columns after it share a left edge, numbers
+right-aligned and tabular — with `.row-line.wrap` for the other kind of row, the
+one whose second half is a sentence about the first (a table of contents, a search
+hit) and wants the sentence rather than an ellipsis after four words.
+
+The split panes went proportional at the same time: a list fixed at 260px beside a
+paragraph in 640px of empty pane was the shape of every ops app in a wide window.
+Under 720px there is no room for two panes at all, and the list becomes the app.
+
+Settings is a two-column grid inside a 620px measure. `space-between` had been
+putting each control against the right edge of a window-wide row, so their left
+edges landed wherever their own widths left them — a different indent on every
+line, and a label a hand's width from the thing it labelled.
+
 ### The conflict policy
 
 Every write is last-write-wins **unless it says otherwise**. Writes that describe a

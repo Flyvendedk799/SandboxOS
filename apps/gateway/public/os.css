@@ -636,13 +636,28 @@ body.os-fullscreen .os-screen { height: 100%; border: 0; border-radius: 0; }
 .app-btn.primary { background: var(--os-accent); color: var(--os-bg-0); border-color: transparent; }
 
 .row-line {
-  display: flex; justify-content: space-between; gap: 10px; width: 100%;
-  padding: 4px 10px; border: 0; background: transparent; text-align: left;
-  font-family: var(--mono); font-size: 11px; color: var(--os-text-2);
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
+  min-height: 24px; padding: 3px 10px; border: 0; background: transparent; text-align: left;
+  font-family: var(--mono); font-size: 11px; line-height: 1.5; color: var(--os-text-2);
+  border-left: 2px solid transparent;
 }
+/* The label takes the room that is left and gives up gracefully; everything to
+   its right keeps its size, so the second column lines up down the list. */
+.row-line > span:first-child { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-line > :not(:first-child) { flex: none; }
 .row-line:hover { background: var(--os-chip); color: var(--os-text); }
-.row-line.on { background: var(--os-chip); color: var(--os-text); }
-.row-line .sz { color: var(--os-text-3); }
+.row-line.on { background: var(--os-chip); color: var(--os-text); border-left-color: var(--os-accent); }
+.row-line:focus-visible { outline: none; background: var(--os-chip); border-left-color: var(--os-accent); }
+.row-line .sz { color: var(--os-text-3); font-variant-numeric: tabular-nums; text-align: right; }
+.row-line .dim { color: var(--os-text-3); }
+/* A row that is a refusal or an error carries it at the edge, so a wall of them
+   is visible before anything is read. */
+.row-line.bad { border-left-color: color-mix(in srgb, var(--os-err) 60%, transparent); }
+/* A row whose second half is a sentence about the first — a table of contents, a
+   search hit — wants the sentence, not an ellipsis after four words. */
+.row-line.wrap { align-items: flex-start; padding-top: 6px; padding-bottom: 6px; }
+.row-line.wrap > span:first-child { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.55; }
+.row-line.wrap > :not(:first-child) { margin-top: 1px; }
 
 .term { padding: 11px 13px; font-family: var(--mono); font-size: 11px; line-height: 1.7; }
 .term .in { color: var(--os-accent); }
@@ -667,7 +682,24 @@ body.os-fullscreen .os-screen { height: 100%; border: 0; border-radius: 0; }
 .tile-grid .tile { aspect-ratio: 1; border-radius: 9px; overflow: hidden; background: var(--os-chip); }
 .tile-grid .tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
-.kv { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 11px; border-radius: 8px; }
+.kv {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 8px 11px; border-radius: 8px;
+}
+/* Label and control belong in one another's company. Left to itself a `.kv` in a
+   1200px window puts them a hand's width apart and reads as a spreadsheet, so
+   the column holding them keeps a measure. */
+.settings-col { max-width: 620px; }
+.settings-col .kv { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 14px; align-items: center; }
+.settings-col .kv .k { justify-self: start; }
+.settings-col .kv > :last-child { justify-self: start; width: 100%; max-width: 260px; }
+.settings-col .kv select, .settings-col .kv input { width: 100%; }
+/* Rows whose control is a row of buttons or chips keep their own shape. */
+.settings-col .kv > span[style], .settings-col .kv .v { max-width: none; }
+@media (max-width: 560px) {
+  .settings-col .kv { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .settings-col .kv > :last-child { max-width: none; }
+}
 .kv:hover { background: var(--os-chip); }
 .kv .k { color: var(--os-text); }
 .kv .v { color: var(--os-text-3); font-family: var(--mono); font-size: 11px; }
@@ -1209,8 +1241,16 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
    of question and should not each invent a layout. */
 
 .app-body.ops-split { display: flex; overflow: hidden; }
-.ops-list { width: 260px; flex: none; border-right: 1px solid var(--os-line); overflow: auto; padding-bottom: 8px; }
-.ops-list.wide { width: 320px; }
+.ops-list {
+  flex: none; width: 34%; min-width: 240px; max-width: 380px;
+  border-right: 1px solid var(--os-line); overflow: auto; padding-bottom: 8px;
+}
+.ops-list.wide { width: 44%; max-width: 520px; }
+/* Under about 640px there is not room for two panes: the list becomes the app,
+   and the pane appears when something is picked. */
+@media (max-width: 720px) {
+  .ops-list, .ops-list.wide { width: 100%; max-width: none; border-right: 0; }
+}
 .ops-pane { flex: 1; min-width: 0; overflow: auto; display: flex; flex-direction: column; }
 
 .ops-head {
@@ -1226,7 +1266,8 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
 .ops-pane-head .spacer { flex: 1; }
 
 .ops-pill {
-  padding: 1px 6px; border-radius: 999px; font-size: 9.5px; font-weight: 700;
+  flex: none; align-self: center; padding: 1px 7px; border-radius: 999px;
+  font-size: 9.5px; font-weight: 700; letter-spacing: .02em; line-height: 15px;
   background: var(--os-chip); color: var(--os-text-3); white-space: nowrap;
 }
 .ops-pill.ok { background: color-mix(in srgb, var(--os-ok) 22%, transparent); color: var(--os-ok); }
@@ -1576,3 +1617,10 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
 .chip-tag.warn { background: var(--os-accent-dim); color: var(--os-accent); }
 .proposal.applied { opacity: .85; }
 .proposal.applied .hd b { font-weight: 550; }
+
+/* A search box that is the point of its app takes the width the bar has. */
+.app-bar .ops-search.grow { flex: 1 1 200px; min-width: 120px; }
+
+/* A time column wide enough for the longest time it will hold, so the rows read
+   down as well as across. */
+.row-line .sz.when { min-width: 76px; }

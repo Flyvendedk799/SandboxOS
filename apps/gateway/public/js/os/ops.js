@@ -354,18 +354,13 @@ const ports = {
 
     function paint() {
       const exposedPorts = new Set(exposed.map((p) => Number(p.port)));
+      // What is listening *and* not exposed. A port already served under the slug
+      // is in the section above, and saying it twice makes the shorter, more
+      // useful list look like a subset of the longer one.
+      const unexposed = listening.filter((p) => !exposedPorts.has(p.port));
       fill(listEl,
         error ? errorCard(error) : null,
-        h("div.ops-head", "Listening inside the machine"),
-        ...(unavailable
-          ? [h("div.ops-error", null, icon("bell", 14), h("span", unavailable))]
-          : rows(listening, (p) => h("button.row-line", {
-              onclick: () => (exposedPorts.has(p.port) ? preview(p.port) : expose(p.port)),
-            },
-              h("span", null, h("b", `:${p.port}`), h("span.dim", exposedPorts.has(p.port) ? " exposed" : " not exposed")),
-              h("span.sz", exposedPorts.has(p.port) ? "open" : "expose"),
-            ))),
-        h("div.ops-head", "Exposed"),
+        h("div.ops-head", `Exposed${exposed.length ? ` · ${exposed.length}` : ""}`),
         ...rows(exposed, (p) => h("button.row-line", {
           onclick: () => preview(Number(p.port)),
           oncontextmenu: (e) => {
@@ -384,8 +379,18 @@ const ports = {
           },
         },
           h("span", null, h("b", `:${p.port}`), h("span.dim", ` ${p.name ?? ""}`)),
-          h("span.sz", "open"),
+          h("span.ops-pill.ok", "open"),
         )),
+        h("div.ops-head", `Listening inside the machine${unexposed.length ? ` · ${unexposed.length}` : ""}`),
+        ...(unavailable
+          ? [h("div.ops-error", null, icon("bell", 14), h("span", unavailable))]
+          : rows(unexposed, (p) => h("button.row-line", {
+              onclick: () => expose(p.port),
+              title: `Expose :${p.port} under this machine's slug`,
+            },
+              h("span", null, h("b", `:${p.port}`)),
+              h("span.sz", "expose"),
+            ))),
       );
       fill(paneEl, emptyCard("network", "Ports",
         "What is listening inside the machine, and what the Gateway serves to the outside. Click a listening port to expose it; right-click an exposed one for its URL.",
@@ -962,12 +967,15 @@ const audit = {
       fill(listEl,
         error ? errorCard(error) : null,
         chain ? h("div.ops-head", chain.ok ? `chain intact · ${chain.count} rows` : `chain broken at row ${chain.brokenAtId}`) : null,
+        // Name, time, result — three columns rather than one sentence, because
+        // the question here is usually "what happened at 13:22" or "what went
+        // wrong", and neither is answerable by reading a paragraph per row.
         ...rows(events, (e) => h("button.row-line", {
           onclick: () => show(e),
+          class: e.result_kind === "ok" ? "" : "bad",
         },
-          h("span", null,
-            h("b.mono", `${e.server}.${e.tool}`),
-            h("span.dim", ` ${clock(e.ts)}`)),
+          h("span", null, h("b.mono", `${e.server}.${e.tool}`)),
+          h("span.sz.when", clock(e.ts)),
           pill(e.result_kind, e.result_kind === "ok" ? "ok" : e.result_kind === "denied" ? "warn" : "err"),
         )),
       );

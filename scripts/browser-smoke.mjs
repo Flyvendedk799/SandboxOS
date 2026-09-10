@@ -75,6 +75,14 @@ try {
   await page.goto(`${base}/${sandbox.slug}/os`);
   await page.waitForSelector(".os-window", { timeout: 15_000 });
   check((await page.$$(".os-window")).length >= 2, "the first-run desktop paints its windows");
+
+  // Nobody else has touched this machine, so nothing may claim they have. The
+  // Terminal used to record its own session with two conditional writes in one
+  // tick; they collided with each other, and the owner of a brand-new desktop was
+  // told "someone else (or an agent) changed it first".
+  await page.waitForTimeout(1200);
+  const boot = await page.$$eval(".toast", (els) => els.map((e) => e.textContent));
+  check(boot.length === 0, `opening a settled desktop accuses nobody (${boot.join(" | ") || "no toasts"})`);
   check(await page.$(".os-menubar .status"), "menubar carries real status readings");
   check(await page.$(".os-dock .dock-app"), "the dock is there");
 
