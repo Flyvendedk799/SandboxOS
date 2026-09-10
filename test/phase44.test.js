@@ -15,12 +15,12 @@
 // The diff is against `tab.saved`, which every tab already holds. It answers
 // "what am I about to write" before you press save — including after an agent
 // wrote the file underneath you.
-import "./_setup.js";
+import { readSource } from "./_setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
-const code = fs.readFileSync(new URL("../apps/gateway/public/js/os/code.js", import.meta.url), "utf8");
+const code = readSource(new URL("../apps/gateway/public/js/os/code.js", import.meta.url));
 
 /** Run one of the editor's own pure helpers, lifted out of the module. */
 function lift(name, extra = "") {

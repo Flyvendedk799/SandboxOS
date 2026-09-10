@@ -10,7 +10,7 @@
 // What "authored" means here: whatever comes back, a caller reads a sentence this
 // project wrote. Not a stack, not a driver's complaint, not the inside of a
 // prepared statement.
-import "./_setup.js";
+import { readSource } from "./_setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -234,7 +234,7 @@ test("a body that lies about its length is still bounded", async () => {
 // ── T1.7: the audit explorer can be taken with you, and pointed at one caller ──
 
 test("the audit explorer exports its rows with the filter and the chain's verdict", () => {
-  const ops = fs.readFileSync(new URL("../apps/gateway/public/js/os/ops.js", import.meta.url), "utf8");
+  const ops = readSource(new URL("../apps/gateway/public/js/os/ops.js", import.meta.url));
   const fn = ops.split("async function exportRows()")[1].split("async function verify()")[0];
   assert.match(fn, /filter: \{ \.\.\.f \}/, "the export says what produced it");
   assert.match(fn, /chain: verdict/, "and what the chain said at the time");
@@ -243,11 +243,11 @@ test("the audit explorer exports its rows with the filter and the chain's verdic
 });
 
 test("scoping the log to one caller is a query, not a second feature", () => {
-  const ops = fs.readFileSync(new URL("../apps/gateway/public/js/os/ops.js", import.meta.url), "utf8");
+  const ops = readSource(new URL("../apps/gateway/public/js/os/ops.js", import.meta.url));
   assert.match(ops, /principalId: win\.props\?\.principalId \?\? ""/, "the window carries the scope");
   assert.match(ops, /\.\.\.\(f\.principalId \? \{ principalId: f\.principalId \} : \{\}\)/, "and it goes to auditQuery as a filter");
   assert.match(ops, /Stop scoping to one caller/, "with a visible way out of it");
-  const wm = fs.readFileSync(new URL("../apps/gateway/public/js/os/wm.js", import.meta.url), "utf8");
+  const wm = readSource(new URL("../apps/gateway/public/js/os/wm.js", import.meta.url));
   assert.match(wm, /ctx\.launch\?\.\("audit", \{\s*\n\s*principalId: led\.principals\[0\]\.principalId,/,
     "an app's ledger opens the log scoped to the principal it was minted");
   assert.match(wm, /Everything it has called…/);

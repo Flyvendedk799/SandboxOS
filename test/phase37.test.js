@@ -12,7 +12,7 @@
 //     `kill()` asked killTree to walk the tree *and* killed our own child in the
 //     same breath; on Windows `taskkill /T` reads the tree when it runs, so the
 //     dev server was orphaned and kept its port.
-import "./_setup.js";
+import { readSource } from "./_setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
@@ -140,7 +140,7 @@ test("ending a session takes the process it started with it", async (t) => {
 // ── and the person gets the same aim the agent has ──────────────────────────
 
 test("the History panel offers the aim, not only the rewind", () => {
-  const builder = fs.readFileSync(new URL("../apps/gateway/public/js/os/builder.js", import.meta.url), "utf8");
+  const builder = readSource(new URL("../apps/gateway/public/js/os/builder.js", import.meta.url));
   const revert = builder.split("async function revertTo(")[1].split("async function showDiff(")[0];
   assert.match(revert, /\[got\.only\] : null/, "the dialog's choice becomes revert's only:[…]");
   assert.match(revert, /call\("revert", \{ rev: rev\.rev, \.\.\.\(only \? \{ only \} : \{\}\) \}\)/, "and an unaimed undo still sends no scope at all");

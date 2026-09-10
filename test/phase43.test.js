@@ -6,7 +6,7 @@
 // re-run with edits, a Tide badge that opens Sync. A machine where every answer
 // is in a different window you have to know about is a machine that makes you do
 // the work twice.
-import "./_setup.js";
+import { readSource } from "./_setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -23,7 +23,7 @@ const ok = async (server, tool, args = {}) => {
   assert.ok(r.ok, `${server}.${tool}: ${r.error}`);
   return r.result;
 };
-const read = (rel) => fs.readFileSync(new URL(rel, import.meta.url), "utf8");
+const read = (rel) => readSource(new URL(rel, import.meta.url));
 
 test.before(async () => {
   openDb();

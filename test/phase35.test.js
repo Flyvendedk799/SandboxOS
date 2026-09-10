@@ -4,7 +4,7 @@
 // restore (and be told what a backup cannot bring back), an allowance you can
 // see, per-call latency in the audit log, an app that cannot freeze the shell
 // without saying so, and readings that report "unavailable" rather than zero.
-import "./_setup.js";
+import { readSource } from "./_setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -190,16 +190,16 @@ test("a port scan that could not look is not an empty machine", async () => {
 // ── T4.3 · an app cannot freeze the shell in silence ────────────────────────
 
 test("the shell pings every frame and reports one that stops answering", () => {
-  const frames = fs.readFileSync(new URL("../apps/gateway/public/js/os/frames.js", import.meta.url), "utf8");
+  const frames = readSource(new URL("../apps/gateway/public/js/os/frames.js", import.meta.url));
   assert.match(frames, /const PING_MS/, "there is a watchdog");
   assert.match(frames, /export function onFrameHealth/, "it can be watched");
   assert.match(frames, /case "pong":/, "the answer is a message, not a guess");
   assert.match(frames, /if \(document\.hidden\) return;/, "a background tab is not a stuck app");
 
-  const bridge = fs.readFileSync(new URL("../apps/gateway/public/js/os/bridge.js", import.meta.url), "utf8");
+  const bridge = readSource(new URL("../apps/gateway/public/js/os/bridge.js", import.meta.url));
   assert.match(bridge, /m\.event === "ping"/, "and the frame answers it");
 
-  const wm = fs.readFileSync(new URL("../apps/gateway/public/js/os/wm.js", import.meta.url), "utf8");
+  const wm = readSource(new URL("../apps/gateway/public/js/os/wm.js", import.meta.url));
   assert.match(wm, /function paintStuck/, "a card, not a dead rectangle");
   assert.match(wm, /Reload it/);
   assert.match(wm, /Open its source/);

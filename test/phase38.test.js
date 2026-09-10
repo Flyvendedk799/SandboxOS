@@ -3,7 +3,7 @@
 // T5.2 of goal.md. The Help app does not carry a copy of the documentation: it
 // reads the files this build ships and the tool catalogue this machine actually
 // serves, so neither half can drift from the thing it describes.
-import "./_setup.js";
+import { readSource } from "./_setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -22,7 +22,7 @@ const ok = async (server, tool, args = {}) => {
   return r.result;
 };
 const get = (p, cookie = null) => fetch(`${base}${p}`, { headers: { cookie: cookie ?? `sbx_session=${session}` } });
-const read = (rel) => fs.readFileSync(new URL(rel, import.meta.url), "utf8");
+const read = (rel) => readSource(new URL(rel, import.meta.url));
 
 test.before(async () => {
   openDb();
@@ -51,7 +51,11 @@ test("every page in the manual is a file this build ships", () => {
 
 test("a page is the file, byte for byte", () => {
   const page = manualPage("experience");
-  assert.equal(page.text, read("../docs/15-os-experience.md"), "the manual serves the file, not a rendering of it");
+  // Read raw, not normalised: this test is *about* the bytes. The manual route
+  // serves the file as it is on disk, line endings and all, and a helper that
+  // tidied them here would be asserting something weaker than it claims.
+  const onDisk = fs.readFileSync(new URL("../docs/15-os-experience.md", import.meta.url), "utf8");
+  assert.equal(page.text, onDisk, "the manual serves the file, not a rendering of it");
   assert.equal(manualPage("nope"), null, "and an unknown page is nothing, not a path");
 });
 
