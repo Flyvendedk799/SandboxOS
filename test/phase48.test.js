@@ -213,3 +213,57 @@ test("a job that died reports the line that says why, not the last line printed"
   // server could not start, which is Node's sign-off line after a stack.
   assert.match(desktop, /a crashed Node process signs off with its own version/);
 });
+
+// ── stopping something inside a Cell we reach indirectly ───────────────────
+//
+// A Docker deployment restarted its Gateway and the dev server inside the
+// container carried on, holding its port, with nothing left running that knew it
+// existed. `stopAllProcs` had "stopped" it: the kill was a promise, the shutdown
+// path called it and then `process.exit`, and the `docker exec` never left the
+// starting line. The same mistake killTree made on Windows, in another file.
+
+test("an in-Cell kill happens before the call returns, when it can", async () => {
+  const { remoteHandle } = await import("../packages/cell/src/handles.js");
+  const order = [];
+  const client = { pid: 1234, kill: () => order.push("client") };
+
+  const sync = remoteHandle(client, "abc", () => { order.push("async"); return Promise.resolve(); }, {
+    runInCellSync: (script) => { order.push(`sync:${/kill -KILL/.test(script) ? "KILL" : "TERM"}`); },
+  });
+  assert.equal(sync.kill("SIGKILL"), true);
+  assert.deepEqual(order, ["sync:KILL", "client"],
+    "the process inside the Cell dies first, and it has already died by the time this returns");
+
+  // The signal reaches the script, not just the fact of a kill.
+  order.length = 0;
+  sync.kill();
+  assert.deepEqual(order, ["sync:TERM", "client"]);
+});
+
+test("a backend with no synchronous path still kills, asynchronously", async () => {
+  const { remoteHandle } = await import("../packages/cell/src/handles.js");
+  let asked = null;
+  const h = remoteHandle({ pid: 1, kill: () => {} }, "xyz", (script) => { asked = script; return Promise.resolve(); });
+  h.kill("SIGTERM");
+  assert.match(asked, /kill -TERM/, "the old path is still there for anything that cannot offer a sync one");
+  assert.match(asked, /\.xyz\.pid|xyz/, "aimed at the pid the in-Cell shell recorded");
+});
+
+test("every backend that reaches a Cell indirectly offers the synchronous path", () => {
+  for (const f of ["docker-backend.js", "hardened-docker-backend.js", "firecracker-backend.js"]) {
+    const src = readSource(new URL(`../packages/cell/src/${f}`, import.meta.url));
+    assert.match(src, /remoteHandle\(proc, marker,/, `${f} builds a remote handle`);
+    assert.match(src, /runInCellSync:/, `${f} gives it a synchronous killer`);
+    assert.match(src, /spawnSync/, `${f} imports one`);
+  }
+});
+
+test("the shutdown path is the reason this has to be synchronous", () => {
+  const index = readSource(new URL("../apps/gateway/src/index.js", import.meta.url));
+  // stopAllProcs is called and then the process exits. Anything the kill left
+  // for later does not happen.
+  assert.match(index, /const procs = stopAllProcsEverywhere\(\);/);
+  assert.match(index, /if \(signal\) process\.exit\(0\);/);
+  const handles = readSource(new URL("../packages/cell/src/handles.js", import.meta.url));
+  assert.match(handles, /the exec never left the starting line/);
+});

@@ -7,13 +7,19 @@
 
 import fs from "node:fs";
 import { newMarker as ptyMarker, ptyWrapper, resizeScript, cleanupScript } from "./pty.js";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { safeSpawn, detachedSpawn } from "./spawn.js";
 import config from "../../config/src/config.js";
 import { remoteHandle, newMarker, recordingScript } from "./handles.js";
 
 const WORKDIR = "/sandbox";
 
+/** `docker`, synchronously. Used only where the caller cannot wait for a promise —
+ *  the process is about to exit and a fire-and-forget kill would never land. */
+function dockerSync(args, { timeoutMs = 10_000 } = {}) {
+  try { return spawnSync("docker", args, { timeout: timeoutMs, stdio: "ignore" }); }
+  catch { return null; }
+}
 function docker(args, { timeoutMs = 60_000 } = {}) {
   return new Promise((resolve) => {
     execFile("docker", args, { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 },
@@ -139,8 +145,11 @@ export class DockerBackend {
       "/bin/sh", "-c", recordingScript(marker), command,
     ], {}, (err) => callback({ type: "stderr", chunk: `sandboxos: could not run docker: ${err.code ?? err.message}
 ` }));
-    const handle = remoteHandle(proc, marker, (script) =>
-      docker(["exec", this.container, "/bin/sh", "-c", script], { timeoutMs: 10_000 }));
+    const handle = remoteHandle(proc, marker,
+      (script) => docker(["exec", this.container, "/bin/sh", "-c", script], { timeoutMs: 10_000 }),
+      // …and the same thing synchronously, for the shutdown path: it calls this
+      // and then exits, so a promise here is a kill that never happens.
+      { runInCellSync: (script) => dockerSync(["exec", this.container, "/bin/sh", "-c", script]) });
     const timer = setTimeout(() => handle.kill("SIGKILL"), timeoutMs);
     proc.stdout.on("data", (d) => callback({ type: "stdout", chunk: d.toString() }));
     proc.stderr.on("data", (d) => callback({ type: "stderr", chunk: d.toString() }));
