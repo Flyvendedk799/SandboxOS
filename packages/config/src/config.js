@@ -35,8 +35,23 @@ export const config = {
 
   /** Cell backend: "docker" | "local" | "auto". */
   cellBackend: env("SANDBOXOS_CELL_BACKEND", "auto"),
-  /** Container image for the docker backend. */
-  cellImage: env("SANDBOXOS_CELL_IMAGE", "alpine:latest"),
+  /**
+    * Container image for the docker backend.
+    *
+    * `alpine:latest` was the default for a long time and it is the wrong one: it
+    * has no `script` (so every Terminal ran in line mode, with no job control and
+    * no full-screen programs), no Node and no Python (so nothing in it could
+    * serve a folder), and its busybox is built without the httpd applet's
+    * company. Eight megabytes bought a machine that could not do the two things
+    * people open a machine to do.
+    *
+    * `node:22-slim` is Debian, so `script` is there via `bsdutils` (Essential),
+    * and Node is there for dev servers and for the welcome page first run puts up.
+    * It costs more to pull, once. Anything smaller is a deliberate trade and the
+    * env var is how you make it — see docker/cell.Dockerfile for an Alpine build
+    * with util-linux in it.
+    */
+  cellImage: env("SANDBOXOS_CELL_IMAGE", "node:22-slim"),
 
   /** The seed tenant + Sandbox created on first boot. */
   seed: {

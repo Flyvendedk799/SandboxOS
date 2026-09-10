@@ -103,10 +103,13 @@ export function firstRunFiles(machineName, seed) {
  */
 export async function firstRunServer(probe) {
   const candidates = [
-    { label: "node", test: "node --version", cmd: (port) => `node welcome/serve.cjs ${port}` },
-    { label: "python3", test: "python3 --version", cmd: (port) => `python3 -m http.server ${port} --directory welcome` },
-    { label: "python", test: "python --version", cmd: (port) => `python -m http.server ${port} --directory welcome` },
-    { label: "busybox httpd", test: "busybox --help", cmd: (port) => `busybox httpd -f -p ${port} -h welcome` },
+    { label: "node", test: "command -v node", cmd: (port) => `node welcome/serve.cjs ${port}` },
+    { label: "python3", test: "command -v python3", cmd: (port) => `python3 -m http.server ${port} --directory welcome` },
+    { label: "python", test: "command -v python", cmd: (port) => `python -m http.server ${port} --directory welcome` },
+    // Not "is busybox here" but "does this busybox have httpd": `--list` prints
+    // the applets it was built with, and exits 0 while `--help` exits 1.
+    { label: "busybox httpd", test: "busybox --list 2>/dev/null | grep -qx httpd", cmd: (port) => `busybox httpd -f -p ${port} -h welcome` },
+    { label: "httpd", test: "command -v httpd", cmd: (port) => `httpd -f -p ${port} -h welcome` },
   ];
   const tried = [];
   for (const c of candidates) {
