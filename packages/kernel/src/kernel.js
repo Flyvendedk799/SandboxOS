@@ -17,7 +17,7 @@ import { getCell } from "../../cell/src/cell.js";
 import { CATALOG, availableServers } from "./catalog.js";
 import { loadManifest, enabledServers } from "../../manifest/src/manifest.js";
 import { hostedServer, killHosted, killAllHosted } from "./marketplace-pool.js";
-import { stopAllProcs } from "./servers/proc.js";
+import { stopAllProcs, _resetJobRestore } from "./servers/proc.js";
 import { syncAppServers, appServerSignature } from "./app-servers.js";
 import { osEvents, hasOs, loadOs } from "../../os/src/index.js";
 
@@ -269,6 +269,7 @@ export async function getKernel(sandbox) {
 export function _resetKernels() {
   for (const p of _kernels.values()) Promise.resolve(p).then((k) => k.dispose()).catch(() => {});
   _kernels.clear();
+  _resetJobRestore(); // a fresh process, as far as restore is concerned
   killAllHosted(); // belt-and-suspenders: reap any orphaned children
 }
 

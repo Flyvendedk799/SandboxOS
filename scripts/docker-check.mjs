@@ -171,6 +171,62 @@ try {
   }, 15_000);
   check(released, "stopping the job frees the port inside the container");
 
+  // ── an orphan from a Gateway that is gone ─────────────────────────────────
+  //
+  // The case the shutdown path cannot cover. A Gateway that is SIGKILLed — by a
+  // supervisor, an OOM, a power cut — runs no handler, and the job it started
+  // keeps running inside the container holding its port, with nothing left that
+  // knows it exists. So the rule lives at the other end: adopting a Cell that is
+  // already up means everything in it belongs to somebody dead.
+  //
+  // Running the reaper under an identity that is not ours *is* that situation,
+  // seen from inside the container: the job carries this boot's stamp, and the
+  // reaper carries the next one's.
+  const { reapScript } = await import("../packages/cell/src/orphans.js");
+  const orphan = await ok("proc", "start", { cmd: server.cmd(8098, firstRunBindHost("docker")), name: "orphan" });
+  const holding = await until(async () => (await ok("ports", "scan", {})).listening?.some((p) => p.port === 8098));
+  check(holding, "a second server is listening, and nothing has been told to stop it");
+
+  const reaped = await ok("proc", "exec", { cmd: reapScript("00000000deadbeef") });
+  check(reaped.stdout.trim().split("\n").filter(Boolean).length > 0,
+    `the reaper found the orphan (pids ${JSON.stringify(reaped.stdout.trim())})`);
+  const freed = await until(async () => !(await ok("ports", "scan", {})).listening?.some((p) => p.port === 8098), 15_000);
+  check(freed, "adopting the Cell frees the port a dead Gateway's job was holding");
+
+  // And it is a reaper, not a bomb: the container's own init has no stamp, so it
+  // is not ours to kill — and if it had been, nothing below would answer.
+  const alive = await ok("proc", "exec", { cmd: "echo still-here" });
+  check(alive.stdout.includes("still-here"), "the container itself survived being tidied");
+  await ok("proc", "stop", { id: orphan.id }).catch(() => {});
+
+  // ── …and back again ───────────────────────────────────────────────────────
+  //
+  // The other half of the same fix. Reaping alone would trade an invisible
+  // running server for a dead one: the job table has always been in memory, so a
+  // restart lost it. A supervised process is looked after across the life of the
+  // machine, not the life of whichever process is looking after it.
+  const { stopAllProcsEverywhere, restoreJobs, _resetJobRestore } =
+    await import("../packages/kernel/src/servers/proc.js");
+  const kept = await ok("proc", "start", { cmd: server.cmd(8097, firstRunBindHost("docker")), name: "kept" });
+  await ok("ports", "expose", { port: 8097, name: "kept" });
+  check(await until(async () => (await ok("ports", "scan", {})).listening?.some((p) => p.port === 8097)),
+    "a third server is listening, and this time nobody stops it on purpose");
+
+  // A Gateway going away: processes killed, table dropped, file left behind.
+  stopAllProcsEverywhere();
+  check((await ok("proc", "jobs")).jobs.length === 0, "the job table is empty, as it is after a restart");
+  _resetJobRestore();
+  const restored = await restoreJobs(kernel.cell, sandbox);
+  check(restored.restored === 1, `the next boot starts it again (${restored.restored} restored)`);
+  const backUp = await until(async () => {
+    const r = await fetch(`${base}/${slug}/p/8097/`, { headers: { cookie: `sbx_session=${session}` }, signal: AbortSignal.timeout(3000) }).catch(() => null);
+    return !!r && r.ok;
+  }, 20_000);
+  check(backUp, "and it is serving again, through the slug, on the port it had");
+  const sameId = (await ok("proc", "jobs")).jobs.find((j) => j.id === kept.id);
+  check(!!sameId && sameId.state === "running", "under the id it had, so anything that referred to it still does");
+  await ok("proc", "stop", { id: kept.id }).catch(() => {});
+
   // ── a shell session in a container ────────────────────────────────────────
   let saw = "";
   const s = attachSession(kernel.cell, sandbox.id, { name: "container shell" }, (d) => { saw += d.toString(); }, () => {});

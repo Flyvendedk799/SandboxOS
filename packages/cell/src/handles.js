@@ -85,6 +85,11 @@ export function remoteHandle(client, marker, runInCell, { runInCellSync = null }
       // outlived every restart, holding its port, with nothing left running that
       // knew it existed: the exact orphan the shutdown path was written to
       // prevent, and the same mistake killTree made on Windows.
+      //
+      // This is the tidy exit, not the guarantee. A Gateway that is SIGKILLed
+      // runs no handler at all, so the guarantee lives in orphans.js: a Cell
+      // adopted while already running is emptied of whatever the last Gateway
+      // left in it.
       const script = killScript(marker, signal);
       if (runInCellSync) {
         try { runInCellSync(script); } catch { /* the Cell may already be gone */ }

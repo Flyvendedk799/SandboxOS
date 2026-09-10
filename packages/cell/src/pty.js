@@ -28,12 +28,43 @@ export const markerPath = (marker, tmp = "/tmp") => `${tmp}/.sbx-tty-${marker}`;
  * Pass it as: sh -c <this> sh <marker>   (marker arrives as $1).
  */
 export function ptyWrapper(shellCmd = "/bin/sh -i", tmp = "/tmp") {
+  // There are two incompatible programs called `script`, and asking whether one
+  // exists does not tell you which you have:
+  //
+  //   util-linux (Linux):  script -qfc "<command>" <file>
+  //   BSD (macOS, *BSD):   script -q <file> <command> [args…]
+  //
+  // The wrapper used to emit only the first. On macOS that is not a pty that
+  // fails to allocate — it is a `script` that prints its usage and exits, so the
+  // shell never starts at all. Every Terminal on a Mac died at birth with
+  // "script -p [-deq]…" where a prompt should have been, and the release check's
+  // macOS leg had been red for it.
+  //
+  // The probe is the command itself: run the util-linux form on something
+  // harmless and see whether it is understood. That answers the question the
+  // version string only hints at, and costs one process at session start.
+  //
+  // Line 2 of the marker file is the pid `cleanupScript` signals, and it has to
+  // be written by *this* shell rather than inside the pty: `$$` is expanded here,
+  // before this shell is replaced, so the number is the shell docker/ssh started
+  // — the process-group leader, which is what takes the whole session down.
+  // Without it `sed -n 2p` read an empty line, the kill was a no-op, and every
+  // closed terminal left a live shell behind in the Cell.
+  const inner = `tty > \\"$M\\" 2>/dev/null; echo $$ >> \\"$M\\" 2>/dev/null; exec ${shellCmd}`;
   return [
     `M="${tmp}/.sbx-tty-$1"`,
     'if command -v script >/dev/null 2>&1; then',
-    // The inner command runs via the pty's own shell: record the tty, then exec.
-    `  exec script -qfc "tty > \\"$M\\" 2>/dev/null; exec ${shellCmd}" /dev/null`,
+    '  if script -qfc true /dev/null >/dev/null 2>&1; then',
+    `    exec script -qfc "${inner}" /dev/null`,
+    "  else",
+    // BSD takes the file first and the command as ordinary argv after it, so the
+    // recorder needs a shell of its own to be a single command.
+    `    exec script -q /dev/null /bin/sh -c "${inner}"`,
+    "  fi",
     "else",
+    // No pty, so no tty on line 1 — but the pid on line 2 still has to be there,
+    // or a line-mode session is the one thing cleanup cannot end.
+    `  printf '\\n%s\\n' "$$" > "$M" 2>/dev/null`,
     `  printf '%s\\n' '(line mode: this image has no script, so job control and full-screen'`,
     `  printf '%s\\n' ' programs are unavailable. Alpine: apk add util-linux. Debian: already there.'`,
     `  printf '%s\\n' ' Or point SANDBOXOS_CELL_IMAGE at an image that has it.)'`,

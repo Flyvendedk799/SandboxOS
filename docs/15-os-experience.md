@@ -263,6 +263,77 @@ The container leg checks both halves of this on a real container: that `ports.sc
 `/proc/net/tcp` fallback, which the new default image is the first to need — and that
 stopping a job actually frees the port inside the container.
 
+### …and stopping it when nobody is left to ask
+
+That fix was verified against the live deployment, and the job survived anyway. The
+reason is worth writing down, because it is not a bug in the handler: the PaaS this
+project is deployed on stops a service by sending SIGTERM to the process group and
+then, in the next statement, SIGKILL to the same group. The handler is entered and
+killed roughly a microsecond later. A direct SIGTERM reaps correctly; a restart
+through the supervisor reaps nothing, every time.
+
+That is not a thing to work around. It is a thing to stop depending on. A shutdown
+handler is a courtesy the machine is not obliged to extend — SIGKILL runs none, and
+neither does a host reboot, an OOM kill, or a power cut — so any design whose only
+cleanup happens on the way out has a hole that no amount of care on the way out can
+close.
+
+So the rule moved to the other end. A Cell outlives its Gateway on purpose: the
+container is stopped only on hibernate, which is what keeps the volume warm and the
+boot cheap. That makes *adoption* the moment when a total statement is available for
+free — **anything running in a Cell that was already up was started by a Gateway that
+is gone.** Not a heuristic about ports or process names. A fact about who is alive.
+
+`packages/cell/src/orphans.js` holds both halves. Every command a backend runs in a
+Cell carries `SANDBOXOS_BOOT`, this Gateway's identity for the length of one process;
+adopting a running Cell kills everything carrying anybody else's. The environment is
+the right place for the stamp: children inherit it, it survives the `exec` that makes
+a recorded pid *be* the command, and unlike a pid file it cannot be claimed by an
+unrelated process handed the same number. A process with no stamp — the container's
+own init, something you started by hand in a shell we do not own — is not ours to
+kill. The marker files under `/tmp/.sbx-*` get a second sweep, through the same
+environment check, so a Cell that has been up since before the stamp existed still
+empties instead of staying immortal.
+
+Two smaller holes closed with it. `cleanupScript` had always signalled the pid on
+line 2 of the pty marker file, and nothing had ever written line 2 — so every closed
+Terminal left a live shell in the Cell. And a Cell's pid 1 was `tail -f /dev/null`,
+which never calls `wait()`: the live deployment had six zombies sitting in its process
+table. Containers now run under `--init`.
+
+### …and starting it again
+
+Reaping on its own is half a fix, and the wrong half to ship alone. The job table had
+always been a `Map` in one process's memory, so a restart lost it — which for a long
+time was survivable in the worst possible way: the process kept running inside the
+Cell, so at least the dev server was still up. Invisible, unstoppable, holding its
+port, but up. Remove the invisible half and nothing is left: an empty Jobs list and a
+dead server, every deploy.
+
+So the list is written down, at `jobs.json` beside the Cell volume — next to `os/`,
+for the same reason the desktop document lives there rather than in Files: it is the
+machine's own bookkeeping, not your files, and it should not travel in a distro. It
+holds what a job *is* (id, name, command, timeout, state) and not what it printed:
+the logs belonged to a process that no longer exists, and a restored job starts a new
+log rather than pretending to continue an old one.
+
+Adopting a Sandbox brings back what was running, under the ids it had, so anything
+that referred to a job still does. Jobs that had finished come back as history, so
+the list is not blank. Decisions are preserved in both directions — a job you stopped
+stays stopped, or the next boot would helpfully start the very thing you just turned
+off. There is no retry: a command that fails immediately becomes a failed job you can
+read, where a restart loop would be noise.
+
+The ordering is load-bearing and free. `startJob` awaits `cell.ensureRunning()`, and
+that is where a Cell inherited from a dead Gateway is emptied — so reaping always
+finishes before the first restored job starts, and a restored dev server never races
+its predecessor's corpse for the port.
+
+The container leg proves the whole cycle on a real container: a job left running, a
+reaper wearing the next boot's identity, the port freed, the container still
+answering, and then a job that goes away with its Gateway and is serving again
+through the slug, on the port it had, under the id it had.
+
 ### Where a served folder binds
 
 `cell.endpoint(port)` says how the Gateway reaches something inside a Cell: the local

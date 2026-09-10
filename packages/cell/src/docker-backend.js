@@ -11,6 +11,7 @@ import { execFile, spawnSync } from "node:child_process";
 import { safeSpawn, detachedSpawn } from "./spawn.js";
 import config from "../../config/src/config.js";
 import { remoteHandle, newMarker, recordingScript } from "./handles.js";
+import { bootEnv, reapOrphans } from "./orphans.js";
 
 const WORKDIR = "/sandbox";
 
@@ -89,14 +90,23 @@ export class DockerBackend {
       }
     }
 
-    if (state === "running") return { state: "running" };
+    if (state === "running") return { state: "running", reaped: await this._reap() };
     if (state === "stopped") {
+      // Everything inside a container dies with `docker stop`, so a Cell we are
+      // resuming is empty by construction and there is nothing to reap.
       await docker(["start", this.container]);
       return { state: "running" };
     }
     // absent → create. `tail -f /dev/null` keeps the container alive cheaply.
     const run = await docker([
       "run", "-d",
+      // `tail -f /dev/null` is a fine way to keep a container alive and a poor
+      // pid 1: it never calls wait(), so every process re-parented to it stays a
+      // zombie. A Cell re-parents them constantly — each `docker exec` job whose
+      // shell outlives its client — and a live deployment had six of them sitting
+      // in the process table holding pid slots. `--init` puts tini in front, whose
+      // entire job is to reap.
+      "--init",
       "--name", this.container,
       "-v", `${this.root}:${WORKDIR}`,
       "-w", WORKDIR,
@@ -124,9 +134,19 @@ export class DockerBackend {
   /** Run a command inside the container, rooted at the volume, with optional env.
    *  Env passed via `docker exec -e` is ephemeral (not stored in container config /
    *  `docker inspect`) — suitable for injecting resolved secrets. */
+  /** Kill anything left inside by a Gateway that is no longer running. Once per
+   *  backend instance, because a new instance means a new Gateway boot — which is
+   *  exactly when everything still running in here belongs to somebody dead. */
+  async _reap() {
+    if (this._reaped) return 0;
+    this._reaped = true;
+    return reapOrphans((script) => docker(["exec", this.container, "/bin/sh", "-c", script], { timeoutMs: 20_000 }),
+      `cell ${this.sandbox.id}`);
+  }
+
   async exec(command, { timeoutMs = 30_000, env = {} } = {}) {
     await this.ensureRunning();
-    const envFlags = Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
+    const envFlags = Object.entries({ ...bootEnv(), ...env }).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
     const r = await docker(["exec", "-w", WORKDIR, ...envFlags, this.container, "/bin/sh", "-c", command], { timeoutMs });
     return r;
   }
@@ -134,7 +154,7 @@ export class DockerBackend {
   /** Streaming exec via `docker exec`. Callback receives {type,chunk|code} objects. */
   async execStream(command, callback, { timeoutMs = 30_000, env = {} } = {}) {
     await this.ensureRunning();
-    const envFlags = Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
+    const envFlags = Object.entries({ ...bootEnv(), ...env }).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
     // Killing `docker exec` locally does not kill the process inside the
     // container, so the in-container shell records its pid before becoming the
     // command; the handle signals *that*. The command travels as $0, so no
@@ -164,7 +184,7 @@ export class DockerBackend {
    *  and bridge stdio via callbacks. Resize is `stty` on the recorded tty. */
   async execInteractive(onData, onClose, { env = {}, cols = 80, rows = 24 } = {}) {
     await this.ensureRunning();
-    const envFlags = Object.entries({ ...env, TERM: "xterm-256color", COLUMNS: String(cols), LINES: String(rows) })
+    const envFlags = Object.entries({ ...bootEnv(), ...env, TERM: "xterm-256color", COLUMNS: String(cols), LINES: String(rows) })
       .flatMap(([k, v]) => ["-e", `${k}=${v}`]);
     const marker = ptyMarker();
     const proc = safeSpawn("docker", ["exec", "-i", "-w", WORKDIR, ...envFlags, this.container, "/bin/sh", "-c", ptyWrapper("/bin/sh -i"), "sh", marker], {
