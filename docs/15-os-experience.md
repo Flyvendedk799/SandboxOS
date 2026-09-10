@@ -489,6 +489,17 @@ moved in the meantime (an agent got there first), the Kernel refuses with the co
 rather than silently overwriting the other editor. Nothing is retried blindly: the
 person can see what changed and decide.
 
+The word *place* is load-bearing, and for a while it was not. `windowSet` and
+`widgetSet` do two jobs: the inspector and a drag use them to say where something
+goes, and an app uses them to record *itself* — the Terminal storing which session
+its tab is attached to, Files its folder, Jobs the log it is following. Sending
+every one of those conditionally meant an app's own two writes in a single tick
+collided **with each other**, and the owner of a machine nobody else had ever
+opened was told "someone else (or an agent) changed it first" — the most expensive
+kind of wrong a machine can be. The client now asks whether a call actually
+mentions a place (`x`, `y`, `w`, `h`, `ws`, `min`, `max`, `pin`, `z`) before it
+guards it, and the smoke asserts that a settled desktop accuses nobody on open.
+
 Known LWW cases, on purpose: a `themeSet` after another `themeSet` (the later one
 wins, both are audited, revert restores either); `notify` and `notificationsRead`
 (append-only in spirit); a `patch` without `expectRev`. A CRDT is not warranted for a
