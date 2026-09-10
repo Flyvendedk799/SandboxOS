@@ -18,25 +18,35 @@
 //     it. A tool that needed to know the pixel size of the screen would be a
 //     tool in the wrong layer.
 
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+
 import {
-  loadOs, mutateOs, saveOs, resetOs, osHistory, osHistoryEntry, revertOs, announce,
+  loadOs, mutateOs, saveOs, resetOs, osHistory, osHistoryEntry, revertOs, REVERT_SCOPES, announce,
   normalizeDoc, normApp, normWidgetKind, cleanTokens, cleanAnimation, cleanPatterns,
   isId, rid, LIMITS, DOCK_POSITIONS, WM_MODES, resolveAlias,
   buildTree, treeBoxes, treeLeaves, splitFor, setRatio, setDir, swapLeaves, normalizeTree, describeTree, TREE_PRESETS,
-  BUILTIN_THEMES, listThemes, resolveTheme,
+  BUILTIN_THEMES, listThemes, resolveTheme, themeKey, checkContrast, contrastRatio,
   BUILTIN_ANIMATIONS, listAnimations, resolveAnimation,
   builtinApp, builtinWidget, appDescriptor, widgetDescriptor, listApps, listWidgetKinds,
   writeBundleFile, readBundleFile, listBundleFiles, removeBundleFile, removeBundle,
   exportBundle, importBundle, starterApp, starterAppCss, starterAppJs, starterWidget, starterServerJs, starterAppToolsJs,
   exportPayload, importPayload, builtinDistroList, docFromDistroSpec, RESERVED_SERVER_NAMES,
-  summarizeDoc, silhouetteSvg,
+  machinePayload, compareVolume,
+  summarizeDoc, silhouetteSvg, READ_ONLY_DESKTOP_TOOLS,
+  writeCheckpoint, readCheckpoint, removeCheckpoint, restoreCheckpoint,
+  KEY_ACTIONS, DEFAULT_KEYS, isChord, NOTIFY_KINDS, prettyChord,
+  firstRunFiles, firstRunServer, firstRunPort, proposalImpact,
 } from "../../../os/src/index.js";
 import { loadManifest, saveManifest } from "../../../manifest/src/manifest.js";
 import { CATALOG } from "../catalog.js";
 import { BUILTIN_DISTROS } from "../../../os/src/catalog.js";
 import {
   createDistro, listDistros, getDistro, getDistroByName, deleteDistro, listGallery, setDistroVisibility, bumpDistroForks,
+  listSandboxAccess, revokeSandboxAccess, queryAudit,
 } from "../../../control-db/src/registry.js";
+import { canDelegate } from "../capabilities.js";
 
 const S = { type: "string" };
 const N = { type: "number" };
@@ -108,6 +118,7 @@ function snapshot(doc, kernel = null) {
   return {
     doc,
     rev: doc.rev,
+    themeKey: themeKey(doc),
     theme: resolveTheme(doc),
     animation: resolveAnimation(doc),
     apps: annotatedApps(doc, kernel),
@@ -209,7 +220,9 @@ export function desktopServer(deps) {
     widgets: Object.fromEntries(Object.keys(d.widgetKinds).map((k) => [k, exportBundle(sandbox, "widget", k)])),
   });
 
-  return {
+  // The server refers to its own tools when applying a proposal: a proposal is a
+  // list of ordinary calls, and it must not become a second, weaker way in.
+  const self = {
     name: "desktop",
     tools: {
 
@@ -226,7 +239,7 @@ export function desktopServer(deps) {
       state: {
         description: "Just the OS document (no catalogs) — the cheap poll.",
         inputSchema: obj({}),
-        async handler() { const d = doc(); return { doc: d, rev: d.rev }; },
+        async handler() { const d = doc(); return { doc: d, rev: d.rev, themeKey: themeKey(d) }; },
       },
 
       summarize: {
@@ -299,12 +312,163 @@ export function desktopServer(deps) {
       },
 
       revert: {
-        description: "Restore a previous revision (itself recorded as a new revision).",
-        inputSchema: obj({ rev: N }, ["rev"]),
+        description:
+          "Restore a previous revision (itself recorded as a new revision). Pass only:['windows'] to take back " +
+          "just part of it — undo an alignment without losing the widget that was added after it.",
+        inputSchema: obj({ rev: N, only: { type: "array", items: { type: "string", enum: [...REVERT_SCOPES] } } }, ["rev"]),
         async handler(_ctx, a) {
-          const next = revertOs(sandbox, a.rev);
-          return { ok: true, rev: next.rev, restored: Number(a.rev) };
+          const only = Array.isArray(a.only) && a.only.length ? a.only : null;
+          const next = revertOs(sandbox, a.rev, { only });
+          await syncServers();
+          return { ok: true, rev: next.rev, restored: Number(a.rev), ...(only ? { only } : {}) };
         },
+      },
+
+      // ── first run: ten minutes to useful (goal.md T5.1) ─────────────────
+      //
+      // A new machine used to open on a tidy but idle desktop. This makes the
+      // first thing you see the machine doing work: a seed you picked, a small
+      // project written into the volume, a static server supervised as a job,
+      // and that page open in the Browser under your own slug.
+      //
+      // Every step reports whether it happened and why not, because an
+      // onboarding that quietly does three of five things is how a person learns
+      // not to trust the thing they just installed.
+
+      setupSeeds: {
+        description: "The seeds first run can start from, with what each one opens.",
+        inputSchema: obj({}),
+        async handler() {
+          return {
+            seeds: builtinDistroList().map((d) => ({ id: d.id, name: d.name, description: d.description, hue: d.hue, theme: d.theme })),
+            setup: doc().setup,
+          };
+        },
+      },
+
+      setup: {
+        description:
+          "First run: adopt a seed, write a small project into the volume, serve it as a supervised job, and open it. " +
+          "Reports every step and what this host could not do. skip:true just marks the machine set up.",
+        inputSchema: obj({
+          seed: S, name: S,
+          serve: { type: "boolean", description: "Start a static server for the project (default true)." },
+          skip: { type: "boolean", description: "Mark first run done without changing anything." },
+        }),
+        async handler(ctx, a) {
+          const mark = (d, seed) => { d.setup = { done: true, seed: seed ?? null, at: Date.now() }; };
+
+          if (a.skip) {
+            const next = mutate((d) => mark(d, null), "setup", "first run: skipped");
+            return { ok: true, rev: next.rev, skipped: true, steps: [] };
+          }
+
+          const seedId = a.seed ?? "dev";
+          const seed = BUILTIN_DISTROS.find((x) => x.id === seedId);
+          if (!seed) throw new Error(`no such seed: ${seedId} — try ${BUILTIN_DISTROS.map((x) => x.id).join(", ")}`);
+
+          const steps = [];
+          const step = (what, ok, why = null) => { steps.push({ what, ok, ...(why ? { why } : {}) }); return ok; };
+          const asMe = (server, tool, args) => kernel.call({
+            principalId: ctx?.principalId ?? null, heldPatterns: ctx?.heldPatterns ?? [],
+            onBehalfOf: "first-run", server, tool, args,
+          });
+
+          // 1 · the desktop the seed describes, wearing this machine's name.
+          const current = doc();
+          saveOs(sandbox, docFromDistroSpec(seed, { name: a.name ?? current.name }), { label: `first run: ${seed.name}` });
+          step(`adopt the ${seed.name} seed`, true);
+
+          // 2 · a project in the volume. Files, not a database: everything here
+          //     is an ordinary file you can open, edit and delete.
+          const files = firstRunFiles(a.name ?? current.name, seed);
+          let wrote = 0;
+          let writeWhy = null;
+          for (const [rel, content] of Object.entries(files)) {
+            const r = await asMe("fs", "write", { path: rel, content });
+            if (r.ok) wrote += 1; else writeWhy = r.error;
+          }
+          step(`write ${Object.keys(files).length} files into the volume`, wrote === Object.keys(files).length, writeWhy);
+
+          // 3 · serve it, if this host can. The Cell may be an image with no
+          //     Node and no Python; that is a fact to report, not a failure to
+          //     hide behind a spinner.
+          let port = null;
+          let job = null;
+          if (a.serve !== false && wrote) {
+            const found = await firstRunServer(asMe);
+            if (!found.cmd) step("serve the project", false, found.why);
+            else if (!(port = await firstRunPort(asMe))) {
+              step("serve the project", false, "every port it tried is already in use on this host — expose one yourself from Ports");
+            } else {
+              const started = await asMe("proc", "start", { cmd: found.cmd(port), name: "welcome" });
+              if (!started.ok) step(`serve the project with ${found.label}`, false, started.error);
+              else {
+                job = started.result;
+                // proc.start returns as soon as the process is spawned, and a
+                // static server's usual failure — the port is already taken —
+                // happens a few milliseconds later. Reporting "serving" and then
+                // handing over a dead job is the exact shape of a silent success,
+                // so look again before saying it worked.
+                await new Promise((r) => setTimeout(r, 700));
+                const after = await asMe("proc", "logs", { id: job.id, tail: 6 });
+                const alive = after.ok && after.result.state === "running";
+                const why = alive ? null
+                  : ((after.result?.logs ?? []).map((l) => l.text).filter(Boolean).at(-1)
+                    ?? `it exited with code ${after.result?.code ?? "?"}`);
+                if (!step(`serve the project with ${found.label} on :${port}`, alive, why)) {
+                  port = null;
+                } else {
+                  const exposed = await asMe("ports", "expose", { port, name: "welcome" });
+                  step(`expose :${port} under /${sandbox.slug}/p/${port}/`, exposed.ok, exposed.ok ? null : exposed.error);
+                  if (!exposed.ok) port = null;
+                }
+              }
+            }
+          }
+
+          // 4 · open it, and mark the machine set up. One revision.
+          const next = mutate((d) => {
+            const open = (app, props = {}, box = {}) => {
+              const meta = appDescriptor(d, app);
+              if (!meta) return;
+              d.windows.push({
+                id: rid("w"), app, title: meta.name, props,
+                x: box.x ?? 60, y: box.y ?? 60, w: box.w ?? meta.window.w, h: box.h ?? meta.window.h,
+                z: ++d.zTop, ws: d.activeWorkspace, min: false, max: false,
+              });
+            };
+            if (port) open("browser", { port, path: "/" }, { x: 60, y: 60, w: 620, h: 420 });
+            // The seed already opened a Files window in most cases; point that
+            // one at the welcome folder rather than stacking a second one on it.
+            const existingFiles = d.windows.find((w) => w.app === "files");
+            if (existingFiles) existingFiles.props = { ...existingFiles.props, path: "welcome" };
+            else open("files", { path: "welcome" }, { x: 700, y: 60, w: 480, h: 300 });
+            open("help", {}, { x: 700, y: 380, w: 620, h: 380 });
+            d.notifications = [{
+              id: rid("n"), app: "SandboxOS", kind: "accent",
+              title: port ? "Your machine is serving something" : "Your machine is ready",
+              body: port
+                ? `The welcome page is a folder in your volume, served by a job you can stop. Everything you see is one document.`
+                : `The welcome folder is in your volume. This host could not start a server for it — the Manual says what else to try.`,
+              ts: Date.now(), read: false,
+            }];
+            mark(d, seed.id);
+          }, "setup", `first run: ${seed.name}`);
+
+          await syncServers();
+          return {
+            ok: true, rev: next.rev, seed: seed.id, steps,
+            ...(port ? { port, url: `/${sandbox.slug}/p/${port}/` } : {}),
+            ...(job ? { job: { id: job.id, name: job.name } } : {}),
+          };
+        },
+      },
+
+      revertScopes: {
+        description: "The parts of the desktop an undo can be aimed at, for revert's only:[…].",
+        inputSchema: obj({}),
+        async handler() { return { scopes: [...REVERT_SCOPES] }; },
       },
 
       reset: {
@@ -359,7 +523,24 @@ export function desktopServer(deps) {
               tokens: { ...(d.theme.custom[a.key]?.tokens ?? {}), ...cleanTokens(a.tokens ?? {}) },
             };
           }, "themeDefine", `theme ${a.key}`);
-          return { ok: true, key: a.key, themes: listThemes(next).length, rev: next.rev };
+          // A theme nobody can read is a theme that shipped a bug into every
+          // window at once. The check is advice, not a veto — it is your
+          // machine — except when the body text is genuinely invisible on its
+          // own panels, which is refused before it becomes the whole desktop.
+          const resolved = resolveTheme({ theme: { base: a.key, custom: next.theme.custom, tokens: {} } });
+          const readability = checkContrast(resolved);
+          if (readability.unreadable.length) {
+            // Take it back out rather than leave an unusable theme behind.
+            const reverted = mutate((d) => { delete d.theme.custom[a.key]; }, "themeDefine", `refused ${a.key}`);
+            const err = new Error(`refused: ${readability.unreadable[0].text} — text on a panel has to be readable`);
+            err.code = "unreadable_theme";
+            void reverted;
+            throw err;
+          }
+          return {
+            ok: true, key: a.key, themes: listThemes(next).length, rev: next.rev,
+            ...(readability.warnings.length ? { warnings: readability.warnings } : {}),
+          };
         },
       },
 
@@ -494,7 +675,14 @@ export function desktopServer(deps) {
           const next = mutate((d) => {
             if (a.menubar) Object.assign(d.shell.menubar, a.menubar);
             if (a.spotlight) Object.assign(d.shell.spotlight, a.spotlight);
-            if (a.notifications) Object.assign(d.shell.notifications, a.notifications);
+            if (a.notifications) {
+              const n = a.notifications;
+              if (n.enabled != null) d.shell.notifications.enabled = !!n.enabled;
+              if (n.dnd != null) d.shell.notifications.dnd = !!n.dnd;
+              if (Array.isArray(n.allow)) {
+                d.shell.notifications.allow = n.allow.filter((k) => NOTIFY_KINDS.includes(k));
+              }
+            }
             if (a.wallpaperFit) d.shell.wallpaperFit = a.wallpaperFit;
           }, "shell", "shell");
           return { ok: true, shell: next.shell, rev: next.rev };
@@ -1055,10 +1243,24 @@ export function desktopServer(deps) {
               if (Object.values(d.apps).some((x) => x.id !== a.id && x.mcp?.name === name)) throw new Error(`another app already serves as ${name}`);
             }
             const permissions = a.permissions ?? prior?.permissions ?? [];
+            // An *update* only overwrites what it names. Spreading the whole
+            // argument object would hand `normApp` an unreadable value (a colour
+            // that is not one, say) and get the *default* back — quietly
+            // replacing a good value with a different one, which is worse than
+            // refusing. So a field arriving as junk leaves the prior value alone.
+            const named = Object.fromEntries(Object.entries(a).filter(([, v]) => v !== undefined));
             const app = normApp({
-              ...(prior ?? {}), ...a, id: a.id, createdAt: prior?.createdAt, updatedAt: Date.now(),
+              ...(prior ?? {}), ...named, id: a.id, createdAt: prior?.createdAt, updatedAt: Date.now(),
               mcp, permissions: wantsTools && !prior ? [...new Set([...permissions, `${a.id}.*`])] : permissions,
             });
+            if (prior) {
+              // Keep what the caller did not (validly) change: normApp's defaults
+              // are for a *new* app, not for a field someone typed badly.
+              const HUE = /^#[0-9a-f]{3,8}$/i;
+              if (a.hue !== undefined && !HUE.test(String(a.hue))) app.hue = prior.hue;
+              if (a.icon !== undefined && !String(a.icon).trim()) app.icon = prior.icon;
+              if (a.name !== undefined && !String(a.name).trim()) app.name = prior.name;
+            }
             if (!app) throw new Error("invalid app definition");
             if (mcp && !app.mcp) throw new Error("the mcp block needs an entrypoint (a .js file in the bundle) or at least one proxy tool");
             if (app.kind === "url" && !app.url) throw new Error("kind='url' needs a http(s) url");
@@ -1412,12 +1614,377 @@ export function desktopServer(deps) {
         },
       },
 
+      // ── backup and restore: the machine, not just its face ────────────────
+      //
+      // A distro is what you hand to someone else. A backup is what you keep:
+      // the same desktop and apps and composition, plus your named checkpoints
+      // and a manifest of the volume — names, sizes and hashes, so a restore can
+      // say what is missing instead of pretending the bytes came back (T3.4).
+
+      machineExport: {
+        description:
+          "Back this machine up: the desktop, every custom app's source, the Cell's composition, your named checkpoints, " +
+          "and a manifest of the volume (names, sizes, hashes — not contents).",
+        inputSchema: obj({ name: S, volume: B }),
+        async handler(_ctx, a) {
+          const d = doc();
+          const base = exportPayload(d, { ...collectBundles(d), name: a.name ?? d.name, manifest: loadManifest(sandbox), keepNotifications: false });
+          const checkpoints = (d.checkpoints ?? []).map((c) => ({ ...c, doc: readCheckpoint(sandbox, c.id) })).filter((c) => c.doc);
+          const volume = a.volume === false ? null : volumeManifest(kernel?.cell?.root ?? null);
+          let tide = null;
+          try {
+            const ws = await kernel?.call?.({ principalId: null, heldPatterns: ["tide.*"], server: "tide", tool: "listWorkspaces", args: {} });
+            const first = ws?.result?.workspaces?.[0];
+            if (first) tide = { workspace: typeof first === "string" ? first : first.name, head: first?.head ?? null };
+          } catch { /* a machine without Tide is a machine without Tide */ }
+          return { payload: machinePayload({ payload: base, checkpoints, volume, tide }) };
+        },
+      },
+
+      machineRestore: {
+        description:
+          "Restore a machine backup. With plan: true it changes nothing and reports what it would do — including which volume files " +
+          "the manifest expects and this machine no longer has. File contents are never in a backup; Tide moves those.",
+        inputSchema: obj({ payload: { type: "object" }, plan: B, applyManifest: B }, ["payload"]),
+        async handler(_ctx, a) {
+          const size = JSON.stringify(a.payload ?? {}).length;
+          if (size > MAX_PAYLOAD_BYTES) throw new Error(`backup too large: ${size} bytes (max ${MAX_PAYLOAD_BYTES})`);
+          const { doc: incoming, bundles, manifest } = importPayload(a.payload, {});
+          const current = doc();
+          const volume = compareVolume(a.payload?.volume?.files ?? [], volumeManifest(kernel?.cell?.root ?? null)?.files ?? []);
+          const plan = {
+            desktop: structuralDiff(current, incoming),
+            apps: Object.keys(bundles.apps ?? {}).length,
+            widgets: Object.keys(bundles.widgets ?? {}).length,
+            checkpoints: (a.payload?.checkpoints ?? []).length,
+            composition: a.applyManifest ? Object.keys(manifest?.servers ?? {}).length : 0,
+            volume,
+            // Said plainly, because the alternative is someone believing a backup
+            // restored files it never carried.
+            note: "a backup carries the desktop, the apps and the composition. File contents are not in it: a missing file is missing.",
+          };
+          if (a.plan) return { plan, applied: false };
+
+          for (const [id, files] of Object.entries(bundles.apps ?? {})) importBundle(sandbox, "app", id, files);
+          for (const [kind, files] of Object.entries(bundles.widgets ?? {})) importBundle(sandbox, "widget", kind, files);
+          // Checkpoints come back as files plus an index, so the restored machine
+          // has its own way back as well.
+          const index = [];
+          for (const c of a.payload?.checkpoints ?? []) {
+            if (!c?.id || !c.doc) continue;
+            if (writeCheckpoint(sandbox, c.id, c.doc)) index.push({ id: c.id, name: c.name ?? c.id, rev: c.rev ?? 0, ts: c.ts ?? Date.now() });
+          }
+          const composition = a.applyManifest ? applyPortableManifest(manifest) : null;
+          const next = saveOs(sandbox, { ...incoming, checkpoints: index }, { label: "restore" });
+          await syncServers();
+          return {
+            ok: true, rev: next.rev, applied: true, plan,
+            ...(composition ? { composition } : {}),
+          };
+        },
+      },
+
       distroExport: {
         description: "Export this OS as a portable payload (document + every custom app's source).",
         inputSchema: obj({ name: S, description: S }),
         async handler(_ctx, a) {
           const d = doc();
           return { payload: exportPayload(d, { ...collectBundles(d), name: a.name, description: a.description }) };
+        },
+      },
+
+      // ── checkpoints: a desktop you meant to come back to ──────────────────
+      //
+      // History is the last forty revisions, which answers "undo that". A
+      // checkpoint answers "take me back to the desktop I liked": a named copy
+      // of the whole document, kept outside the pruning window (goal.md T2.4).
+
+      checkpoint: {
+        description:
+          "Save the desktop as a named state you can come back to, whatever happens to the revision history. " +
+          "auto:true marks it as the scheduler's, which keeps it in its own budget so it cannot evict one you named.",
+        inputSchema: obj({ name: S, auto: B }, ["name"]),
+        async handler(_ctx, a) {
+          const name = String(a.name ?? "").trim().slice(0, LIMITS.nameLen);
+          if (!name) throw new Error("a checkpoint needs a name");
+          const auto = !!a.auto;
+          const current = doc();
+          const id = rid("cp");
+          if (!writeCheckpoint(sandbox, id, current)) throw new Error("could not write the checkpoint");
+          const next = mutateOs(sandbox, (d) => {
+            d.checkpoints = [...(d.checkpoints ?? []), { id, name, rev: current.rev, ts: Date.now(), ...(auto ? { auto: true } : {}) }];
+            const drop = (pick) => {
+              const gone = d.checkpoints.find(pick);
+              if (!gone) return false;
+              d.checkpoints = d.checkpoints.filter((c) => c !== gone);
+              // The file goes with the entry, or the disk keeps a state nothing
+              // can reach.
+              removeCheckpoint(sandbox, gone.id);
+              return true;
+            };
+            // An hourly snapshot has its own, smaller budget: without this, a day
+            // of scheduled snapshots would push out the desktop you named on
+            // purpose, which is the opposite of what a checkpoint is for.
+            while (d.checkpoints.filter((c) => c.auto).length > LIMITS.autoCheckpoints) {
+              if (!drop((c) => c.auto)) break;
+            }
+            // And when the whole shelf is full, the scheduler's oldest goes first.
+            while (d.checkpoints.length > LIMITS.checkpoints) {
+              if (!drop((c) => c.auto) && !drop(() => true)) break;
+            }
+          }, { op: "checkpoint", label: `checkpoint: ${name}` });
+          return { ok: true, rev: next.rev, checkpoint: next.checkpoints.find((c) => c.id === id) ?? null };
+        },
+      },
+
+      checkpoints: {
+        description: "The named desktop states this machine has kept.",
+        inputSchema: obj({}),
+        async handler() { return { checkpoints: doc().checkpoints ?? [] }; },
+      },
+
+      checkpointRestore: {
+        description: "Go back to a named state. The restore is itself a revision, so it can be undone.",
+        inputSchema: obj({ id: S }, ["id"]),
+        async handler(_ctx, a) {
+          const found = (doc().checkpoints ?? []).find((c) => c.id === a.id);
+          if (!found) throw new Error(`no such checkpoint: ${a.id}`);
+          const next = restoreCheckpoint(sandbox, a.id, { label: `restore "${found.name}"` });
+          await syncServers();
+          return { ok: true, rev: next.rev, restored: found };
+        },
+      },
+
+      checkpointRemove: {
+        description: "Forget a named state, and delete the copy it kept.",
+        inputSchema: obj({ id: S }, ["id"]),
+        async handler(_ctx, a) {
+          if (!(doc().checkpoints ?? []).some((c) => c.id === a.id)) throw new Error(`no such checkpoint: ${a.id}`);
+          const next = mutateOs(sandbox, (d) => {
+            d.checkpoints = (d.checkpoints ?? []).filter((c) => c.id !== a.id);
+          }, { op: "checkpointRemove", label: `forget ${a.id}` });
+          removeCheckpoint(sandbox, a.id);
+          return { ok: true, rev: next.rev };
+        },
+      },
+
+      checkpointDiff: {
+        description: "What changed between a named state and now — or between two named states. Structural: windows, widgets, theme, apps.",
+        inputSchema: obj({ id: S, against: S }, ["id"]),
+        async handler(_ctx, a) {
+          const from = readCheckpoint(sandbox, a.id);
+          if (!from) throw new Error(`no such checkpoint: ${a.id}`);
+          const to = a.against ? readCheckpoint(sandbox, a.against) : doc();
+          if (!to) throw new Error(`no such checkpoint: ${a.against}`);
+          return { from: a.id, to: a.against ?? "now", diff: structuralDiff(from, to) };
+        },
+      },
+
+      // ── the keyboard, remappable ──────────────────────────────────────────
+
+      keyList: {
+        description: "Every keyboard action the shell honours, its chord, and what it does. The cheat sheet reads this, so a remap shows up there too.",
+        inputSchema: obj({}),
+        async handler() {
+          const keys = doc().shell.keys ?? {};
+          return {
+            keys,
+            actions: Object.entries(KEY_ACTIONS).map(([action, what]) => ({
+              action, what, chord: keys[action] ?? null, default: DEFAULT_KEYS[action] ?? null,
+            })),
+          };
+        },
+      },
+
+      keySet: {
+        description: "Rebind a keyboard action. A chord is modifiers plus one key: mod+shift+k. Pass chord: null to unbind it, or omit action to restore every default.",
+        inputSchema: obj({ action: S, chord: S }),
+        async handler(_ctx, a) {
+          if (a.action != null && !Object.hasOwn(KEY_ACTIONS, a.action)) {
+            throw new Error(`unknown keyboard action: ${a.action} (try one of ${Object.keys(KEY_ACTIONS).join(", ")})`);
+          }
+          if (a.action != null && a.chord != null && !isChord(a.chord)) {
+            throw new Error(`not a chord: ${a.chord} — modifiers (mod, shift, alt) plus one key, like mod+shift+k`);
+          }
+          // A chord that already belongs to something else is a collision, and
+          // silently stealing it would leave the other action dead.
+          const keys = doc().shell.keys ?? {};
+          if (a.action != null && a.chord) {
+            const clash = Object.entries(keys).find(([act, ch]) => ch === a.chord && act !== a.action);
+            if (clash) throw new Error(`${a.chord} is already ${clash[0]} — unbind that first`);
+          }
+          const next = mutateOs(sandbox, (d) => {
+            if (a.action == null) { d.shell.keys = { ...DEFAULT_KEYS }; return; }
+            d.shell.keys = { ...(d.shell.keys ?? {}) };
+            if (a.chord == null) d.shell.keys[a.action] = null;   // unbound, on purpose
+            else d.shell.keys[a.action] = a.chord;
+          }, { op: "keySet", label: a.action ? `key ${a.action} → ${a.chord ?? "none"}` : "keys reset" });
+          return { ok: true, rev: next.rev, keys: next.shell.keys };
+        },
+      },
+
+      // ── the capability ledger ─────────────────────────────────────────────
+      //
+      // "An app is a real principal" was true and invisible. This is what makes
+      // it visible (goal.md T3.1): what an app asked for, what it was actually
+      // granted, what was withheld, which principals it has called as, and every
+      // call it has made — from the same audit log everything else lands in.
+
+      appLedger: {
+        description: "What a custom app may do and what it has actually done: declared and granted capabilities, what was withheld, and its recent calls from the audit log.",
+        inputSchema: obj({ id: S, limit: N }, ["id"]),
+        async handler(ctx, a) {
+          const d = doc();
+          const desc = appDescriptor(d, a.id) ?? widgetDescriptor(d, a.id);
+          if (!desc) throw new Error(`no such app: ${a.id}`);
+          const held = ctx?.heldPatterns ?? [];
+          const declared = desc.permissions ?? [];
+          const granted = declared.filter((p) => canDelegate(held, p));
+          const withheld = declared.filter((p) => !canDelegate(held, p));
+
+          // An app calls as machine principals minted for it: label `app-<id>-…`.
+          const principals = listSandboxAccess(sandbox.id)
+            .filter((p) => p.kind === "machine" && String(p.name ?? "").startsWith(`app-${a.id}-`))
+            .map((p) => ({ principalId: p.principalId, patterns: p.patterns, since: p.grantedAt, live: p.liveSessions > 0 }));
+
+          const limit = Math.min(Math.max(1, Number(a.limit) || 50), 200);
+          const calls = principals
+            .flatMap((p) => queryAudit(sandbox.id, { principalId: p.principalId, limit }))
+            .sort((x, y) => y.ts - x.ts)
+            .slice(0, limit)
+            .map((r) => ({ tool: `${r.server}.${r.tool}`, kind: r.result_kind, at: r.ts, error: r.error ?? null }));
+
+          const counts = calls.reduce((acc, c) => { acc[c.kind] = (acc[c.kind] ?? 0) + 1; return acc; }, {});
+          return {
+            id: a.id,
+            kind: desc.kind ?? "bundle",
+            suspended: !!desc.suspended,
+            declared, granted, withheld,
+            principals, calls, counts,
+            // Nothing here is a live grant: a suspended app has no session to
+            // mint, and revoking a principal takes its token with it.
+            note: desc.suspended ? "suspended: no new session will be minted for this app" : null,
+          };
+        },
+      },
+
+      appSuspend: {
+        description: "Suspend a custom app: no new capability session is minted for it, and its live tokens are revoked. Restore it with suspended: false.",
+        inputSchema: obj({ id: S, suspended: B }, ["id"]),
+        async handler(_ctx, a) {
+          const d = doc();
+          const isWidget = !!d.widgetKinds?.[a.id];
+          if (!d.apps?.[a.id] && !isWidget) throw new Error(`no such app: ${a.id}`);
+          const suspended = a.suspended !== false;
+          const next = mutateOs(sandbox, (draft) => {
+            const def = isWidget ? draft.widgetKinds[a.id] : draft.apps[a.id];
+            def.suspended = suspended;
+            def.updatedAt = Date.now();
+          }, { op: "appSuspend", label: `${suspended ? "suspended" : "restored"} ${a.id}` });
+
+          // Suspending is not a promise about the future only: the sessions this
+          // app already holds go away, so the next call it makes is refused.
+          let revoked = 0;
+          if (suspended) {
+            for (const p of listSandboxAccess(sandbox.id)) {
+              if (p.kind !== "machine" || !String(p.name ?? "").startsWith(`app-${a.id}-`)) continue;
+              const r = revokeSandboxAccess(sandbox.id, p.principalId);
+              revoked += (r.tokensRevoked ?? 0) + (r.removed ?? 0);
+            }
+          }
+          return { ok: true, rev: next.rev, id: a.id, suspended, revoked };
+        },
+      },
+
+      // ── proposals: a change you can read before it happens ────────────────
+      //
+      // "The agent restyled my desktop" is revertible, but reviewable is better.
+      // A proposal is a document object holding `desktop.*` calls; applying it
+      // runs them through these very tools, as the caller who applied it — so a
+      // proposal can never do something its applier could not do by hand.
+
+      propose: {
+        description: "Propose desktop changes for review instead of making them. Ops are desktop tool names with their arguments; nothing happens until someone applies it.",
+        inputSchema: obj({
+          label: S,
+          ops: { type: "array", items: { type: "object", properties: { tool: S, args: { type: "object" } }, required: ["tool"] } },
+        }, ["ops"]),
+        async handler(ctx, a) {
+          const ops = (Array.isArray(a.ops) ? a.ops : []).map((op) => ({ tool: String(op?.tool ?? ""), args: op?.args ?? {} }));
+          if (!ops.length) throw new Error("a proposal needs at least one op");
+          for (const op of ops) {
+            const t = self.tools[op.tool];
+            if (!t) throw new Error(`unknown tool in proposal: desktop.${op.tool}`);
+            if (READ_ONLY_DESKTOP_TOOLS.has(op.tool)) throw new Error(`desktop.${op.tool} changes nothing — a proposal is for changes`);
+          }
+          const proposal = { id: rid("prop"), label: a.label ?? "proposed change", by: ctx?.principalId ?? "agent", createdAt: Date.now(), ops };
+          const next = mutateOs(sandbox, (d) => {
+            d.proposals = [...(d.proposals ?? []), proposal].slice(-LIMITS.proposals);
+          }, { op: "propose", label: `propose: ${proposal.label}` });
+          return { ok: true, rev: next.rev, proposal: next.proposals.at(-1) };
+        },
+      },
+
+      proposals: {
+        description: "Changes waiting for review, with the calls each one would make.",
+        inputSchema: obj({}),
+        async handler() {
+          const d = doc();
+          // Each one says which parts of the document it would touch. Not a
+          // predicted diff: a call that has not run cannot be diffed, and a
+          // prediction that turned out wrong would be worse than none (T2.3).
+          return {
+            proposals: (d.proposals ?? []).map((p) => ({ ...p, impact: proposalImpact(p) })),
+          };
+        },
+      },
+
+      applyProposal: {
+        description: "Apply a proposed change: its ops run in order, as you, and the proposal is dropped. Stops at the first failure and reports what did land.",
+        inputSchema: obj({ id: S }, ["id"]),
+        async handler(ctx, a) {
+          const found = (doc().proposals ?? []).find((p) => p.id === a.id);
+          if (!found) throw new Error(`no such proposal: ${a.id}`);
+          const applied = [];
+          let failure = null;
+          for (const op of found.ops) {
+            // Each op goes back through the Kernel rather than straight to the
+            // handler. Calling handlers directly would have made
+            // `desktop.applyProposal` a way to run every desktop tool without
+            // holding it — the hostile-day test caught exactly that. Through the
+            // Kernel, an op is authorized against the *applier's* own grants and
+            // audited as its own row, which is also better provenance: the log
+            // shows what was actually done, not one opaque "applied".
+            const r = await kernel.call({
+              principalId: ctx?.principalId ?? null,
+              heldPatterns: ctx?.heldPatterns ?? [],
+              server: "desktop", tool: op.tool, args: op.args ?? {},
+              onBehalfOf: found.by && found.by !== ctx?.principalId ? found.by : null,
+            });
+            if (r.ok) { applied.push(op.tool); continue; }
+            // Partial application is reported, not hidden: the ops that ran are
+            // each their own revision, and revert can take them back.
+            failure = { tool: op.tool, error: r.error, ...(r.code ? { code: r.code } : {}) };
+            break;
+          }
+          const next = mutateOs(sandbox, (d) => {
+            d.proposals = (d.proposals ?? []).filter((p) => p.id !== a.id);
+          }, { op: "applyProposal", label: `applied: ${found.label}` });
+          await syncServers();
+          return { ok: !failure, rev: next.rev, applied, ...(failure ? { failure } : {}) };
+        },
+      },
+
+      discardProposal: {
+        description: "Throw a proposed change away without applying it.",
+        inputSchema: obj({ id: S }, ["id"]),
+        async handler(_ctx, a) {
+          const found = (doc().proposals ?? []).find((p) => p.id === a.id);
+          if (!found) throw new Error(`no such proposal: ${a.id}`);
+          const next = mutateOs(sandbox, (d) => {
+            d.proposals = (d.proposals ?? []).filter((p) => p.id !== a.id);
+          }, { op: "discardProposal", label: `discarded: ${found.label}` });
+          return { ok: true, rev: next.rev };
         },
       },
 
@@ -1447,6 +2014,44 @@ export function desktopServer(deps) {
       },
     },
   };
+
+  return self;
+}
+
+/**
+ * A manifest of the Cell volume: relative path, size, and a hash of the contents.
+ *
+ * Bounded on purpose — 5000 files, and no hash for anything over 8 MB — because a
+ * backup of the desktop should not become a scan of a node_modules tree. What it
+ * is for is answering "is this the machine I saved?", not moving the bytes.
+ */
+function volumeManifest(root, { maxFiles = 5000, hashUnder = 8 * 1024 * 1024 } = {}) {
+  if (!root) return null;
+  const files = [];
+  let truncated = false;
+  const skip = new Set(["node_modules", ".git", ".mcp-packages", ".tide"]);
+  const walk = (dir, rel) => {
+    if (truncated) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (files.length >= maxFiles) { truncated = true; return; }
+      if (e.isSymbolicLink()) continue;   // a link is not contents
+      const abs = path.join(dir, e.name);
+      const at = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) { if (!skip.has(e.name)) walk(abs, at); continue; }
+      try {
+        const st = fs.statSync(abs);
+        const entry = { path: at, size: st.size };
+        if (st.size <= hashUnder) {
+          entry.sha256 = crypto.createHash("sha256").update(fs.readFileSync(abs)).digest("hex");
+        }
+        files.push(entry);
+      } catch { /* unreadable is not in the manifest */ }
+    }
+  };
+  walk(root, "");
+  return { files, truncated, skipped: [...skip], at: Date.now() };
 }
 
 /** Recursive merge for `desktop.patch`. A null value deletes the key. */

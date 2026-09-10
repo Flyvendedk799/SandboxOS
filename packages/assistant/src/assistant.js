@@ -16,7 +16,7 @@
 // not need a minted token.
 
 import { authorize } from "../../kernel/src/capabilities.js";
-import { hasOs, loadOs, summarizeDoc } from "../../os/src/index.js";
+import { hasOs, loadOs, summarizeDoc, READ_ONLY_DESKTOP_TOOLS } from "../../os/src/index.js";
 import {
   baseUrlFor, credentialHeaders, resolveLlmCredential, systemFor,
 } from "../../llm/src/providers.js";
@@ -61,7 +61,7 @@ function desktopContext(sandbox, servers, heldPatterns) {
   } catch { return []; }
 }
 
-export function systemPrompt(sandbox, servers, heldPatterns = null) {
+export function systemPrompt(sandbox, servers, heldPatterns = null, { propose = false } = {}) {
   return [
     `You are the assistant inside SandboxOS, running on the Sandbox "${sandbox.slug}".`,
     "",
@@ -81,6 +81,14 @@ export function systemPrompt(sandbox, servers, heldPatterns = null) {
     "",
     "Be concise. Report what you actually did and what the machine actually said.",
     "When a tool fails, say so plainly and either fix it or explain what is blocking.",
+    // Review mode is stated whether or not this machine has a desktop yet: a model
+    // that thinks its writes landed will report work nobody has approved.
+    ...(propose ? [
+      "",
+      "REVIEW MODE IS ON. Your desktop.* changes are not applied — they are queued as a",
+      "proposal for the person to apply or discard. Reads work normally. Say what you",
+      "proposed and why; never claim the desktop has changed.",
+    ] : []),
     ...desktopContext(sandbox, servers, heldPatterns),
   ].join("\n");
 }
@@ -146,13 +154,17 @@ async function providerError(res, credential, model) {
  * @param {AbortSignal} [o.signal]   abort to stop mid-turn
  * @returns {Promise<{messages: object[], stopped: string}>} the appended turns
  */
-export async function runTurn({ kernel, sandbox, principalId, heldPatterns, history = [], input, emit, signal, model }) {
+export async function runTurn({ kernel, sandbox, principalId, heldPatterns, history = [], input, emit, signal, model, propose = false }) {
   const credential = await resolveLlmCredential(sandbox.tenant_id);
   if (!credential.configured) {
     emit({ type: "error", error: credential.error });
     return { messages: [], stopped: "no_credential" };
   }
 
+  const proposed = [];   // review mode: the desktop changes the model asked for
+  // What this turn cost, in the only unit we can count honestly. The caller
+  // records it; a price depends on a plan we may not be able to see (T3.5).
+  const usage = { provider: credential.provider, model: model ?? credential.modelDefault, tokens: 0 };
   const servers = [...kernel.servers.keys()];
   const defs = toolDefs(kernel.listTools(), heldPatterns, credential.wire);
   const maxSteps = MAX_STEPS();
@@ -168,12 +180,25 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
     : { role: "user", content: [{ type: "text", text: input }] });
   appended.push(messages.at(-1));
 
-  emit({ type: "turn_start", provider: credential.provider, model: model ?? credential.modelDefault, tools: defs.length });
+  /** Write the turn's captured desktop changes as one proposal, once. */
+  async function flushProposal() {
+    if (!proposed.length) return;
+    const ops = proposed.splice(0);
+    const r = await kernel.call({
+      principalId, heldPatterns, server: "desktop", tool: "propose",
+      args: { label: String(input).trim().slice(0, 90) || "proposed change", ops },
+    });
+    emit(r.ok
+      ? { type: "proposal", proposal: r.result.proposal, ops: ops.length }
+      : { type: "error", error: `could not queue the proposal: ${r.error}` });
+  }
+
+  emit({ type: "turn_start", provider: credential.provider, model: model ?? credential.modelDefault, tools: defs.length, propose });
 
   for (let step = 0; step < maxSteps; step += 1) {
-    if (signal?.aborted) { emit({ type: "stopped", reason: "cancelled" }); return { messages: appended, stopped: "cancelled" }; }
+    if (signal?.aborted) { await flushProposal(); emit({ type: "stopped", reason: "cancelled" }); return { messages: appended, stopped: "cancelled", usage }; }
     if (Date.now() > deadline) { emit({ type: "stopped", reason: "time_budget" }); return { messages: appended, stopped: "time_budget" }; }
-    if (tokens > maxTokens) { emit({ type: "stopped", reason: "token_budget" }); return { messages: appended, stopped: "token_budget" }; }
+    if (tokens > maxTokens) { emit({ type: "stopped", reason: "token_budget" }); return { messages: appended, stopped: "token_budget", usage }; }
 
     emit({ type: "step", step: step + 1 });
 
@@ -187,7 +212,7 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
           model: chosen,
           stream: true,
           stream_options: { include_usage: true },
-          messages: [{ role: "system", content: systemPrompt(sandbox, servers, heldPatterns) }, ...messages],
+          messages: [{ role: "system", content: systemPrompt(sandbox, servers, heldPatterns, { propose }) }, ...messages],
           ...(defs.length ? { tools: defs, tool_choice: "auto" } : {}),
         }
       : {
@@ -197,7 +222,7 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
           // On a subscription token the Claude Code identity block has to come first
           // and stand alone, or Sonnet and Opus are refused with a 429 the plan has
           // not earned. systemFor is what puts it there.
-          system: systemFor(credential, systemPrompt(sandbox, servers, heldPatterns)),
+          system: systemFor(credential, systemPrompt(sandbox, servers, heldPatterns, { propose })),
           messages,
           ...(defs.length ? { tools: defs } : {}),
         };
@@ -230,6 +255,7 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
         }
         case "usage":
           tokens += (ev.input ?? 0) + (ev.output ?? 0);
+          usage.tokens = tokens;
           break;
         case "stop":
           stopReason = ev.reason;
@@ -267,8 +293,9 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
 
     // ── No tools requested: the turn is over ────────────────────────────────
     if (!parsed.length) {
+      await flushProposal();
       emit({ type: "done", stopReason: stopReason ?? "end_turn", tokens, steps: step + 1 });
-      return { messages: appended, stopped: "end_turn" };
+      return { messages: appended, stopped: "end_turn", usage };
     }
 
     // ── Run the tools through the Kernel ────────────────────────────────────
@@ -276,6 +303,23 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
     for (const c of parsed) {
       const [server, tool] = decodeName(c.name);
       emit({ type: "tool_call", id: c.id, server, tool, args: c.parsedArgs });
+
+      // Review mode: a change to the desktop is captured for a human to read
+      // rather than made (goal.md T2.3). Reads go through — an agent that cannot
+      // look at the desktop cannot propose anything sensible about it — and
+      // everything on other servers is unaffected: this is about the *desk*, not
+      // about withholding capabilities the caller granted.
+      if (propose && server === "desktop" && !READ_ONLY_DESKTOP_TOOLS.has(tool)) {
+        proposed.push({ tool, args: c.parsedArgs ?? {} });
+        const payload = clip(JSON.stringify({
+          proposed: true, tool: `desktop.${tool}`,
+          note: "Review mode is on: this change is queued for the person to apply or discard. Carry on as if it had been made, and say what you proposed.",
+        }));
+        emit({ type: "tool_result", id: c.id, ok: true, server, tool, result: { proposed: true }, error: null });
+        results.push({ id: c.id, payload });
+        continue;
+      }
+
       const r = await kernel.call({
         principalId, heldPatterns, server, tool, args: c.parsedArgs,
       });
@@ -296,8 +340,9 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
     }
   }
 
+  await flushProposal();
   emit({ type: "stopped", reason: "max_steps", steps: maxSteps });
-  return { messages: appended, stopped: "max_steps" };
+  return { messages: appended, stopped: "max_steps", usage };
 }
 
 /** Flatten a provider-shaped transcript into what a UI wants to render. */

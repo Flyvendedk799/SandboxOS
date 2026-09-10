@@ -3,13 +3,14 @@
 // This is the machine as a place: you land in it, and it looks the way you left
 // it because the desktop is a document on the server, not state in a tab.
 
-import { $, h, slug, toast, toastError } from "../core.js";
+import { $, h, api, slug, toast, toastError } from "../core.js";
 import { mountSprite } from "./sprite.js";
 import { os, loadOs, connect, onOs, call, select } from "./client.js";
 import { createScreen } from "./shell.js";
 import { startBroker } from "./frames.js";
 import { mountAssistantWindow } from "./agent.js";
 import { createBuilder } from "./builder.js";
+import { firstRun, needsFirstRun } from "./first-run.js";
 
 mountSprite();
 
@@ -33,13 +34,15 @@ function mountSpecial(appId, host, win, ctx) {
 const screen = createScreen({
   ctx: {
     mountSpecial,
-    openStudio: () => { location.href = `/${slug}/studio`; },
+    openStudio: (opts) => {
+      // The Studio reads this hash on boot and opens Code on that app, so
+      // "open its source" lands on the file rather than on the front page.
+      location.href = opts?.code ? `/${slug}/studio#code=app:${encodeURIComponent(opts.code)}` : `/${slug}/studio`;
+    },
     onSelect: (id, kind) => select(id, kind),
   },
 });
 root.append(screen.el);
-
-onOs(() => screen.render());
 
 startBroker({
   notify: ({ title, body, kind, app }) => call("notify", { title, body, kind, app }).catch(() => {}),
@@ -49,6 +52,35 @@ startBroker({
   try {
     await loadOs();
     connect();
+
+    // A machine nobody has set up yet gets one screen first: the single idea,
+    // a seed to start from, and a setup that leaves something running (T5.1).
+    // It is skippable, and a document that predates the field is left alone.
+    if (needsFirstRun(os.doc)) {
+      const host = h("div", { id: "os-first-run" });
+      root.append(host);
+      try {
+        const { seeds } = await api.mcp("desktop", "setupSeeds", {});
+        await firstRun(host, {
+          seeds,
+          viewport: { w: window.innerWidth, h: window.innerHeight - 64 },
+          onDone: () => loadOs(),
+        });
+      } catch (e) {
+        // Never stand between someone and their machine: if the welcome screen
+        // itself cannot run, say so once and show the desktop.
+        toastError("The welcome screen could not load", e);
+      }
+      host.remove();
+    }
+
+    // Only now does the desktop start painting. Rendering it *behind* the
+    // welcome screen would mount every app in the seed, and an app that writes
+    // its window state on mount (the Terminal records its session) would be
+    // writing against a document first run is about to replace — a refused
+    // write, and a "someone else changed it first" notice on a machine nobody
+    // else has ever touched.
+    onOs(() => screen.render());
     screen.render();
     document.title = `${os.doc.name} · SandboxOS`;
   } catch (e) {

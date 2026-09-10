@@ -8,6 +8,7 @@
 
 export * from "./schema.js";
 export * from "./layout.js";
+export * from "./keys.js";
 export * from "./summary.js";
 export * from "./themes.js";
 export * from "./animations.js";
@@ -17,3 +18,6 @@ export * from "./bundles.js";
 export * from "./distro.js";
 export * from "./store.js";
 export * from "./notify.js";
+export * from "./manual.js";
+export * from "./first-run.js";
+export * from "./proposals.js";

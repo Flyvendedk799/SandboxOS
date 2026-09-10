@@ -5,7 +5,8 @@
 // take effect immediately.
 
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { safeSpawn } from "../../../cell/src/spawn.js";
+import { resolveNpm } from "../../../cell/src/shell.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -41,7 +42,11 @@ function allowedPrefixes() {
  *  example-server by path), so it passes whenever "file:" is allowed. */
 function assertSourceAllowed(source) {
   const prefixes = allowedPrefixes();
-  const isLocalFile = source.startsWith("file://") || source.startsWith("/") || source.startsWith("./");
+  // An absolute path is absolute on every platform, and on Windows it starts
+  // with a drive letter rather than a slash. Both are the same "local file"
+  // class; only the spelling differs.
+  const isLocalFile = source.startsWith("file://") || source.startsWith("/") ||
+                      source.startsWith("./") || /^[A-Za-z]:[\\/]/.test(source);
   const ok = prefixes.some((p) => source.startsWith(p)) ||
              (isLocalFile && prefixes.includes("file:"));
   if (!ok) {
@@ -156,9 +161,14 @@ export function registryServer(deps) {
             const installDir = path.join(sandbox.volume_path, ".mcp-packages");
             fs.mkdirSync(installDir, { recursive: true });
             await new Promise((res, rej) => {
-              const proc = spawn("npm", npmInstallArgs(installDir, pkg), { stdio: "pipe" });
+              // npm is npm.cmd on Windows, which `spawn` will not resolve on its
+              // own; and a missing npm must fail this call, not the host process.
+              const npm = resolveNpm();
+              if (!npm.ok) return rej(new Error(`npm install failed: ${npm.why}`));
+              const proc = safeSpawn(npm.bin, [...npm.prefix, ...npmInstallArgs(installDir, pkg)], { stdio: "pipe" },
+                (err) => rej(new Error(`npm install failed: could not run npm (${err.code ?? err.message})`)));
               let errOut = "";
-              proc.stderr.on("data", (d) => (errOut += d));
+              proc.stderr?.on("data", (d) => (errOut += d));
               proc.on("close", (code) => code === 0 ? res() : rej(new Error(`npm install failed: ${errOut.slice(0, 300)}`)));
             });
             // Derive the node_modules directory name for the installed package.

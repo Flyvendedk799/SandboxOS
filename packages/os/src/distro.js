@@ -10,7 +10,7 @@
 // `desktop` MCP server does the authorization.
 
 import crypto from "node:crypto";
-import { normalizeDoc, defaultDoc, rid, LIMITS } from "./schema.js";
+import { normalizeDoc, defaultDoc, rid, LIMITS, docCompatibility } from "./schema.js";
 import { BUILTIN_DISTROS, builtinApp, builtinWidget } from "./catalog.js";
 import { BUILTIN_THEMES } from "./themes.js";
 
@@ -65,7 +65,9 @@ export function docFromDistroSpec(spec, { name } = {}) {
   const doc = defaultDoc(name ?? spec.name ?? "untitled-os");
   doc.theme.base = BUILTIN_THEMES[spec.theme] ? spec.theme : doc.theme.base;
   doc.distro = { id: spec.id, name: spec.name, forkedAt: Date.now() };
-  doc.shell.dock.pinned = [...new Set([...(spec.apps ?? []), "settings"])];
+  // A seed can pin more than it opens: the machine's own tools belong within
+  // reach whether or not a window for them is on screen at first run.
+  doc.shell.dock.pinned = [...new Set([...(spec.dock ?? spec.apps ?? []), "settings"])];
 
   let z = 10;
   doc.windows = (spec.apps ?? []).filter(builtinApp).map((appId, i) => {
@@ -141,6 +143,47 @@ export function exportPayload(doc, { apps = {}, widgets = {}, name, description,
   };
 }
 
+/**
+ * A whole machine, not just its face (goal.md T3.4).
+ *
+ * A distro payload is the desktop plus the apps plus the Cell's composition — what
+ * you hand to someone else. A *backup* is that plus the parts that are yours
+ * alone: the named checkpoints, and a manifest of the volume so a restore can say
+ * what is missing rather than pretend the files came back.
+ *
+ * The manifest is names, sizes and hashes — deliberately not contents. Bytes
+ * belong to Tide (or to whatever the operator backs the volume up with); what this
+ * adds is the ability to answer "is this the machine I saved?" honestly.
+ */
+export function machinePayload({ payload, checkpoints = [], volume = null, tide = null }) {
+  return {
+    ...payload,
+    kind: "machine",
+    checkpoints,
+    ...(volume ? { volume } : {}),
+    ...(tide ? { tide } : {}),
+  };
+}
+
+/**
+ * Compare a saved volume manifest against what is on disk now. Three answers,
+ * because "restored" is not one of them: present and identical, present and
+ * different, gone.
+ */
+export function compareVolume(manifest, current) {
+  const now = new Map((current ?? []).map((f) => [f.path, f]));
+  const missing = [];
+  const changed = [];
+  for (const f of manifest ?? []) {
+    const seen = now.get(f.path);
+    if (!seen) { missing.push(f.path); continue; }
+    if (seen.sha256 && f.sha256 && seen.sha256 !== f.sha256) changed.push(f.path);
+    else if (!seen.sha256 && seen.size !== f.size) changed.push(f.path);
+  }
+  const added = [...now.keys()].filter((p) => !(manifest ?? []).some((f) => f.path === p));
+  return { files: (manifest ?? []).length, missing, changed, added };
+}
+
 /** The part of a Sandboxfile that makes sense on another machine. */
 export function portableManifest(m) {
   if (!m || typeof m !== "object") return null;
@@ -164,6 +207,27 @@ function pickBundles(map, ids) {
 export function importPayload(payload, { name, distro, trusted = false } = {}) {
   verifyIntegrity(payload);
   const src = payload?.os ?? payload;
+  // A machine from the future is refused, not quietly cut down to size.
+  // `normalizeDoc` keeps only the fields this build knows, which is exactly what
+  // makes it safe against a hostile document — and exactly what would make
+  // importing a newer person's desktop a silent, partial, unexplained loss.
+  const compat = docCompatibility(src);
+  if (compat.newer) {
+    const err = new Error(
+      `this desktop was published by a newer SandboxOS (document v${compat.version}, this build reads v${compat.current}) — ` +
+      "importing it here would drop whatever it gained. Update this build first.",
+    );
+    err.code = "newer_document";
+    throw err;
+  }
+  const payloadVersion = Number(payload?.payloadVersion);
+  if (Number.isFinite(payloadVersion) && payloadVersion > DISTRO_PAYLOAD_VERSION) {
+    const err = new Error(
+      `this payload is v${payloadVersion} and this build reads v${DISTRO_PAYLOAD_VERSION} — update this build to fork it`,
+    );
+    err.code = "newer_payload";
+    throw err;
+  }
   const doc = normalizeDoc(src, { name: name ?? payload?.name });
   // Someone else's companion servers arrive switched off. A distro is a
   // document, not a grant: the person forking it turns each server on once

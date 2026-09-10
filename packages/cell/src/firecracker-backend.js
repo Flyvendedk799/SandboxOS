@@ -20,7 +20,8 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import os from "node:os";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
+import { safeSpawn } from "./spawn.js";
 import config from "../../config/src/config.js";
 import { allocateTap, releaseTap, getTapForSandbox } from "../../control-db/src/registry.js";
 import { remoteHandle, newMarker, pidFile } from "./handles.js";
@@ -204,7 +205,7 @@ export class FirecrackerBackend {
 
   async _launchProcess() {
     if (fs.existsSync(this.socketPath)) fs.unlinkSync(this.socketPath);
-    this._proc = spawn(
+    this._proc = safeSpawn(
       "firecracker",
       ["--api-sock", this.socketPath, "--level", "Warning"],
       { stdio: ["ignore", "ignore", "ignore"], detached: true }
@@ -274,7 +275,8 @@ export class FirecrackerBackend {
     // signals that pid over a second ssh.
     const marker = newMarker();
     const fullCmd = `cd ${WORKDIR} && echo $$ > ${pidFile(marker)} 2>/dev/null; exec ${inner}`;
-    const proc = spawn("ssh", this._sshArgs([fullCmd]));
+    const proc = safeSpawn("ssh", this._sshArgs([fullCmd]), {}, (err) => callback({ type: "stderr", chunk: `sandboxos: could not run ssh: ${err.code ?? err.message}
+` }));
     const handle = remoteHandle(proc, marker, (script) =>
       sh("ssh", [...this._sshArgs(), script], { timeoutMs: 10_000 }));
     const timer = setTimeout(() => handle.kill("SIGKILL"), timeoutMs);
@@ -291,9 +293,11 @@ export class FirecrackerBackend {
       .map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(" ");
     const initCmd = `${envVars} cd ${WORKDIR} && exec sh -i`;
     // -t -t forces PTY allocation even over a non-tty stdin — gives real resize.
-    const proc = spawn("ssh", [...this._sshArgs(["-t", "-t"]), initCmd], {
+    const proc = safeSpawn("ssh", [...this._sshArgs(["-t", "-t"]), initCmd], {
       stdio: ["pipe", "pipe", "pipe"],
-    });
+    }, (err) => { onData(`
+[31msandboxos:[0m could not run ssh: ${err.code ?? err.message}
+`); onClose(); });
     proc.stdout.on("data", onData);
     proc.stderr.on("data", onData);
     proc.on("close", onClose);

@@ -40,8 +40,9 @@ const port = srv.address().port;
 const base = `http://127.0.0.1:${port}`;
 const session = createSession(owner.id, "session");
 
-const candidates = [process.env.CHROME, "/opt/pw-browsers/chromium-1194/chrome-linux/chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"].filter(Boolean);
-const executablePath = candidates.find((p) => { try { return fs.existsSync(p); } catch { return false; } });
+const { findChrome, noChromeMessage } = await import("./lib/chrome.mjs");
+const executablePath = findChrome();
+if (!executablePath) { console.error(noChromeMessage()); process.exit(2); }
 const browser = await chromium.launch({ executablePath, args: ["--no-sandbox"] });
 const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
 await ctx.addCookies([{ name: "sbx_session", value: session, url: base }]);
@@ -56,13 +57,50 @@ try {
   // ── The OS ────────────────────────────────────────────────────────────────
   console.log("OS");
   await desktop("reset", {});
+
+  // A machine nobody has set up shows the welcome screen first (goal.md T5.1),
+  // so the smoke sees that, then skips it. `npm run day` drives the real setup.
+  const firstPage = await ctx.newPage();
+  watch(firstPage, "first-run");
+  await firstPage.goto(`${base}/${sandbox.slug}/os`);
+  await firstPage.waitForSelector(".fr-panel", { timeout: 15_000 });
+  check((await firstPage.$$(".fr-seed")).length >= 4, "a new machine asks what it should start as");
+  check((await firstPage.$$(".fr-card")).length === 4, "and explains the document model on one screen");
+  check(!!(await firstPage.$(".fr-skip")), "with a way to skip it");
+  await firstPage.close();
+  await desktop("setup", { skip: true });
+
   const page = await ctx.newPage();
   watch(page, "os");
   await page.goto(`${base}/${sandbox.slug}/os`);
   await page.waitForSelector(".os-window", { timeout: 15_000 });
   check((await page.$$(".os-window")).length >= 2, "the first-run desktop paints its windows");
+
+  // Nobody else has touched this machine, so nothing may claim they have. The
+  // Terminal used to record its own session with two conditional writes in one
+  // tick; they collided with each other, and the owner of a brand-new desktop was
+  // told "someone else (or an agent) changed it first".
+  await page.waitForTimeout(1200);
+  const boot = await page.$$eval(".toast", (els) => els.map((e) => e.textContent));
+  check(boot.length === 0, `opening a settled desktop accuses nobody (${boot.join(" | ") || "no toasts"})`);
   check(await page.$(".os-menubar .status"), "menubar carries real status readings");
   check(await page.$(".os-dock .dock-app"), "the dock is there");
+
+  // A window move costs a window move (goal.md T0.5). The stylesheet is linked by
+  // appearance, so ten agent moves ask for nothing; a theme change asks once.
+  let cssAsks = 0;
+  page.on("request", (r) => { if (r.url().includes("/os/theme.css")) cssAsks += 1; });
+  await page.waitForTimeout(400);
+  const movee = (await desktop("state")).doc.windows[0].id;
+  cssAsks = 0;
+  for (let i = 0; i < 10; i += 1) await desktop("move", { id: movee, x: 60 + i * 4, y: 60 });
+  await page.waitForTimeout(900);
+  check(cssAsks === 0, `ten agent moves cost no stylesheet requests (${cssAsks})`);
+  await desktop("themeSet", { theme: "aurora" });
+  await page.waitForTimeout(900);
+  check(cssAsks === 1, `and a theme change costs exactly one (${cssAsks})`);
+  await desktop("themeSet", { theme: "midnight" });
+  await page.waitForTimeout(500);
 
   await desktop("layoutSet", { mode: "tiling", preset: "master-stack" });
   await page.waitForSelector(".os-sash", { timeout: 8_000 });
@@ -136,6 +174,91 @@ try {
   await kernel.call({ principalId: owner.id, heldPatterns: held, server: "ports", tool: "unexpose", args: { port: svcPort } });
   svc.close();
 
+  // A custom app actually RUNS. This is the assertion whose absence hid a real
+  // bug for a whole phase: the frame runs at an opaque origin, so its module
+  // scripts were CORS-blocked and every app's JavaScript silently never
+  // executed. Writing files and serving them is not the same as an app working.
+  await desktop("appDefine", { id: "runs-app", name: "Runs", permissions: ["ports.list"] });
+  await desktop("appWrite", {
+    id: "runs-app", path: "app.js",
+    content: [
+      "const el = document.createElement('div');",
+      "el.id = 'ran';",
+      "document.body.append(el);",
+      "const r = await sbx.mcp('ports', 'list', {});",
+      "el.textContent = 'ports:' + (r.ports ? r.ports.length : '?');",
+      "sbx.ready();",
+      // A warning rather than an error: the smoke fails on console errors, and
+      // this one is on purpose. Both travel to the shell.
+      "console.warn('runs-app says hello from the frame');",
+    ].join("\n"),
+  });
+  await desktop("open", { app: "runs-app" });
+  await page.waitForTimeout(2500);
+  const appFrame = page.frames().find((f) => f.url().includes("/runs-app/"));
+  check(!!appFrame, "a custom app's frame is loaded");
+  const ranText = appFrame ? await appFrame.locator("#ran").textContent().catch(() => null) : null;
+  check(/^ports:\d+$/.test(ranText ?? ""), `its module ran and called through the broker (${ranText})`);
+
+  // …and what it printed reaches the shell, so the Studio can show it.
+  const reported = await page.evaluate(async () => {
+    const { frameLogs } = await import("/static/js/os/frames.js");
+    return frameLogs("runs-app").map((l) => l.text);
+  });
+  check(reported.some((t) => t.includes("hello from the frame")), "and its console output is collected for the Studio");
+  for (const w of (await desktop("state")).doc.windows.filter((x) => x.app === "runs-app")) await desktop("close", { id: w.id });
+  await desktop("appRemove", { id: "runs-app" });
+
+  // The Audit app: filters, the chain, an export, and scoping to one caller
+  // (goal.md T1.7). The export writes a file, so this only checks that the button
+  // is there and the pane fills — the download itself is the browser's business.
+  await desktop("open", { app: "audit" });
+  // Scoped to the audit window: other ops apps are open, and they all use
+  // .ops-list. Only the explorer's list is .wide.
+  await page.waitForSelector(".ops-list.wide .row-line", { timeout: 10_000 });
+  const auditRows = (await page.$$(".ops-list.wide .row-line")).length;
+  check(auditRows >= 1, `the audit explorer lists rows (${auditRows})`);
+  const auditBar = ".os-window:has(.ops-list.wide) .app-bar";
+  check(!!(await page.$(`${auditBar} .app-btn:has-text('Export')`)), "with a way to take them with you");
+  check(!!(await page.$(`${auditBar} .app-btn:has-text('Verify the chain')`)), "and to verify the chain");
+  await page.fill(`${auditBar} .ops-search`, "desktop");
+  await page.waitForTimeout(700);
+  const filtered = await page.$$eval(".ops-list.wide .row-line", (els) => els.map((e) => e.textContent));
+  check(filtered.length >= 1 && filtered.every((t) => t.includes("desktop.")),
+    `filtering by server narrows it to that server (${filtered.length}: ${filtered.find((t) => !t.includes("desktop.")) ?? "all desktop"})`);
+  await page.fill(`${auditBar} .ops-search`, "");
+  for (const w of (await desktop("state")).doc.windows.filter((x) => x.app === "audit")) await desktop("close", { id: w.id });
+
+  // The Manual: the repository's own documentation, rendered, and the machine's
+  // own tool catalogue. Both halves are read at open time, so this is the check
+  // that would have caught a renderer that never returns (goal.md T5.2).
+  await desktop("open", { app: "help" });
+  await page.waitForSelector(".help-list .row-line", { timeout: 10_000 });
+  const manualRows = await page.$$eval(".help-list .row-line", (els) => els.map((e) => e.textContent));
+  check(manualRows.some((t) => t.includes("The desktop")), `the manual lists the pages this build ships (${manualRows.length} rows)`);
+  await page.click(".help-list .row-line:has-text('The desktop')");
+  await page.waitForSelector(".md .md-h", { timeout: 10_000 });
+  const rendered = await page.$$eval(".md .md-h", (els) => els.map((e) => e.textContent));
+  check(rendered.length > 10, `a page renders its headings (${rendered.length})`);
+  check((await page.$$(".md .md-code")).length >= 1 && (await page.$$(".md .md-table")).length >= 1, "with its code blocks and tables");
+  check((await page.textContent(".help-source")).includes("docs/15-os-experience.md"), "and says which file it is");
+
+  await page.fill(".app-bar .ops-search", "revert");
+  await page.waitForTimeout(400);
+  const hits = await page.$$eval(".help-list .row-line", (els) => els.map((e) => e.textContent));
+  check(hits.some((t) => t.includes("desktop.revert")), "search finds tools as well as headings");
+  await page.click(".help-list .row-line:has-text('desktop.revert')");
+  await page.waitForTimeout(300);
+  const toolPane = await page.textContent(".help-pane");
+  check(/Arguments/.test(toolPane) && /rev/.test(toolPane), "a tool page says what it takes");
+  await page.click(".help-pane .app-btn:has-text('Try it')");
+  await page.waitForSelector(".os-spotlight input", { timeout: 6_000 });
+  check(await page.inputValue(".os-spotlight input") === "desktop.revert", "Try it hands you to Spotlight with the tool typed in");
+  const spotRows = await page.$$eval(".os-spotlight .spot-row", (els) => els.map((e) => e.textContent));
+  check(spotRows.some((t) => t.includes("desktop.revert")), "and Spotlight knows the machine's tools");
+  await page.keyboard.press("Escape");
+  for (const w of (await desktop("state")).doc.windows.filter((x) => x.app === "help")) await desktop("close", { id: w.id });
+
   // The terminal screen: cursor addressing, an alternate buffer, scroll regions.
   const term = await page.evaluate(async () => {
     const { createScreen } = await import("/static/js/os/ansi.js");
@@ -181,6 +304,85 @@ try {
   check(true, "⌘? shows the cheat sheet");
   await page.keyboard.press("Escape");
 
+  // ── Keyboard only, and named ──────────────────────────────────────────────
+  //
+  // An OS you can only drive with a mouse is a mock-up of one (goal.md T4.5).
+  // This drives the real thing with the keyboard and checks that the chrome
+  // announces itself.
+  const roles = await page.evaluate(() => ({
+    menubar: document.querySelector('.os-menubar')?.getAttribute('role'),
+    dock: document.querySelector('.os-dock')?.getAttribute('role'),
+    dockLabel: document.querySelector('.os-dock')?.getAttribute('aria-label'),
+    desktop: document.querySelector('.os-desktop')?.getAttribute('role'),
+    window: document.querySelector('.os-window')?.getAttribute('aria-label'),
+    titlebar: document.querySelector('.os-window .os-titlebar')?.getAttribute('tabindex'),
+  }));
+  check(roles.menubar === 'menubar' && roles.dock === 'toolbar' && roles.desktop === 'main',
+    `the chrome has roles (${roles.menubar}/${roles.dock}/${roles.desktop})`);
+  check(!!roles.window && !!roles.dockLabel, 'and names a screen reader can read');
+  check(roles.titlebar === '0', 'a window title bar is focusable');
+
+  // Move a window with the keyboard alone, through its title bar.
+  await desktop('layoutSet', { mode: 'floating' });
+  const kbWin = (await desktop('state')).doc.windows[0];
+  await page.focus(`.os-window[data-id="${kbWin.id}"] .os-titlebar`);
+  const kbBefore = (await desktop('state')).doc.windows.find((w) => w.id === kbWin.id);
+  await page.keyboard.press('ArrowRight');
+  await page.waitForTimeout(500);
+  const kbAfter = (await desktop('state')).doc.windows.find((w) => w.id === kbWin.id);
+  check(kbAfter.x === kbBefore.x + 8, `arrow keys move the focused window (${kbBefore.x} → ${kbAfter.x})`);
+  await page.keyboard.down('Alt');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.up('Alt');
+  await page.waitForTimeout(500);
+  const kbSized = (await desktop('state')).doc.windows.find((w) => w.id === kbWin.id);
+  check(kbSized.h === kbAfter.h + 8, `alt+arrow resizes it (${kbAfter.h} → ${kbSized.h})`);
+
+  // A sash is a separator you can move without a pointer.
+  await desktop('layoutSet', { mode: 'tiling', preset: 'master-stack' });
+  await page.waitForSelector('.os-sash', { timeout: 8_000 });
+  const sashRatio = () => desktop('state').then((s) => s.doc.workspaces.find((w) => w.n === s.doc.activeWorkspace).layout.ratio);
+  const ratioBefore = await sashRatio();
+  check(await page.$eval('.os-sash', (el) => el.getAttribute('role') === 'separator' && el.getAttribute('tabindex') === '0'),
+    'a sash is a focusable separator');
+  await page.focus('.os-sash');
+  await page.keyboard.press('ArrowRight');
+  await page.waitForTimeout(600);
+  check((await sashRatio()) > ratioBefore, `and arrow keys resize the split (${ratioBefore} → ${await sashRatio()})`);
+  await desktop('layoutSet', { mode: 'floating' });
+
+  // The dock, the shelf and an app's own lists: the surfaces T4.5 names, driven
+  // with nothing but Tab and Enter. They are real buttons, which is the point —
+  // an affordance that needs a synthetic click is not keyboard-reachable.
+  const dockCount = (await desktop('state')).doc.windows.length;
+  await page.focus('.os-dock .dock-app');
+  const dockFocused = await page.evaluate(() => document.activeElement?.className ?? '');
+  check(dockFocused.includes('dock-app'), `a dock icon takes focus (${dockFocused})`);
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(700);
+  check((await desktop('state')).doc.windows.length >= dockCount, 'and Enter on it launches or focuses that app');
+
+  await kernel.call({ principalId: owner.id, heldPatterns: held, server: 'fs', tool: 'write', args: { path: 'keyboard.txt', content: 'reachable without a pointer' } });
+  await desktop('open', { app: 'files', props: { path: '.' } });
+  await page.waitForSelector('.file-list .row-line', { timeout: 8_000 });
+  await page.focus('.file-list .row-line');
+  const rowFocused = await page.evaluate(() => document.activeElement?.className ?? '');
+  check(rowFocused.includes('row-line'), 'a row in Files takes focus');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(700);
+  check(!!(await page.$('.file-pane textarea')) || !!(await page.$('.file-list .row-line')),
+    'and Enter on it opens what it points at');
+  for (const w of (await desktop('state')).doc.windows.filter((x) => x.app === 'files')) await desktop('close', { id: w.id });
+
+  // An overlay takes focus, so Escape and typing mean what they look like.
+  await page.keyboard.press('Control+k');
+  await page.waitForSelector('.os-spotlight input');
+  const focused = await page.evaluate(() => document.activeElement?.tagName?.toLowerCase());
+  check(focused === 'input', `an overlay takes focus (${focused})`);
+  check(await page.$eval('.os-spotlight', (el) => el.getAttribute('aria-modal') === 'true'), 'and says it is a dialog');
+  await page.keyboard.press('Escape');
+
+
   // Compact: 390px wide.
   await page.setViewportSize({ width: 390, height: 800 });
   await page.waitForTimeout(400);
@@ -188,6 +390,14 @@ try {
   check(visible === 1, `phone width shows one front window (${visible})`);
   check(await page.$(".os-dock"), "the dock stays reachable on a phone");
   check(await page.$(".os-shelf"), "widgets go into a shelf instead of vanishing");
+  // The shelf handle is a button, so the shelf opens without a pointer too.
+  await page.focus(".os-shelf-handle");
+  const shelfFocused = await page.evaluate(() => document.activeElement?.className ?? "");
+  check(shelfFocused.includes("os-shelf-handle"), `the shelf handle takes focus (${shelfFocused})`);
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(400);
+  check((await page.$$eval(".os-shelf-body .os-widget", (els) => els.filter((e) => !e.hidden).length)) >= 1,
+    "and Enter opens it");
   await page.click(".os-shelf-handle");
   await page.waitForTimeout(400);
   check((await page.$$eval(".os-shelf-body .os-widget", (els) => els.filter((e) => !e.hidden).length)) >= 1, "the shelf holds the workspace's widgets");
@@ -208,6 +418,25 @@ try {
   await studio.waitForSelector(".stx-viewport .os-window", { timeout: 10_000 });
   check(true, "the Studio boots with the live OS as its stage");
 
+  // The stage renders a *machine*, not the pane it happens to sit in: a narrow
+  // split view used to fold the desktop into a phone, which is the wrong answer
+  // to "design my desktop" (goal.md T2.1).
+  const staged = await studio.$eval(".stx-viewport .os-screen", (el) => ({
+    w: el.offsetWidth, painted: Math.round(el.getBoundingClientRect().width),
+  }));
+  check(staged.w >= 1440, `the stage is a desktop-sized viewport (${staged.w}px)`);
+  check(staged.painted < staged.w, `and it is scaled to fit the pane (${staged.painted}px painted)`);
+  check(!(await studio.$eval(".stx-viewport .os-desktop", (el) => el.classList.contains("compact"))),
+    "so the builder is not showing a phone");
+  check((await studio.$$(".stx-viewport .os-window:not([hidden])")).length >= 2,
+    "every window on the workspace is visible on the stage");
+  await studio.click(".stx-stage-bar .seg:has-text('Phone')");
+  await studio.waitForTimeout(600);
+  check(await studio.$eval(".stx-viewport .os-desktop", (el) => el.classList.contains("compact")),
+    "and the Phone preset renders the fold on purpose");
+  await studio.click(".stx-stage-bar .seg:has-text('Desktop')");
+  await studio.waitForTimeout(600);
+
   await studio.click(".stx-tabs .seg:has-text('Code')");
   await studio.waitForSelector(".code-pane .ed-input", { timeout: 8_000 });
   check((await studio.$$(".code-file")).length >= 3, "the Code tab lists the starter's files");
@@ -227,14 +456,78 @@ try {
   check((await studio.textContent(".code-status")).includes("written by another editor") || (await studio.$(".code-tab.on .name:has-text('app.js')")),
     "an agent's appWrite lands in the open editor");
 
+  // Jump to a definition, and see what is about to be written (goal.md T2.2).
+  // A file with definitions in it, since that is the thing being checked.
+  await desktop("appWrite", {
+    id: "smoke-app", path: "helpers.js",
+    content: [
+      "export function greet(name) { return 'hi ' + name; }",
+      "const later = async () => 42;",
+      "class Thing { run() { return later(); } }",
+      "",
+    ].join("\n"),
+  });
+  await studio.waitForTimeout(600);
+  await studio.click(".code-file:has-text('helpers.js')");
+  await studio.waitForSelector(".code-tab.on .name:has-text('helpers.js')", { timeout: 5_000 });
+  // The button rather than the chord: the chord is bound on the code pane, so it
+  // needs focus inside it, and what this check is about is the panel.
+  await studio.click(".code-head .rail-btn.sm[title^='Jump to a definition']");
+  await studio.waitForSelector(".code-symbols .hit", { timeout: 6_000 });
+  const symbols = await studio.$$eval(".code-symbols .hit", (els) => els.map((e) => e.textContent));
+  check(symbols.length >= 1, `the open file's definitions are listed (${symbols.length}: ${symbols.slice(0, 3).join(", ")})`);
+  await studio.click(".code-symbols .hit");
+  await studio.waitForTimeout(300);
+  check(await studio.$(".code-symbols[hidden]") !== null || !(await studio.$(".code-symbols .hit")),
+    "and picking one closes the list and goes there");
+
+  await studio.click(".code-head .rail-btn.sm[title^='What has changed']");
+  await studio.waitForSelector(".code-diff .row", { timeout: 6_000 });
+  const diffText = await studio.textContent(".code-diff .row");
+  check(/since the last save/.test(diffText), `the diff says what has changed since the last save (${diffText.trim().slice(0, 60)})`);
+  await studio.keyboard.press("Escape");
+
+  // Reviewing an agent's change without opening a second tool (goal.md T2.3).
+  // The proposal is made through the tool an assistant turn would call, because a
+  // model turn needs a credential this host may not have — what is being checked
+  // is the review, not the model.
+  await desktop("propose", {
+    label: "tidy and theme",
+    ops: [{ tool: "arrange", args: { preset: "grid", viewport: { w: 1400, h: 900 } } }, { tool: "themeSet", args: { theme: "aurora" } }],
+  });
+  await studio.waitForSelector(".proposal", { timeout: 8_000 });
+  const proposalText = await studio.textContent(".proposal");
+  check(/tidy and theme/.test(proposalText), "an agent's change waits in the Studio's agent panel");
+  check(/would change/.test(proposalText) && /windows/.test(proposalText) && /theme/.test(proposalText),
+    `it says which parts of the document it would touch (${proposalText.replace(/s+/g, " ").slice(0, 90)})`);
+  check(/desktop.arrange/.test(proposalText) && /desktop.themeSet/.test(proposalText), "and the exact calls it holds");
+  const themeBefore = (await desktop("state")).doc.theme.base;
+  await studio.click(".proposal .app-btn.primary");
+  await studio.waitForTimeout(900);
+  check((await desktop("state")).doc.theme.base === "aurora", `Apply runs them (${themeBefore} → aurora)`);
+  check(!!(await studio.$(".proposal.applied")), "and what was applied stays on screen");
+  check(!!(await studio.$(".proposal.applied .app-btn:has-text('What changed')")), "with the measured diff a click away");
+  await studio.click(".proposal.applied .app-btn:has-text('Dismiss')");
+  await desktop("themeSet", { theme: "midnight" });
+
   // Settings reshapes the desktop without the Studio.
   await desktop("open", { app: "settings" });
   await studio.waitForSelector(".stx-viewport .os-window .kv", { timeout: 8_000 });
   check((await studio.$$(".stx-viewport .os-window .kv")).length >= 12, "Settings has a full Desktop section");
+  // Scheduled snapshots live in Settings beside the checkpoints they make
+  // (goal.md T3.4). The button is the whole feature: a cron job that calls
+  // desktop.checkpoint, which is why there is nothing else to check here.
+  check(await studio.$(".stx-viewport .os-window .app-btn:has-text('Snapshot on a schedule…')"),
+    "and a way to snapshot the desktop on a schedule");
 
   await studio.click(".stx-tabs .seg:has-text('Theme')");
   await studio.waitForSelector(".token-row", { timeout: 5_000 });
-  check((await studio.$$(".token-row")).length === 12, "the theme studio edits every colour token");
+  // Every colour token the compiler emits, including the status colours a job
+  // list and an audit row are painted with — the panel follows THEME_TOKENS
+  // rather than a hardcoded list, so this counts what the grammar has.
+  const tokenRows = await studio.$$eval(".token-row", (els) => els.map((e) => e.textContent.trim().split(/\s+/)[0]));
+  check(tokenRows.length >= 15, `the theme studio edits every colour token (${tokenRows.length})`);
+  check(["ok", "warn", "err"].every((t) => tokenRows.some((r) => r.startsWith(t))), "including the status colours");
   check(await studio.$(".wall-builder"), "and has a wallpaper builder");
 
   await studio.click(".stx-tabs .seg:has-text('Motion')");

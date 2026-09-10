@@ -176,7 +176,10 @@ export function starterApp({ name = "New App", kind = "app" } = {}) {
     `  <p class="dim">A ${kind} in your OS. Everything below runs against the real machine.</p>`,
     '  <button id="run">List files</button>',
     '  <pre id="out">—</pre>',
-    '  <script type="module" src="./app.js"></script>',
+    // `crossorigin` is not decoration: the frame's origin is opaque, so this
+    // fetch is cross-origin and needs the session cookie (see the Gateway's
+    // `crossOriginModules`). The OS adds it if you forget.
+    '  <script type="module" crossorigin="anonymous" src="./app.js"></script>',
     "</body>",
     "</html>",
     "",

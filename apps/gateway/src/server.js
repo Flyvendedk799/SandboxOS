@@ -19,7 +19,7 @@ import {
   createDistro, getDistro, getDistroByName, listDistros, deleteDistro, sandboxCountForTenant,
   createTenant, totalSandboxCount, tenantAgentStats, getAgent,
   listSandboxesForTenant, deleteSandbox,
-  getQuota, setQuota, runningAgentCount, isOperator,
+  getQuota, setQuota, runningAgentCount, isOperator, recordModelUsage,
   getTenant, getTenantProfile, updateTenantProfile, LLM_PROVIDERS,
   appendAudit,
   listSandboxAccess, revokeSandboxAccess, shareSandbox, listMachineTokens,
@@ -32,10 +32,11 @@ import { exposedPorts } from "../../../packages/kernel/src/servers/ports.js";
 import { safeResolve, canonicalContained, canonicalLeafContained } from "../../../packages/kernel/src/servers/fs.js";
 import { loadManifest, saveManifest } from "../../../packages/manifest/src/manifest.js";
 import {
-  loadOs, osEvents, resolveTheme, themeCss, resolveAnimation, animationCss,
+  loadOs, osEvents, resolveTheme, themeCss, resolveAnimation, animationCss, themeKey,
   appDescriptor, widgetDescriptor, effectivePermissions, withheldPermissions,
   readBundleFile, bundleType, safeRelPath, destroyOs,
   importPayload, importBundle, saveOs, docFromDistroSpec, builtinDistro,
+  manualIndex, manualPage, manualHeadings,
 } from "../../../packages/os/src/index.js";
 import { putTenantSecret, removeTenantSecret } from "../../../packages/secrets/src/store.js";
 import { providerConfig, providerOptions } from "../../../packages/llm/src/providers.js";
@@ -52,6 +53,7 @@ import { runCommand } from "../../../packages/command-central/src/console.js";
 import { runTurn, renderTranscript } from "../../../packages/assistant/src/assistant.js";
 import { Scheduler } from "../../../packages/scheduler/src/scheduler.js";
 import { upgradeWebSocket } from "../../../packages/pty/src/index.js";
+import { attachSession } from "../../../packages/kernel/src/pty-sessions.js";
 
 /** The host's single Cell Scheduler (wake/hibernate/budget). Exported for the
  *  Gateway's background loops (idle reaper + cron tick) in index.js. */
@@ -71,7 +73,7 @@ const requireIsolation = () => process.env.SANDBOXOS_REQUIRE_ISOLATION === "1";
 
 const PUBLIC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
 const OS_SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "packages", "os", "src");
-const OS_SHARED = new Set(["layout.js", "animations.js", "themes.js", "summary.js"]);
+const OS_SHARED = new Set(["layout.js", "animations.js", "themes.js", "summary.js", "keys.js", "proposals.js"]);
 const RESERVED = new Set(["", "login", "logout", "signup", "health", "api", "static", "favicon.ico"]);
 
 // ---- small http helpers ---------------------------------------------------
@@ -150,16 +152,167 @@ function frameCsp(req) {
 /** Give every app frame the `sbx` bridge whether or not its author asked for it. */
 function injectBridge(html, slug, id, kind) {
   const tag = `<script src="/static/js/os/bridge.js" data-slug="${slug}" data-app="${id}" data-kind="${kind}"></script>`;
-  return /<head[^>]*>/i.test(html)
+  const withBridge = /<head[^>]*>/i.test(html)
     ? html.replace(/<head[^>]*>/i, (m) => `${m}\n${tag}`)
     : `${tag}\n${html}`;
+  return crossOriginModules(withBridge);
 }
+
+/**
+ * A frame's own module scripts, made loadable.
+ *
+ * The frame runs at an *opaque* origin (that is the sandbox), so fetching
+ * `./app.js` from it is a cross-origin request in CORS mode — and a module
+ * script fetched that way sends no cookies, so the Gateway saw an
+ * unauthenticated request and refused it. The app's own JavaScript never ran,
+ * and the failure was a CORS message in a console nobody could open.
+ *
+ * Nor can it send one on request: Chrome treats an opaque initiator as
+ * cross-site, so even `use-credentials` would carry nothing. The frame therefore
+ * reads its own files through the *keyed* route (see `mintAssetKey`), which needs
+ * no credentials — and `crossorigin="anonymous"` is what makes the module fetch
+ * the plain CORS request that route can answer.
+ *
+ * We add the attribute rather than requiring authors to know any of this, because
+ * "why doesn't my import work" is not a question an OS should make people answer.
+ */
+function crossOriginModules(html) {
+  return html.replace(/<script\b[^>]*>/gi, (tag) => {
+    if (!/type\s*=\s*["']module["']/i.test(tag)) return tag;
+    if (/\bcrossorigin\b/i.test(tag)) return tag;
+    if (!/\bsrc\s*=/i.test(tag)) return tag; // inline module: nothing to fetch
+    return tag.replace(/<script\b/i, '<script crossorigin="anonymous"');
+  });
+}
+
+/**
+ * Asset keys: how a sandboxed frame is allowed to read its own files.
+ *
+ * The frame runs at an opaque origin, and that has a consequence nobody should
+ * have to discover from a CORS message: a request it makes for its own
+ * ./app.js is cross-origin, and Chrome treats an opaque initiator as
+ * cross-site, so the session cookie is not sent. The Gateway then saw an
+ * unauthenticated request and refused it — the app's own JavaScript never ran,
+ * and the failure surfaced only inside a console nobody could open.
+ *
+ * So a frame's URL carries an unguessable key as a path segment
+ * (/:slug/os/apps/:id/k/<key>/…), minted for whoever opened the window and
+ * bound to that Sandbox and that app. Relative imports inside the bundle
+ * resolve under the same prefix, so an import works with no cookie at all, and
+ * the key grants exactly one thing: reading that app's own source.
+ */
+const assetKeys = new Map(); // key → { sandboxId, appId, kind, expires }
+const ASSET_KEY_TTL_MS = 6 * 60 * 60 * 1000;
+
+function mintAssetKey(sandboxId, appId, kind) {
+  // One live key per (sandbox, app) is enough, and it keeps a reloading frame
+  // from growing the table: reuse an unexpired one.
+  for (const [k, v] of assetKeys) {
+    if (v.expires < Date.now()) { assetKeys.delete(k); continue; }
+    if (v.sandboxId === sandboxId && v.appId === appId && v.kind === kind) return k;
+  }
+  const key = crypto.randomBytes(24).toString('base64url');
+  assetKeys.set(key, { sandboxId, appId, kind, expires: Date.now() + ASSET_KEY_TTL_MS });
+  return key;
+}
+
+function resolveAssetKey(key, sandboxId, appId) {
+  const found = assetKeys.get(key);
+  if (!found || found.expires < Date.now()) return null;
+  if (found.sandboxId !== sandboxId || found.appId !== appId) return null;
+  return found;
+}
+
+/**
+ * Serve one file out of a custom app or widget bundle, into a sandboxed frame.
+ *
+ * The CSP is closed (connect-src none, in particular): an app talks to the
+ * machine through the shell's broker, never straight out of the frame. The entry
+ * document gets the bridge injected, so `sbx` exists whether or not the author
+ * asked for it, and its module scripts get `crossorigin` so they can actually
+ * load from an opaque origin.
+ *
+ * Two routes call this: the keyed one a frame uses (no cookie — see
+ * mintAssetKey) and the session-authenticated one everything else uses. The
+ * containment checks are the same either way; the only difference is who has
+ * already been trusted to ask.
+ */
+async function serveBundleFile(req, res, { sandbox, slug, isWidget, id, rest, prefix = null, held = null }) {
+  const d = loadOs(sandbox);
+  const desc = isWidget ? widgetDescriptor(d, id) : appDescriptor(d, id);
+  if (!desc || desc.builtin || desc.source?.type !== "bundle") {
+    return sendJson(res, 404, { ok: false, error: `no bundle for ${id}` });
+  }
+  const wanted = safeRelPath(rest || desc.source.entry);
+  if (!wanted) return sendJson(res, 400, { ok: false, error: "invalid path" });
+
+  let body, type;
+  if (desc.source.origin === "volume") {
+    // The app's source is ordinary files in the Cell — editable in the Files
+    // panel, versioned by Tide, and read here with the same containment check
+    // the raw file endpoint uses.
+    if (held && !authorize(held, "fs", "read")) return sendJson(res, 403, { ok: false, error: "denied: fs.read" });
+    const cell = getCell(sandbox);
+    await cell.ensureRunning();
+    try {
+      const file = await canonicalContained(cell.root, `${desc.source.volumePath}/${wanted}`);
+      body = fs.readFileSync(file);
+    } catch { return sendJson(res, 404, { ok: false, error: "not found" }); }
+    type = bundleType(wanted) ?? "application/octet-stream";
+  } else {
+    try {
+      const f = readBundleFile(sandbox, isWidget ? "widget" : "app", id, wanted, { encoding: null });
+      body = f.content;
+      type = f.type;
+    } catch { return sendJson(res, 404, { ok: false, error: "not found" }); }
+  }
+
+  if (type?.startsWith("text/html")) {
+    body = Buffer.from(injectBridge(body.toString("utf8"), slug, id, isWidget ? "widget" : "app"));
+  }
+  res.writeHead(200, {
+    "Content-Type": type ?? "application/octet-stream",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": frameCsp(req),
+    // The frame's origin is opaque, so every fetch it makes for its own files
+    // is a CORS request. Reading a bundle is already gated by the key or the
+    // session, so allowing the read is not a widening — it is what makes the
+    // app's own JavaScript run at all.
+    "Access-Control-Allow-Origin": "*",
+    "Content-Length": body.length,
+  });
+  return res.end(body);
+}
+
+/**
+ * The largest body any route here wants.
+ *
+ * The biggest legitimate payload is a distro or a machine backup, and the OS
+ * document alone is capped at 512 KB; a megabyte is comfortably above anything
+ * real and comfortably below "an authenticated caller can make the Gateway hold
+ * whatever it likes in memory". Requests that announce more are refused before
+ * routing (see `handle`), and `readBody` stops reading at the cap for one that
+ * does not announce it honestly.
+ */
+export const MAX_BODY_BYTES = 1024 * 1024;
 
 function readBody(req) {
   return new Promise((resolve) => {
     let data = "";
-    req.on("data", (c) => (data += c));
+    let over = false;
+    req.on("data", (c) => {
+      if (over) return;
+      data += c;
+      // A body that lied about its length: stop accumulating and hand the
+      // handler an empty object, which every route already answers with a
+      // sentence naming the field it wanted.
+      if (data.length > MAX_BODY_BYTES) { over = true; data = ""; }
+    });
     req.on("end", () => { try { resolve(data ? JSON.parse(data) : {}); } catch { resolve({}); } });
+    // A socket that dies mid-body must not leave a handler waiting forever.
+    req.on("aborted", () => resolve({}));
+    req.on("error", () => resolve({}));
   });
 }
 
@@ -704,6 +857,21 @@ async function handle(req, res) {
   const sandbox = getSandboxBySlug(slug);
   if (!sandbox) return sendJson(res, 404, { ok: false, error: `no sandbox: ${slug}` });
 
+  // GET /:slug/os/{apps,widgets}/:id/k/:key/<path> — a sandboxed frame reading
+  // its own bundle. This one route is authenticated by the key in the path
+  // rather than by a cookie, because an opaque-origin frame cannot send one
+  // (see mintAssetKey). The key is unguessable, expires, is bound to this
+  // Sandbox and this app, and grants nothing but reading that app's source.
+  if (action === "os" && (segments[3] === "apps" || segments[3] === "widgets") && segments[4] && segments[5] === "k" && segments[6] && req.method === "GET") {
+    const isWidget = segments[3] === "widgets";
+    const keyed = resolveAssetKey(segments[6], sandbox.id, segments[4]);
+    if (!keyed) return sendJson(res, 403, { ok: false, error: "expired or unknown asset key" });
+    return serveBundleFile(req, res, {
+      sandbox, slug, isWidget, id: segments[4], rest: segments.slice(7).filter(Boolean).join("/"),
+      prefix: `/${slug}/os/${segments[3]}/${encodeURIComponent(segments[4])}/k/${segments[6]}`,
+    });
+  }
+
   // AuthN + AuthZ: must be logged in AND hold at least one grant on this Sandbox.
   const principal = authenticate(req);
   if (!principal) {
@@ -1033,7 +1201,7 @@ async function handle(req, res) {
 
     // POST /:slug/chats/:id/send — run one turn, streaming events over SSE.
     if (req.method === "POST" && segments[4] === "send") {
-      const { input, model } = await readBody(req);
+      const { input, model, propose } = await readBody(req);
       if (!input || !String(input).trim()) return sendJson(res, 400, { ok: false, error: "input required" });
       scheduler.touch(sandbox.id);
 
@@ -1054,11 +1222,21 @@ async function handle(req, res) {
       }
 
       try {
-        const { messages, stopped } = await runTurn({
+        const { messages, stopped, usage } = await runTurn({
           kernel, sandbox, principalId: principal.id, heldPatterns: held,
           history, input: String(input), model, emit: send, signal: controller.signal,
+          propose: !!propose,
         });
         if (messages.length) appendConversationMessages(chat.id, messages);
+        // What the turn cost, in tokens, against this tenant (goal.md T3.5).
+        if (usage?.tokens) {
+          try {
+            recordModelUsage({
+              tenantId: principal.tenant_id, sandboxId: sandbox.id, principalId: principal.id,
+              provider: usage.provider, model: usage.model, tokens: usage.tokens,
+            });
+          } catch { /* accounting must never fail the conversation */ }
+        }
         send({ type: "end", stopped });
       } catch (e) {
         send({ type: "error", error: e?.message ?? "assistant failed" });
@@ -1074,6 +1252,14 @@ async function handle(req, res) {
   if (action === "mcp" && req.method === "POST") {
     scheduler.touch(sandbox.id);
     const { server: mcpSrv, tool: mcpTool, args } = await readBody(req);
+    // Validate at the door: what a caller sends is data, and data that does not
+    // fit the shape gets a sentence naming the field — never a database error.
+    if (typeof mcpSrv !== "string" || !mcpSrv)
+      return sendJson(res, 400, { ok: false, code: "bad_request", error: "missing field: server" });
+    if (typeof mcpTool !== "string" || !mcpTool)
+      return sendJson(res, 400, { ok: false, code: "bad_request", error: "missing field: tool" });
+    if (args != null && (typeof args !== "object" || Array.isArray(args)))
+      return sendJson(res, 400, { ok: false, code: "bad_request", error: "field args must be an object" });
     // Agent spawn quota: check before delegating to the kernel.
     if (mcpSrv === "agents" && mcpTool === "spawn") {
       const agentQuota = getQuota(principal.tenant_id);
@@ -1223,6 +1409,21 @@ async function handle(req, res) {
     return sendJson(res, r.ok ? 200 : 403, r.ok ? { ok: true, ...r.result } : { ok: false, error: r.error });
   }
 
+  // GET /:slug/os/manual        — the table of contents plus every heading
+  // GET /:slug/os/manual/:page   — one page, as the markdown that ships
+  //
+  // The Help app reads the repository's own documentation rather than carrying a
+  // copy of it, so the manual cannot drift from the build (goal.md T5.2). The
+  // page id is looked up in a fixed table; nothing here joins a path from what
+  // the caller sent.
+  if (action === "os" && segments[3] === "manual" && req.method === "GET") {
+    if (!authorize(held, "desktop", "get")) return sendJson(res, 403, { ok: false, error: "denied: desktop.get" });
+    if (!segments[4]) return sendJson(res, 200, { ok: true, pages: manualIndex(), headings: manualHeadings() });
+    const page = manualPage(segments[4]);
+    if (!page) return sendJson(res, 404, { ok: false, error: `no such manual page: ${segments[4]}` });
+    return sendJson(res, 200, { ok: true, page: { id: page.id, title: page.title, file: page.file, text: page.text, missing: !!page.missing } });
+  }
+
   // GET /:slug/os/events — live desktop changes (SSE). Every desktop.* write lands
   // here, whoever made it: a second tab, the Studio, or an agent three steps into a
   // plan. This is what makes "the agent restyled it" appear rather than need a reload.
@@ -1236,7 +1437,16 @@ async function handle(req, res) {
     const bus = osEvents(sandbox.id);
     const onChange = (ev) => res.write(`data: ${JSON.stringify(ev)}\n\n`);
     bus.on("change", onChange);
-    const keepalive = setInterval(() => res.write(": ping\n\n"), 25_000);
+    // The keepalive carries the revision (goal.md T0.6). A comment would keep the
+    // connection open just as well, but a *silent* divergence — the stream is up,
+    // an event was lost somewhere between here and the tab — would then last
+    // until the next write. With a rev on every tick it lasts one ping, and the
+    // client pulls without anybody noticing. It is twenty-odd bytes every 25
+    // seconds against a desktop that would otherwise be quietly wrong.
+    const keepalive = setInterval(() => {
+      try { res.write(`event: tick\ndata: ${JSON.stringify({ rev: loadOs(sandbox).rev })}\n\n`); }
+      catch { /* the socket went; 'close' will clean up */ }
+    }, 25_000);
     req.on("close", () => { bus.off("change", onChange); clearInterval(keepalive); });
     return;
   }
@@ -1248,9 +1458,22 @@ async function handle(req, res) {
     if (!authorize(held, "desktop", "get")) return sendJson(res, 403, { ok: false, error: "denied: desktop.get" });
     const d = loadOs(sandbox);
     const css = themeCss(resolveTheme(d)) + animationCss(resolveAnimation(d));
+    // The client asks for this by *appearance*, not by revision, so moving a
+    // window costs nothing here (goal.md T0.5). The ETag makes even a changed
+    // appearance a 304 when the browser already has that exact stylesheet, and
+    // immutable caching makes a repeat of the same key free.
+    // `no-cache` here means "revalidate", not "do not store": the shell links this
+    // by appearance key so a window move asks for nothing at all, and a frame that
+    // links it without one still gets a 304 rather than a stale desktop.
+    const etag = `"${themeKey(d)}"`;
+    if (req.headers["if-none-match"] === etag) {
+      res.writeHead(304, { ETag: etag, "Cache-Control": "no-cache" });
+      return res.end();
+    }
     res.writeHead(200, {
       "Content-Type": "text/css; charset=utf-8",
-      "Cache-Control": "no-store",
+      "Cache-Control": "no-cache",
+      ETag: etag,
       "Content-Length": Buffer.byteLength(css),
     });
     return res.end(css);
@@ -1270,68 +1493,37 @@ async function handle(req, res) {
     if (!desc) return sendJson(res, 404, { ok: false, error: `no such app: ${segments[4]}` });
     const granted = effectivePermissions(desc.permissions ?? [], held);
     const withheld = withheldPermissions(desc.permissions ?? [], held);
-    if (!granted.length) return sendJson(res, 200, { ok: true, token: null, patterns: [], withheld });
+    // The key that lets the frame read its own files (see mintAssetKey).
+    const assetKey = mintAssetKey(sandbox.id, segments[4], desc.kind === "widget" ? "widget" : "app");
+    // A suspended app is one someone decided to stop trusting for now: it keeps
+    // its window and its source, and gets no capabilities at all (goal.md T3.1).
+    if (desc.suspended) {
+      return sendJson(res, 200, { ok: true, token: null, patterns: [], withheld: desc.permissions ?? [], suspended: true, assetKey });
+    }
+    // No capabilities is not no app: it still needs its own files.
+    if (!granted.length) return sendJson(res, 200, { ok: true, token: null, patterns: [], withheld, assetKey });
     try {
       const minted = mintMachineToken(principal.id, sandbox.id, granted, {
         label: `app-${segments[4]}`, ttlMs: 6 * 60 * 60 * 1000,
       });
-      return sendJson(res, 200, { ok: true, token: minted.token, patterns: minted.patterns, withheld });
+      return sendJson(res, 200, { ok: true, token: minted.token, patterns: minted.patterns, withheld, principalId: minted.principalId, assetKey });
     } catch (e) {
       return sendJson(res, 400, { ok: false, error: e.message });
     }
   }
 
   // GET /:slug/os/apps/:id/<path> · GET /:slug/os/widgets/:kind/<path>
-  // The source of a custom app or widget, served into a sandboxed frame under a
-  // closed CSP. `connect-src 'none'` is deliberate: an app talks to the machine
-  // through the shell's broker, never straight out of the frame.
+  // The source of a custom app or widget, for a caller with a session — the
+  // Studio reading a file, or someone with the URL. The frames themselves use
+  // the keyed route above, because they have no cookie to send.
   if (action === "os" && (segments[3] === "apps" || segments[3] === "widgets") && segments[4] && req.method === "GET") {
     const isWidget = segments[3] === "widgets";
-    const d = loadOs(sandbox);
-    const desc = isWidget ? widgetDescriptor(d, segments[4]) : appDescriptor(d, segments[4]);
-    if (!desc || desc.builtin || desc.source?.type !== "bundle") {
-      return sendJson(res, 404, { ok: false, error: `no bundle for ${segments[4]}` });
-    }
     if (!authorize(held, "desktop", "get")) return sendJson(res, 403, { ok: false, error: "denied: desktop.get" });
-
-    const rest = segments.slice(5).filter(Boolean).join("/");
-    const wanted = safeRelPath(rest || desc.source.entry);
-    if (!wanted) return sendJson(res, 400, { ok: false, error: "invalid path" });
-
-    let body, type;
-    if (desc.source.origin === "volume") {
-      // The app's source is ordinary files in the Cell — editable in the Files
-      // panel, versioned by Tide, and read here with the same containment check
-      // the raw file endpoint uses.
-      if (!authorize(held, "fs", "read")) return sendJson(res, 403, { ok: false, error: "denied: fs.read" });
-      const cell = getCell(sandbox);
-      await cell.ensureRunning();
-      try {
-        const file = await canonicalContained(cell.root, `${desc.source.volumePath}/${wanted}`);
-        body = fs.readFileSync(file);
-      } catch { return sendJson(res, 404, { ok: false, error: "not found" }); }
-      type = bundleType(wanted) ?? "application/octet-stream";
-    } else {
-      try {
-        const f = readBundleFile(sandbox, isWidget ? "widget" : "app", segments[4], wanted, { encoding: null });
-        body = f.content;
-        type = f.type;
-      } catch { return sendJson(res, 404, { ok: false, error: "not found" }); }
-    }
-
-    // The entry document gets the bridge injected, so `sbx` exists in every frame
-    // whether or not the author remembered to ask for it.
-    if (type?.startsWith("text/html")) {
-      body = Buffer.from(injectBridge(body.toString("utf8"), slug, segments[4], isWidget ? "widget" : "app"));
-    }
-    res.writeHead(200, {
-      "Content-Type": type ?? "application/octet-stream",
-      "Cache-Control": "no-store",
-      "X-Content-Type-Options": "nosniff",
-      "Content-Security-Policy": frameCsp(req),
-      "Content-Length": body.length,
+    return serveBundleFile(req, res, {
+      sandbox, slug, isWidget, id: segments[4],
+      rest: segments.slice(5).filter(Boolean).join("/"),
+      held,
     });
-    return res.end(body);
   }
 
   // GET /:slug/apps — list installed apps.
@@ -1509,11 +1701,22 @@ async function handleUpgrade(req, socket, head) {
   const kernel = await getKernel(sandbox);
   scheduler.wake(sandbox, getQuota(principal.tenant_id)).catch(() => {});
 
-  const shell = await kernel.cell.execInteractive(
+  // A terminal is a session, not a socket: this attaches (replaying the
+  // scrollback) or creates, and closing the tab detaches rather than kills.
+  const want = {
+    id: url.searchParams.get("session") || null,
+    name: url.searchParams.get("name") || null,
+    cols: Number(url.searchParams.get("cols")) || 80,
+    rows: Number(url.searchParams.get("rows")) || 24,
+  };
+  const shell = attachSession(
+    kernel.cell, sandbox.id, want,
     (data) => ws.send(Buffer.isBuffer(data) ? data : Buffer.from(data)),
     () => ws.close(),
-    { cols: 80, rows: 24 },
   );
+  // Tell the client which session it is looking at, so a reopened window can ask
+  // for the same one. SOH-prefixed JSON, the same channel resize arrives on.
+  ws.send(Buffer.concat([Buffer.from([0x01]), Buffer.from(JSON.stringify({ type: "session", id: shell.id, name: shell.name }))]));
 
   // An open terminal is activity. Without this the idle reaper hibernates the
   // Cell under a shell someone is looking at, and the session "just ends".
@@ -1528,17 +1731,30 @@ async function handleUpgrade(req, socket, head) {
       try {
         const ctrl = JSON.parse(buf.slice(1).toString("utf8"));
         if (ctrl.type === "resize") shell.resize(ctrl.cols || 80, ctrl.rows || 24);
+        // "Kill" is a decision, and it is not the same as closing a window.
+        if (ctrl.type === "kill") shell.kill();
       } catch {}
       return;
     }
     shell.write(buf);
   });
 
-  ws.on("close", () => { clearInterval(keepAwake); shell.kill(); });
+  ws.on("close", () => { clearInterval(keepAwake); shell.detach(); });
 }
 
 export function createServer() {
   const srv = http.createServer((req, res) => {
+    // Refused at the door, before any route sees it: a declared body larger than
+    // anything here wants is answered rather than buffered (goal.md T0.4).
+    const declared = Number(req.headers["content-length"]);
+    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+      req.resume();   // drain, so the client is not left writing into a closed pipe
+      sendJson(res, 413, {
+        ok: false, code: "too_large",
+        error: `body too large: ${declared} bytes (max ${MAX_BODY_BYTES})`,
+      });
+      return;
+    }
     handle(req, res).catch((err) => {
       if (!res.headersSent) sendJson(res, 500, { ok: false, error: err?.message ?? "internal error" });
       else res.end();

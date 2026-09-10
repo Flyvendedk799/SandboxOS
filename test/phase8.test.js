@@ -9,6 +9,7 @@ import { ensureSeed, grantsFor, mintMachineToken } from "../packages/control-db/
 import { getKernel } from "../packages/kernel/src/kernel.js";
 import { upgradeWebSocket } from "../packages/pty/src/index.js";
 import { createServer } from "../apps/gateway/src/server.js";
+import { killAllSessionsEverywhere } from "../packages/kernel/src/pty-sessions.js";
 
 let owner, sandbox, kernel, held, machineToken;
 
@@ -20,7 +21,7 @@ test.before(async () => {
   const m = mintMachineToken(owner.id, sandbox.id, ["*"], { label: "p8-test" });
   machineToken = m.token;
 });
-test.after(() => closeDb());
+test.after(() => { killAllSessionsEverywhere(); closeDb(); });
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 

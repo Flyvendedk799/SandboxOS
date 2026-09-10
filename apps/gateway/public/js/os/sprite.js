@@ -46,6 +46,12 @@ const ICONS = {
   keyboard: '<rect x="2.5" y="5.5" width="15" height="9" rx="2"/><path d="M5.5 8.5h1M8.5 8.5h1M11.5 8.5h1M14.5 8.5h1M6 11.5h8"/>',
   up: '<path d="M10 15.5V4.5M5 9.5l5-5 5 5"/>',
   wand: '<path d="M4 16l9-9M12 4l1 1M15 7l1 1M9 3l.5 1.5M16.5 12l-1.5-.5"/>',
+  network: '<rect x="7.5" y="2.8" width="5" height="4" rx="1"/><rect x="2.5" y="13.2" width="5" height="4" rx="1"/><rect x="12.5" y="13.2" width="5" height="4" rx="1"/><path d="M10 6.8v3.4M5 13.2v-1.7h10v1.7M10 10.2v1.3"/>',
+  key: '<circle cx="7" cy="10" r="3.2"/><path d="M10.2 10h6.3M14.5 10v2.6M16.5 10v1.8"/>',
+  shield: '<path d="M10 2.8l6 2v5c0 3.4-2.5 6.2-6 7.4-3.5-1.2-6-4-6-7.4v-5z"/><path d="M7.4 10l2 2 3.4-3.6"/>',
+  list: '<path d="M4 5.5h.01M4 10h.01M4 14.5h.01M7.5 5.5h8.5M7.5 10h8.5M7.5 14.5h8.5"/>',
+  stop: '<rect x="5" y="5" width="10" height="10" rx="1.6"/>',
+  clock: '<circle cx="10" cy="10" r="7.2"/><path d="M10 5.8V10l2.8 1.8"/>',
 };
 
 let injected = false;

@@ -18,6 +18,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 
 import { normalizeDoc, LIMITS } from "./schema.js";
+import { themeKey } from "./themes.js";
 import { firstRunDoc } from "./distro.js";
 import { osDir } from "./bundles.js";
 
@@ -97,12 +98,22 @@ function writeDoc(sandbox, doc, { op = "set", label = null, keepRev = false } = 
     throw new Error(`OS document too large: ${json.length} bytes (max ${LIMITS.docBytes})`);
   }
 
+  // Replacing the whole machine — a reset, a fork, a restored backup — leaves
+  // the checkpoint *files* of a desktop that no longer exists. They are
+  // unreachable (the index is the only way in) and they are whole documents, so
+  // they are swept here rather than left to accumulate for the life of the
+  // volume. Only for ops that replace the document: every other write keeps its
+  // index, and a checkpoint must never disappear as a side effect.
+  if (prior && (op === "reset" || op === "set")) {
+    const kept = new Set((next.checkpoints ?? []).map((c) => c.id));
+    for (const c of prior.checkpoints ?? []) if (!kept.has(c.id)) removeCheckpoint(sandbox, c.id);
+  }
   if (prior && op !== "seed") pushHistory(sandbox, prior, label ?? op);
   writeJsonAtomic(osPath(sandbox), next);
   try { _cache.set(sandbox.id, { mtimeMs: fs.statSync(osPath(sandbox)).mtimeMs, doc: next }); }
   catch { _cache.delete(sandbox.id); }
 
-  osEvents(sandbox.id).emit("change", { op, rev: next.rev, at: next.updatedAt, doc: next });
+  osEvents(sandbox.id).emit("change", { op, rev: next.rev, at: next.updatedAt, themeKey: themeKey(next), doc: next });
   return next;
 }
 
@@ -130,40 +141,160 @@ export function saveOs(sandbox, doc, opts = {}) {
   return mutateOs(sandbox, () => doc, { op: "set", ...opts });
 }
 
-/** Throw the desktop away and start again from the first-run seed. */
+/**
+ * Throw the desktop away and start again from the first-run seed.
+ *
+ * `setup` survives it. Whether this machine has been through first run is a fact
+ * about the machine, not part of the desktop: someone clearing their windows and
+ * their theme is not a new user, and greeting them with the welcome screen again
+ * would be answering a question they did not ask.
+ */
 export function resetOs(sandbox, { name } = {}) {
-  return writeDoc(sandbox, firstRunDoc(name ?? sandbox.name ?? "my-os"), { op: "reset", label: "reset" });
+  const prior = loadOs(sandbox);
+  const fresh = firstRunDoc(name ?? sandbox.name ?? "my-os");
+  if (prior?.setup?.done) fresh.setup = { ...prior.setup };
+  return writeDoc(sandbox, fresh, { op: "reset", label: "reset" });
 }
 
 // ---- history ---------------------------------------------------------------
 
+// History used to be one array holding forty whole documents, rewritten on every
+// write — so dragging a window wrote the last forty desktops back to disk, and
+// the file was already 141 KB after a short session (goal.md T0.5). It is now an
+// append-only set of revision files with a small index: one document written per
+// revision, and a line appended to a list of names, times and labels.
+
+const historyDir = (sandbox) => path.join(osDir(sandbox), "history");
+const historyIndexPath = (sandbox) => path.join(historyDir(sandbox), "index.json");
+const revPath = (sandbox, rev) => path.join(historyDir(sandbox), `${Number(rev)}.json`);
+
+/** Fold a pre-existing single-file history into the new shape, once. */
+function migrateHistory(sandbox) {
+  const legacy = readJson(historyPath(sandbox));
+  if (!Array.isArray(legacy)) return null;
+  const index = [];
+  for (const e of legacy) {
+    const rev = Number(e?.rev ?? 0);
+    if (!e?.doc) continue;
+    try { writeJsonAtomic(revPath(sandbox, rev), e.doc); index.push({ rev, ts: e.ts ?? Date.now(), label: e.label ?? "" }); }
+    catch { /* one unreadable revision must not cost the rest */ }
+  }
+  writeJsonAtomic(historyIndexPath(sandbox), index);
+  try { fs.rmSync(historyPath(sandbox), { force: true }); } catch { /* it can stay */ }
+  return index;
+}
+
+/** The index, migrating an old history file the first time we meet one. */
+function historyIndex(sandbox) {
+  const index = readJson(historyIndexPath(sandbox));
+  if (Array.isArray(index)) return index;
+  return migrateHistory(sandbox) ?? [];
+}
+
 function pushHistory(sandbox, doc, label) {
-  const file = historyPath(sandbox);
-  const list = readJson(file) ?? [];
-  list.push({ rev: Number(doc.rev ?? 0), ts: Date.now(), label: String(label ?? "").slice(0, 80), doc });
-  while (list.length > LIMITS.history) list.shift();
-  try { writeJsonAtomic(file, list); } catch { /* history is a convenience, never a blocker */ }
+  try {
+    const index = historyIndex(sandbox);
+    const rev = Number(doc.rev ?? 0);
+    writeJsonAtomic(revPath(sandbox, rev), doc);
+    index.push({ rev, ts: Date.now(), label: String(label ?? "").slice(0, 80) });
+    while (index.length > LIMITS.history) {
+      const gone = index.shift();
+      try { fs.rmSync(revPath(sandbox, gone.rev), { force: true }); } catch { /* already gone */ }
+    }
+    writeJsonAtomic(historyIndexPath(sandbox), index);
+  } catch { /* history is a convenience, never a blocker */ }
 }
 
 /** The revisions available to revert to, newest first (documents omitted). */
 export function osHistory(sandbox) {
-  const list = readJson(historyPath(sandbox)) ?? [];
-  return list.map((e) => ({ rev: e.rev, ts: e.ts, label: e.label })).reverse();
+  return historyIndex(sandbox).map((e) => ({ rev: e.rev, ts: e.ts, label: e.label })).reverse();
 }
 
 /** One stored revision, document included, or null. */
 export function osHistoryEntry(sandbox, rev) {
-  const list = readJson(historyPath(sandbox)) ?? [];
-  return list.find((e) => Number(e.rev) === Number(rev)) ?? null;
+  const entry = historyIndex(sandbox).find((e) => Number(e.rev) === Number(rev));
+  if (!entry) return null;
+  const doc = readJson(revPath(sandbox, entry.rev));
+  return doc ? { ...entry, doc } : null;
 }
 
-/** Restore a previous revision. The restore is itself a new revision — history
- *  moves forward, so an undo can always be undone. */
-export function revertOs(sandbox, rev) {
-  const list = readJson(historyPath(sandbox)) ?? [];
-  const entry = list.find((e) => Number(e.rev) === Number(rev));
+/**
+ * The parts of the document an undo can be aimed at. Everything here is a
+ * top-level section that means something on its own: taking back an alignment
+ * should not take back the widget somebody added afterwards.
+ */
+export const REVERT_SCOPES = Object.freeze([
+  "windows", "widgets", "workspaces", "theme", "animation", "wm", "shell",
+  "apps", "widgetKinds", "notifications",
+]);
+
+/**
+ * Restore a previous revision. The restore is itself a new revision — history
+ * moves forward, so an undo can always be undone.
+ *
+ * With `only`, it restores just those sections and leaves the rest of the
+ * document as it is now. That is what makes "undo the alignment, keep the
+ * widget" a thing you can actually do: an agent's change is several revisions,
+ * and being able to take back one of them without losing the others is the
+ * difference between history you can use and history you can only rewind.
+ */
+export function revertOs(sandbox, rev, { only = null } = {}) {
+  const entry = osHistoryEntry(sandbox, rev);
   if (!entry) throw new Error(`no such revision: ${rev}`);
-  return writeDoc(sandbox, entry.doc, { op: "revert", label: `revert to rev ${rev}` });
+  if (!only?.length) {
+    // The checkpoint index travels with the *current* document, exactly as it
+    // does for a restore. A checkpoint is explicitly outside the revision
+    // window; undoing a window move must not forget one you named yesterday.
+    const now = loadOs(sandbox);
+    return writeDoc(sandbox, { ...entry.doc, checkpoints: now.checkpoints }, { op: "revert", label: `revert to rev ${rev}` });
+  }
+
+  const scopes = [...new Set(only.map(String))];
+  const unknown = scopes.filter((k) => !REVERT_SCOPES.includes(k));
+  if (unknown.length) throw new Error(`cannot revert '${unknown.join("', '")}' — try ${REVERT_SCOPES.join(", ")}`);
+  const current = loadOs(sandbox);
+  const merged = { ...current };
+  for (const k of scopes) merged[k] = entry.doc[k];
+  // zTop follows the windows: restoring old geometry with a stale stacking
+  // counter would let the next opened window land underneath one of them.
+  if (scopes.includes("windows")) merged.zTop = Math.max(current.zTop ?? 0, entry.doc.zTop ?? 0);
+  return writeDoc(sandbox, merged, { op: "revert", label: `revert ${scopes.join(", ")} to rev ${rev}` });
+}
+
+// ---- checkpoints -----------------------------------------------------------
+//
+// History answers "what did I just do"; a checkpoint answers "take me back to
+// the desktop I liked". It is a named copy of the whole document, kept outside
+// the forty-revision window so it cannot be pruned away, and the document holds
+// only the index (goal.md T2.4).
+
+const checkpointDir = (sandbox) => path.join(osDir(sandbox), "checkpoints");
+const checkpointPath = (sandbox, id) => path.join(checkpointDir(sandbox), `${id}.json`);
+
+/** Store the document under a checkpoint id. Returns false if it cannot. */
+export function writeCheckpoint(sandbox, id, doc) {
+  try { writeJsonAtomic(checkpointPath(sandbox, id), doc); return true; }
+  catch { return false; }
+}
+
+export function readCheckpoint(sandbox, id) {
+  return readJson(checkpointPath(sandbox, id));
+}
+
+export function removeCheckpoint(sandbox, id) {
+  try { fs.rmSync(checkpointPath(sandbox, id), { force: true }); return true; }
+  catch { return false; }
+}
+
+/** Restore a checkpoint as a new revision: going back is itself undoable. */
+export function restoreCheckpoint(sandbox, id, { label = null } = {}) {
+  const doc = readCheckpoint(sandbox, id);
+  if (!doc) throw new Error(`no such checkpoint: ${id}`);
+  const current = loadOs(sandbox);
+  // The index travels with the current document, not with the snapshot:
+  // restoring a state from last week must not delete the checkpoints made
+  // since, or the way back would disappear behind you.
+  return writeDoc(sandbox, { ...doc, checkpoints: current.checkpoints }, { op: "checkpointRestore", label: label ?? `restore ${id}` });
 }
 
 /** Delete everything the OS owns for a Sandbox: document, history and every

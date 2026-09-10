@@ -148,34 +148,60 @@ export function portsServer(deps) {
         inputSchema: { type: "object", properties: {} },
         async handler() {
           await cell.ensureRunning();
-          // `ss` on modern distros, `netstat` on older/busybox images — and when
-          // neither is installed (a minimal image, a bare container), the kernel's
-          // own table in /proc/net/tcp*, which is always there on Linux. State 0A
-          // is LISTEN; the local port is hex after the colon.
-          const r = await cell.exec("ss -ltnH 2>/dev/null || netstat -ltn 2>/dev/null || true");
           const found = new Set();
-          for (const line of (r.stdout ?? "").split("\n")) {
-            // Match the local-address column: 0.0.0.0:3000, [::]:8080, 127.0.0.1:5432
-            const m = line.match(/(?:^|\s)(?:\[[^\]]*\]|[\d.*]+):(\d{1,5})(?:\s|$)/);
-            if (m) {
-              const port = Number(m[1]);
-              if (port >= MIN_PORT && port <= MAX_PORT) found.add(port);
-            }
+          const add = (port) => { if (port >= MIN_PORT && port <= MAX_PORT) found.add(port); };
+          const tried = [];
+
+          // Each strategy belongs to a kind of machine, and a machine that has
+          // none of them is told which were tried: a scan that found nothing and
+          // a scan that could not look are different answers.
+          const strategies = [
+            // `ss` on modern distros, `netstat` on older/busybox images.
+            {
+              needs: "ss/netstat",
+              cmd: "ss -ltnH 2>/dev/null || netstat -ltn 2>/dev/null || true",
+              // The local-address column: 0.0.0.0:3000, [::]:8080, 127.0.0.1:5432
+              parse: (out) => { for (const l of out.split("\n")) { const m = l.match(/(?:^|\s)(?:\[[^\]]*\]|[\d.*]+):(\d{1,5})(?:\s|$)/); if (m) add(Number(m[1])); } },
+            },
+            // The kernel's own table, always there on Linux. State 0A is LISTEN;
+            // the local port is hex after the colon.
+            {
+              needs: "/proc/net/tcp",
+              cmd: "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null || true",
+              parse: (out) => { for (const l of out.split("\n")) { const m = l.match(/^\s*\d+:\s+[0-9A-Fa-f]+:([0-9A-Fa-f]{4})\s+[0-9A-Fa-f]+:[0-9A-Fa-f]{4}\s+0A\s/); if (m) add(parseInt(m[1], 16)); } },
+            },
+            // Windows' netstat, whose LISTENING lines read differently enough to
+            // deserve their own parse rather than a hopeful regex over both.
+            {
+              needs: "netstat -ano",
+              cmd: 'netstat -ano -p TCP 2>/dev/null || netstat -ano -p TCP 2>nul || true',
+              parse: (out) => { for (const l of out.split("\n")) { const m = l.match(/^\s*TCP\s+\S+:(\d{1,5})\s+\S+\s+LISTENING/i); if (m) add(Number(m[1])); } },
+            },
+          ];
+          // A host that cannot run commands at all is the strongest answer there
+          // is: stop, and say so, rather than trying two more spellings of the
+          // same impossibility.
+          let cannotRun = null;
+          for (const s of strategies) {
+            if (found.size) break;
+            const r = await cell.exec(s.cmd);
+            if (r.failure) { cannotRun = r.failure.message; tried.push(`${s.needs}: ${r.failure.message}`); break; }
+            if (!r.stdout) { tried.push(`${s.needs}: no output`); continue; }
+            s.parse(r.stdout);
+            if (!found.size) tried.push(`${s.needs}: nothing listening`);
           }
-          if (!found.size) {
-            const p = await cell.exec("cat /proc/net/tcp /proc/net/tcp6 2>/dev/null || true");
-            for (const line of (p.stdout ?? "").split("\n")) {
-              const m = line.match(/^\s*\d+:\s+[0-9A-Fa-f]+:([0-9A-Fa-f]{4})\s+[0-9A-Fa-f]+:[0-9A-Fa-f]{4}\s+0A\s/);
-              if (m) {
-                const port = parseInt(m[1], 16);
-                if (port >= MIN_PORT && port <= MAX_PORT) found.add(port);
-              }
-            }
-          }
+
           const exposed = new Set(Object.keys(exposedPorts(sandbox)).map(Number));
-          return {
-            listening: [...found].sort((a, b) => a - b).map((port) => ({ port, exposed: exposed.has(port) })),
-          };
+          const listening = [...found].sort((a, b) => a - b).map((port) => ({ port, exposed: exposed.has(port) }));
+          // Honesty over emptiness: when nothing could look, say so, so a caller
+          // can show "cannot scan here" rather than "nothing is listening".
+          const nothingCouldLook = cannotRun
+            ? `cannot list listening ports: ${cannotRun}`
+            : (!listening.length && tried.length === strategies.length && tried.every((t) => !t.includes("nothing listening"))
+              ? `cannot list listening ports on this host (tried ${strategies.map((s) => s.needs).join(", ")})`
+              : null);
+          if (nothingCouldLook) return { listening, unavailable: nothingCouldLook, tried };
+          return { listening };
         },
       },
     },

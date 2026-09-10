@@ -353,25 +353,69 @@ function redact(args) {
   return walk(args, 0, false);
 }
 
+/**
+ * The bytes a row's hash covers, from stored-column names.
+ *
+ * Exported because it is the definition of the chain, and it used to exist in
+ * three copies — the writer, the verifier and a test's repair helper. Adding a
+ * column to `audit` broke the copy nobody remembered, which is exactly the kind
+ * of quiet drift a tamper-evident log cannot afford.
+ */
+export function auditPayload(row, prevHash) {
+  return JSON.stringify({
+    ts: row.ts,
+    sandbox_id: row.sandbox_id ?? null,
+    principal_id: row.principal_id ?? null,
+    on_behalf_of: row.on_behalf_of ?? null,
+    server: row.server,
+    tool: row.tool,
+    args: row.args_json ?? null,
+    result_kind: row.result_kind,
+    error: row.error ?? null,
+    capability: row.capability ?? null,
+    ms: row.ms ?? null,
+    prevHash,
+  });
+}
+
+/** The digest of one row, given the previous row's hash. */
+export const auditHash = (row, prevHash) =>
+  crypto.createHash("sha256").update(prevHash + auditPayload(row, prevHash)).digest("hex");
+
 export function appendAudit(ev) {
+  // Every column is bound explicitly and defensively: an audit row is written on
+  // the failure paths too, and a driver-level binding error there would replace a
+  // caller's real problem with a sentence about SQLite parameters.
+  const text = (v, dflt = null) => (typeof v === "string" ? v : v == null ? dflt : String(v));
+  ev = {
+    ...ev,
+    server: text(ev.server, "(none)"),
+    tool: text(ev.tool, "(none)"),
+    resultKind: text(ev.resultKind, "error"),
+    error: text(ev.error),
+    capability: text(ev.capability),
+    sandboxId: text(ev.sandboxId),
+    principalId: text(ev.principalId),
+    onBehalfOf: text(ev.onBehalfOf),
+  };
   const db = openDb();
   const prev = db.prepare("SELECT hash FROM audit ORDER BY id DESC LIMIT 1").get();
   const prevHash = prev?.hash ?? "";
   const ts = now();
   const argsJson = ev.args === undefined ? null : JSON.stringify(redact(ev.args));
-  const payload = JSON.stringify({
+  const ms = Number.isFinite(ev.ms) ? Math.max(0, Math.round(ev.ms)) : null;
+  const hash = auditHash({
     ts, sandbox_id: ev.sandboxId ?? null, principal_id: ev.principalId ?? null,
     on_behalf_of: ev.onBehalfOf ?? null, server: ev.server, tool: ev.tool,
-    args: argsJson, result_kind: ev.resultKind, error: ev.error ?? null,
-    capability: ev.capability ?? null, prevHash,
-  });
-  const hash = crypto.createHash("sha256").update(prevHash + payload).digest("hex");
+    args_json: argsJson, result_kind: ev.resultKind, error: ev.error ?? null,
+    capability: ev.capability ?? null, ms,
+  }, prevHash);
   db.prepare(`INSERT INTO audit
-      (ts,sandbox_id,principal_id,on_behalf_of,server,tool,args_json,result_kind,error,capability,prev_hash,hash)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+      (ts,sandbox_id,principal_id,on_behalf_of,server,tool,args_json,result_kind,error,capability,ms,prev_hash,hash)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run(ts, ev.sandboxId ?? null, ev.principalId ?? null, ev.onBehalfOf ?? null,
-      ev.server, ev.tool, argsJson, ev.resultKind, ev.error ?? null, ev.capability ?? null, prevHash, hash);
-  return { ts, hash };
+      ev.server, ev.tool, argsJson, ev.resultKind, ev.error ?? null, ev.capability ?? null, ms, prevHash, hash);
+  return { ts, hash, ms };
 }
 
 export function recentAudit(sandboxId, limit = 50) {
@@ -490,8 +534,23 @@ export function auditRollup(sandboxId, since) {
     "SELECT server, COUNT(*) AS n FROM audit WHERE sandbox_id=? AND ts>? GROUP BY server ORDER BY n DESC LIMIT 20",
   ).all(sandboxId, since);
 
+  // Per tool: how often, how many refusals and failures, and how slow — the
+  // three questions an operator actually asks, answered in one pass.
   const byTool = db.prepare(
-    "SELECT server, tool, COUNT(*) AS n FROM audit WHERE sandbox_id=? AND ts>? GROUP BY server, tool ORDER BY n DESC LIMIT 20",
+    `SELECT server, tool, COUNT(*) AS n,
+            SUM(CASE WHEN result_kind='denied' THEN 1 ELSE 0 END) AS denied,
+            SUM(CASE WHEN result_kind='error'  THEN 1 ELSE 0 END) AS errors,
+            AVG(ms) AS avgMs, MAX(ms) AS maxMs
+       FROM audit WHERE sandbox_id=? AND ts>?
+      GROUP BY server, tool ORDER BY n DESC LIMIT 20`,
+  ).all(sandboxId, since);
+
+  // The slowest individual calls in the window, which is a different list from
+  // the busiest tools and usually the more interesting one.
+  const slowest = db.prepare(
+    `SELECT server, tool, ms, ts, result_kind AS kind FROM audit
+      WHERE sandbox_id=? AND ts>? AND ms IS NOT NULL
+      ORDER BY ms DESC LIMIT 8`,
   ).all(sandboxId, since);
 
   // Bucket width: keep the histogram at a readable ~60 buckets whatever the window.
@@ -512,6 +571,7 @@ export function auditRollup(sandboxId, since) {
     byKind: Object.fromEntries(byKind.map((r) => [r.kind, r.n])),
     byServer,
     byTool,
+    slowest,
     bucketMs,
     histogram: [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([ts, n]) => ({ ts, n })),
   };
@@ -534,15 +594,9 @@ export function verifyAuditChain() {
     if ((row.prev_hash ?? "") !== prevHash) {
       return { ok: false, count: rows.length, brokenAtId: row.id };
     }
-    // Recompute exactly as appendAudit: payload built from the stored columns,
-    // using args_json verbatim (already redacted at write time).
-    const payload = JSON.stringify({
-      ts: row.ts, sandbox_id: row.sandbox_id ?? null, principal_id: row.principal_id ?? null,
-      on_behalf_of: row.on_behalf_of ?? null, server: row.server, tool: row.tool,
-      args: row.args_json ?? null, result_kind: row.result_kind, error: row.error ?? null,
-      capability: row.capability ?? null, prevHash,
-    });
-    const expected = crypto.createHash("sha256").update(prevHash + payload).digest("hex");
+    // Recompute exactly as appendAudit did — the same function, so the two can
+    // never disagree about what the hash covers.
+    const expected = auditHash(row, prevHash);
     if (row.hash !== expected) {
       return { ok: false, count: rows.length, brokenAtId: row.id };
     }
@@ -705,6 +759,38 @@ export function sandboxCountForTenant(tenantId) {
 const QUOTA_DEFAULTS = { max_sandboxes: 3, max_agents: 10, max_running: 2, mem_mb: 512, cpu_shares: 1.0 };
 
 /** Return the quota row for a tenant, falling back to defaults if none is set. */
+// ---- model usage ----------------------------------------------------------
+//
+// Tokens, by provider and model, per turn. Deliberately not money: the price of
+// a token depends on a plan this host may not be able to see (a Claude
+// subscription, an operator's own login), and inventing a number would be worse
+// than reporting the one we can actually count (goal.md T3.5).
+
+export function recordModelUsage({ tenantId, sandboxId = null, principalId = null, provider, model = null, tokens = 0, kind = "assistant" }) {
+  if (!tenantId || !provider || !tokens) return null;
+  const ts = now();
+  openDb().prepare(
+    "INSERT INTO model_usage (ts,tenant_id,sandbox_id,principal_id,provider,model,tokens,kind) VALUES (?,?,?,?,?,?,?,?)",
+  ).run(ts, tenantId, sandboxId, principalId, String(provider), model ? String(model) : null, Math.round(tokens), String(kind));
+  return { ts, tokens: Math.round(tokens) };
+}
+
+/** Tokens used since `since`, grouped by provider and model. */
+export function modelUsage(tenantId, { since = 0, sandboxId = null } = {}) {
+  const rows = openDb().prepare(
+    `SELECT provider, model, SUM(tokens) AS tokens, COUNT(*) AS turns, MAX(ts) AS last
+       FROM model_usage
+      WHERE tenant_id = ? AND ts > ? AND (? IS NULL OR sandbox_id = ?)
+      GROUP BY provider, model
+      ORDER BY tokens DESC`,
+  ).all(tenantId, since, sandboxId, sandboxId);
+  return {
+    since,
+    total: rows.reduce((n, r) => n + (r.tokens ?? 0), 0),
+    byModel: rows,
+  };
+}
+
 export function getQuota(tenantId) {
   const row = openDb().prepare("SELECT * FROM tenant_quotas WHERE tenant_id=?").get(tenantId);
   return row ?? { tenant_id: tenantId, ...QUOTA_DEFAULTS };

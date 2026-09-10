@@ -18,6 +18,20 @@ export const BUILTIN_APPS = [
   { id: "browser",   name: "Browser",       icon: "browser",   hue: "#3ec8ff", window: { w: 520, h: 360 }, needs: ["ports.list"] },
   { id: "settings",  name: "Settings",      icon: "settings",  hue: "#9fb0c0", window: { w: 400, h: 300 }, needs: [] },
   { id: "studio",    name: "OS Studio",     icon: "layers",    hue: "#35d6c4", window: { w: 640, h: 420 }, needs: ["desktop.*"] },
+  // The machine's own work, on the desktop rather than in a console: a desktop
+  // that sends you elsewhere to restart a dev server is a demo of a desktop
+  // (goal.md Track 1).
+  { id: "jobs",      name: "Jobs",          icon: "play",      hue: "#f0b849", window: { w: 620, h: 400 }, needs: ["proc.*", "cron.*"] },
+  { id: "ports",     name: "Ports",         icon: "network",   hue: "#3ec8ff", window: { w: 560, h: 380 }, needs: ["ports.*"] },
+  { id: "agents",    name: "Agents",        icon: "assistant", hue: "#b98cff", window: { w: 620, h: 420 }, needs: ["agents.*"] },
+  { id: "secrets",   name: "Secrets",       icon: "key",       hue: "#e8c98a", window: { w: 480, h: 340 }, needs: ["secrets.*"] },
+  { id: "sync",      name: "Sync",          icon: "refresh",   hue: "#7be3d0", window: { w: 600, h: 400 }, needs: ["tide.*"] },
+  { id: "access",    name: "Access",        icon: "shield",    hue: "#9fb0c0", window: { w: 560, h: 380 }, needs: ["access.*"] },
+  { id: "audit",     name: "Audit",         icon: "list",      hue: "#43d17f", window: { w: 680, h: 420 }, needs: ["kernel.auditQuery"] },
+  // The manual, read from the docs this build ships, plus the live tool
+  // catalogue. It needs nothing: a machine you cannot read about is worse than
+  // a machine you cannot use (goal.md T5.2).
+  { id: "help",      name: "Manual",        icon: "list",      hue: "#6aa9ff", window: { w: 720, h: 460 }, needs: [] },
 ];
 
 export const BUILTIN_WIDGETS = [
@@ -35,8 +49,9 @@ export const BUILTIN_WIDGETS = [
 export const BUILTIN_DISTROS = [
   {
     id: "dev", name: "Developer Box", hue: "#35d6c4", theme: "midnight",
-    description: "Files · Terminal · Assistant · git-wired",
-    apps: ["files", "terminal", "assistant"], widgets: ["clock", "load"],
+    description: "Files · Terminal · Jobs · Ports · Assistant",
+    apps: ["files", "terminal", "jobs", "assistant"], widgets: ["clock", "load"],
+    dock: ["files", "terminal", "jobs", "ports", "assistant", "settings"],
   },
   {
     id: "research", name: "Research Box", hue: "#3ec8ff", theme: "tide",
@@ -50,8 +65,9 @@ export const BUILTIN_DISTROS = [
   },
   {
     id: "ops", name: "Social Ops", hue: "#ff8f5e", theme: "sunset",
-    description: "Metrics · Browser · scheduled agents",
-    apps: ["metrics", "browser"], widgets: ["load", "audit"],
+    description: "Jobs · Ports · Observability · scheduled agents",
+    apps: ["jobs", "ports", "metrics"], widgets: ["load", "audit"],
+    dock: ["jobs", "ports", "agents", "metrics", "audit", "settings"],
   },
   {
     id: "minimal", name: "Minimal", hue: "#c9b48c", theme: "mono",
@@ -110,3 +126,18 @@ export const BUILTIN_DISTROS = [
 export const builtinApp = (id) => BUILTIN_APPS.find((a) => a.id === id) ?? null;
 export const builtinWidget = (kind) => BUILTIN_WIDGETS.find((w) => w.kind === kind) ?? null;
 export const builtinDistro = (id) => BUILTIN_DISTROS.find((d) => d.id === id) ?? null;
+
+/**
+ * The `desktop.*` tools that only read.
+ *
+ * Two things need this list: a proposal (which is for changes, so a read-only op
+ * in one is a mistake worth naming), and the assistant's review mode, where a
+ * mutation is captured for review and a read is simply allowed through — an agent
+ * that cannot look at the desktop cannot propose anything sensible about it.
+ */
+export const READ_ONLY_DESKTOP_TOOLS = new Set([
+  "get", "state", "summarize", "silhouette", "history",
+  "themeList", "animationList", "workspaceList", "windowList", "widgetList",
+  "appList", "appFiles", "appRead", "widgetFiles", "widgetRead",
+  "distroList", "distroExport", "proposals",
+]);

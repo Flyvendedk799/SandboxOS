@@ -7,6 +7,7 @@
 // are ordinary `desktop.*` calls, and an agent can do every one of them.
 
 import { h, fill, icon, api, slug, menu, toast, toastError } from "../core.js";
+import { KEY_ACTIONS, matchesChord, prettyChord } from "./lib/keys.js";
 import { os, call, tint } from "./client.js";
 import { createDesktop } from "./wm.js";
 import { iconName } from "./sprite.js";
@@ -18,10 +19,14 @@ const clockText = () => { const d = new Date(); return `${pad2(d.getHours())}:${
 
 export function createScreen({ ctx = {} } = {}) {
   // ── DOM skeleton ──────────────────────────────────────────────────────────
-  const menubar = h("div.os-menubar");
-  const desktopEl = h("div.os-desktop");
-  const dock = h("div.os-dock");
-  const overlays = h("div", { style: { position: "absolute", inset: "0", pointerEvents: "none", zIndex: "20" } });
+  // Roles and names on every piece of chrome (goal.md T4.5). They are not
+  // decoration: without them the dock is a row of unlabelled buttons and the
+  // desktop is an unnamed div, and a keyboard-only path through the OS has
+  // nothing to announce.
+  const menubar = h("div.os-menubar", { role: "menubar", "aria-label": "Menu bar" });
+  const desktopEl = h("div.os-desktop", { role: "main", "aria-label": "Desktop" });
+  const dock = h("div.os-dock", { role: "toolbar", "aria-label": "Dock" });
+  const overlays = h("div", { role: "region", "aria-label": "Overlays", style: { position: "absolute", inset: "0", pointerEvents: "none", zIndex: "20" } });
   const el = h("div.os-screen", null, menubar, desktopEl, dock, overlays);
 
   const launch = (appId, props) =>
@@ -30,7 +35,12 @@ export function createScreen({ ctx = {} } = {}) {
 
   const wm = createDesktop({
     root: desktopEl,
-    ctx: { ...ctx, launch, mark: () => call("arrange", { preset: "grid", viewport: wm.viewport() }), windowMenu },
+    ctx: {
+      ...ctx, launch, mark: () => call("arrange", { preset: "grid", viewport: wm.viewport() }), windowMenu,
+      // An app can hand you to Spotlight with something already typed — the
+      // Manual's "Try it" is exactly this, and deliberately not "run it for me".
+      spotlight: (q = "") => showOverlay("spotlight", () => spotlight(q)),
+    },
   });
 
   /** The window's menu — a right-click on a desktop, a long press on a phone. */
@@ -56,6 +66,16 @@ export function createScreen({ ctx = {} } = {}) {
     openOverlay = name;
     overlays.style.pointerEvents = "auto";
     fill(overlays, typeof node === "function" ? node() : node);
+    // Focus goes into what just opened — the first thing you would have
+    // clicked — because an overlay you cannot reach with the keyboard is a
+    // dialog only a mouse can answer.
+    const panel = overlays.querySelector(".os-panel, .os-spotlight");
+    if (panel) {
+      panel.setAttribute("role", "dialog");
+      panel.setAttribute("aria-modal", "true");
+      const first = panel.querySelector("input, textarea, button, [tabindex]");
+      (first ?? panel).focus?.();
+    }
   }
   function hideOverlay() {
     openOverlay = null;
@@ -107,9 +127,16 @@ export function createScreen({ ctx = {} } = {}) {
   function renderMenubar() {
     const d = os.doc;
     const unread = d.notifications.filter((n) => !n.read).length;
-    const bell = h("button.icon-btn", { title: "Notifications", onclick: () => toggleOverlay("notifs", notifPanel) },
+    // Do-not-disturb is visible, because a machine that has quietly stopped
+    // telling you things should say so rather than look calm (goal.md T3.3).
+    const dnd = !!d.shell.notifications.dnd;
+    const bell = h("button.icon-btn", {
+      class: dnd ? "dnd" : "",
+      title: dnd ? "Do not disturb — everything is still recorded" : "Notifications",
+      onclick: () => toggleOverlay("notifs", notifPanel),
+    },
       icon("bell", 14),
-      unread ? h("span.os-badge", String(unread)) : null);
+      unread ? h("span.os-badge", { class: dnd ? "quiet" : "" }, String(unread)) : null);
 
     menubar.hidden = !d.shell.menubar.visible;
     fill(menubar,
@@ -240,12 +267,23 @@ export function createScreen({ ctx = {} } = {}) {
     const groups = new Map();
     for (const n of list) { const g = groupOf(n); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(n); }
     const panel = h("div.os-panel.os-notifs", { onclick: (e) => e.stopPropagation() },
-      h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" } },
+      h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px", gap: "8px" } },
         h("span", { style: { fontSize: "12px", fontWeight: "650" } }, `Notifications${list.length ? ` · ${list.length}` : ""}`),
+        h("span.spacer", { style: { flex: "1" } }),
+        // Attention is the user's: the switch is where the interruptions are.
+        h("button.app-btn", {
+          class: os.doc.shell.notifications.dnd ? "on" : "",
+          title: "Everything is still recorded — nothing interrupts you",
+          onclick: () => call("shellSet", { notifications: { dnd: !os.doc.shell.notifications.dnd } })
+            .then(() => { hideOverlay(); })
+            .catch((e) => toastError("Could not change that", e)),
+        }, os.doc.shell.notifications.dnd ? "Do not disturb: on" : "Do not disturb"),
         list.length ? h("button.app-btn", { onclick: () => { call("notificationsClear", {}); hideOverlay(); } }, "Clear all") : null),
       ...(list.length ? [...groups.entries()].flatMap(([g, items]) => [
         h("div.os-label", { style: { marginBottom: "6px" } }, g),
-        ...items.map((n) => h("div.notif", { class: `${n.kind}${n.action || true ? " link" : ""}`, title: "Open", onclick: () => { hideOverlay(); followNotification(n); } },
+        // A quiet one is here because it was recorded, not because it wanted
+        // your attention: it reads as such rather than looking like news.
+        ...items.map((n) => h("div.notif", { class: `${n.kind} link${n.quiet ? " quiet" : ""}`, title: "Open", onclick: () => { hideOverlay(); followNotification(n); } },
           h("div.hd", null, h("b", n.title), h("span", ago(n.ts)),
             h("button.dismiss", { title: "Dismiss", "aria-label": "Dismiss", onclick: (e) => { e.stopPropagation(); call("notificationsClear", { id: n.id }).catch(() => {}); e.currentTarget.closest(".notif")?.remove(); } }, icon("x", 10))),
           n.body ? h("p", n.body) : null)),
@@ -283,8 +321,20 @@ export function createScreen({ ctx = {} } = {}) {
     return fileIndex;
   }
 
-  function spotlight() {
-    const input = h("input", { placeholder: "Search apps, files, widgets, themes, actions…", autofocus: true });
+  /** The machine's whole tool catalogue, fetched once per page like the files. */
+  let toolIndex = null;
+  async function indexTools() {
+    if (toolIndex) return toolIndex;
+    try { toolIndex = (await api.mcp("kernel", "tools", {})).tools ?? []; }
+    catch { toolIndex = []; }
+    return toolIndex;
+  }
+
+  /** Arguments a tool cannot be called without — a Spotlight row cannot supply them. */
+  const requiredArgs = (schema) => schema?.required ?? [];
+
+  function spotlight(prefill = "") {
+    const input = h("input", { placeholder: "Search apps, files, widgets, themes, tools, actions…", autofocus: true, value: prefill });
     const results = h("div.results");
     let cursor = 0;
     let rows = [];
@@ -301,6 +351,23 @@ export function createScreen({ ctx = {} } = {}) {
             catch (e) { toastError(`${a.mcp.name}.${t} failed`, e); }
           } });
         }
+      }
+      // Every tool this machine serves, so the Manual's "Try it" lands on
+      // something runnable. A tool with required arguments is not run from a
+      // one-line search box — it opens in the Manual, where they are named.
+      for (const t of toolIndex ?? []) {
+        const [server, name] = t.name.split(".");
+        const needs = requiredArgs(t.inputSchema);
+        out.push({
+          name: t.name,
+          sub: needs.length ? `Tool · needs ${needs.join(", ")}` : `Tool · ${(t.description ?? "").slice(0, 48)}`,
+          icon: "play",
+          run: async () => {
+            if (needs.length) { launch("help", { page: null, q: t.name }); return; }
+            try { const r = await api.mcp(server, name, {}); toast(t.name, { body: JSON.stringify(r).slice(0, 240), kind: "ok", timeout: 7000 }); }
+            catch (e) { toastError(`${t.name} said no`, e); }
+          },
+        });
       }
       for (const p of recentFiles()) out.push({ name: p.split("/").pop(), sub: `Recent · ${p}`, icon: "files", run: () => launch(appFor(p) ?? "files", { path: p }) });
       for (const w of os.snap.widgetKinds ?? []) out.push({ name: `Add ${w.name}`, sub: "Widget", icon: w.icon, run: () => call("widgetAdd", { kind: w.kind }) });
@@ -332,7 +399,7 @@ export function createScreen({ ctx = {} } = {}) {
       return out;
     };
 
-    const all = actions();
+    const all = [...actions()];
 
     function paint() {
       const q = input.value.trim().toLowerCase();
@@ -362,7 +429,8 @@ export function createScreen({ ctx = {} } = {}) {
     });
     paint();
     indexFiles().then(paint);
-    setTimeout(() => input.focus(), 0);
+    indexTools().then(() => { all.length = 0; all.push(...actions()); paint(); });
+    setTimeout(() => { input.focus(); input.select?.(); }, 0);
 
     return h("div.os-overlay.top", { onclick: hideOverlay },
       h("div.os-panel.os-spotlight", { onclick: (e) => e.stopPropagation() },
@@ -377,21 +445,33 @@ export function createScreen({ ctx = {} } = {}) {
     try { localStorage.setItem(RECENT_KEY, JSON.stringify([p, ...recentFiles().filter((x) => x !== p)].slice(0, 12))); } catch { /* private mode */ }
   }
 
-  // ── the cheat sheet (⌘?) ──────────────────────────────────────────────────
+  // ── the cheat sheet, generated from the keymap ────────────────────────────
+  //
+  // It reads `shell.keys` rather than a hardcoded list, so a rebinding shows up
+  // here instead of quietly making this page a lie (goal.md T3.2).
   function cheatSheet() {
-    const rows = [
-      ["⌘K", "Search apps, files, widgets, themes, tools, actions"], ["⌘?", "This sheet"],
-      ["⌘1…9", "Switch workspace"], ["⌘W", "Close window"], ["⌘M", "Minimise"],
-      ["⌘↑ / ⌘↓", "Zoom / unzoom"], ["⌘← / ⌘→", "Snap left / right"], ["⌘`", "Next window (⇧ for previous)"],
-      ["⌘⇧D", "Show desktop"], ["⌘⇧B", "Open the Studio"], ["⌘⇧C", "Command Central"],
-      ["Drag to an edge", "Snap to a half, a quarter, or full"], ["Drag a sash", "Resize a tiled split"],
-      ["Studio: ⌘⇧P", "Studio actions"], ["Studio: ⇧-click", "Multi-select; arrows nudge, ⇧ ×5"], ["Studio: ⌘S", "Save the file in Code"],
+    const keys = os.doc?.shell?.keys ?? {};
+    const bound = Object.entries(KEY_ACTIONS)
+      .filter(([action]) => keys[action])
+      .map(([action, what]) => [prettyChord(keys[action]), what]);
+    const fixed = [
+      ["⌘1…9", "Switch workspace"],
+      ["Drag to an edge", "Snap to a half, a quarter, or full"],
+      ["Drag a sash", "Resize a tiled split"],
+      ["Studio: ⌘⇧P", "Studio actions"],
+      ["Studio: ⇧-click", "Multi-select; arrows nudge, ⇧ ×5"],
+      ["Studio: ⌘S", "Save the file in Code"],
     ];
+    const unbound = Object.entries(KEY_ACTIONS).filter(([action]) => !keys[action]);
     return h("div.os-overlay.center", { onclick: hideOverlay },
       h("div.os-panel.os-keys", { onclick: (e) => e.stopPropagation() },
         h("div.os-label", "Keyboard"),
-        h("div.keys-grid", ...rows.flatMap(([k, what]) => [h("kbd", k), h("span", what)])),
-        h("div.dim", { style: { fontSize: "10.5px", marginTop: "10px" } }, "Every shortcut is the same desktop.* call the menus make — an agent has the same keyboard.")));
+        h("div.keys-grid", ...[...bound, ...fixed].flatMap(([k, what]) => [h("kbd", k), h("span", what)])),
+        unbound.length
+          ? h("div.dim", { style: { fontSize: "10.5px", marginTop: "8px" } },
+              `Unbound: ${unbound.map(([, what]) => what.toLowerCase()).join(", ")}. Settings → Desktop → Keyboard.`)
+          : null,
+        h("div.dim", { style: { fontSize: "10.5px", marginTop: "10px" } }, "Every shortcut is a desktop.* call the menus also make, and the map lives in the document — remap it, and this sheet follows.")));
   }
 
   // ── keyboard ──────────────────────────────────────────────────────────────
@@ -399,41 +479,66 @@ export function createScreen({ ctx = {} } = {}) {
   // An OS you can only drive with a mouse is a mock-up of one. Every shortcut
   // below is the same `desktop.*` call the menus make.
 
+  /** What each keyboard action does. One place, so the map is the whole story. */
+  const ACTIONS = {
+    spotlight: () => showOverlay("spotlight", spotlight),
+    cheatSheet: () => toggleOverlay("keys", cheatSheet),
+    notifications: () => toggleOverlay("notifs", notifPanel),
+    toggleDnd: () => {
+      const on = !os.doc.shell.notifications.dnd;
+      call("shellSet", { notifications: { dnd: on } })
+        .then(() => toast(on ? "Do not disturb" : "Notifications on", {
+          body: on ? "Everything is still recorded; nothing will interrupt you." : "Interruptions are back.",
+          timeout: 2600,
+        }))
+        .catch((err) => toastError("Could not change that", err));
+    },
+    closeWindow: (win) => win && call("close", { id: win.id }),
+    minimizeWindow: (win) => win && call("windowSet", { id: win.id, min: true }),
+    minimizeAll: () => call("minimizeAll", {}),
+    zoomWindow: (win) => win && call("windowSet", { id: win.id, max: !win.max }),
+    unzoomWindow: (win) => win && call("windowSet", { id: win.id, max: false }),
+    snapLeft: (win) => win && call("snap", { id: win.id, region: "left", viewport: wm.viewport() }),
+    snapRight: (win) => win && call("snap", { id: win.id, region: "right", viewport: wm.viewport() }),
+    cycleFocus: () => call("cycleFocus", { direction: "next" }),
+    cycleFocusBack: () => call("cycleFocus", { direction: "prev" }),
+  };
+
+  /** Which action this event is, according to the document's keymap. */
+  function actionFor(e) {
+    const keys = os.doc?.shell?.keys ?? {};
+    for (const [action, chord] of Object.entries(keys)) {
+      if (chord && matchesChord(chord, e)) return action;
+    }
+    return null;
+  }
+
   function onKey(e) {
-    const mod = e.metaKey || e.ctrlKey;
     if (e.key === "Escape" && openOverlay) { hideOverlay(); return; }
-    // `?` on its own opens the cheat sheet, unless you are typing somewhere.
-    if (e.key === "?" && !e.target.closest("input, textarea, select, [contenteditable], .term-screen")) { e.preventDefault(); toggleOverlay("keys", cheatSheet); return; }
-    if (!mod) return;
+    const typing = !!e.target.closest("input, textarea, select, [contenteditable], .term-screen");
 
-    const k = e.key.toLowerCase();
-    const win = wm.focused();
+    const action = actionFor(e);
+    if (action && ACTIONS[action]) {
+      // A bare key (like `?`) belongs to whatever you are typing into; a chord
+      // with a modifier belongs to the OS.
+      if (typing && !/(?:^|\+)(?:mod|alt)\+/.test(os.doc.shell.keys[action] ?? "")) return;
+      const win = wm.focused();
+      const needsWindow = ["closeWindow", "minimizeWindow", "zoomWindow", "unzoomWindow", "snapLeft", "snapRight"].includes(action);
+      if (needsWindow && !win) return;
+      e.preventDefault();
+      ACTIONS[action](win);
+      return;
+    }
 
-    if (k === "k") { e.preventDefault(); showOverlay("spotlight", spotlight); return; }
-    if (e.key === "?" || (e.key === "/" && e.shiftKey)) { e.preventDefault(); toggleOverlay("keys", cheatSheet); return; }
-
-    // ⌘1…⌘9 — workspaces. Left alone when the OS has fewer.
-    if (/^[1-9]$/.test(e.key)) {
+    // ⌘1…⌘9 — workspaces. Not in the map: they are positional, not named, and
+    // there are as many of them as the document has workspaces.
+    if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
       const n = Number(e.key);
       if (os.doc.workspaces.some((w) => w.n === n)) {
         e.preventDefault();
         call("workspaceSwitch", { n });
       }
-      return;
     }
-
-    if (!win) return;
-    if (k === "w") { e.preventDefault(); call("close", { id: win.id }); return; }
-    if (k === "m") { e.preventDefault(); call("windowSet", { id: win.id, min: true }); return; }
-    if (k === "d" && e.shiftKey) { e.preventDefault(); call("minimizeAll", {}); return; }
-    if (e.key === "ArrowUp") { e.preventDefault(); call("windowSet", { id: win.id, max: !win.max }); return; }
-    if (e.key === "ArrowDown") { e.preventDefault(); call("windowSet", { id: win.id, max: false }); return; }
-    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-      e.preventDefault();
-      call("snap", { id: win.id, region: e.key === "ArrowLeft" ? "left" : "right", viewport: wm.viewport() });
-      return;
-    }
-    if (e.key === "`") { e.preventDefault(); call("cycleFocus", { direction: e.shiftKey ? "prev" : "next" }); }
   }
 
   // ── wiring ────────────────────────────────────────────────────────────────

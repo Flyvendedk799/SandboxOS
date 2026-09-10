@@ -27,10 +27,27 @@ export function onOs(fn) { listeners.add(fn); return () => listeners.delete(fn);
 
 // ── reading ─────────────────────────────────────────────────────────────────
 
+/**
+ * Take a full snapshot — document plus catalogs.
+ *
+ * The rev guard is not paranoia. `loadOs()` is a fetch, and the event stream
+ * keeps arriving while it is in flight: a write that lands mid-request would be
+ * *undone* here by the older document the request answers with, and the next
+ * conditional write would then be refused as stale. To a person that reads as
+ * "someone else changed it first" when nobody did — precisely the confusion an
+ * honest stale check exists to prevent. So the newer document wins, and the
+ * catalogs are taken either way.
+ */
 function adopt(snapshot) {
+  const have = os.doc?.rev ?? -1;
+  const incoming = snapshot?.doc?.rev ?? 0;
   os.snap = snapshot;
-  os.doc = snapshot.doc;
-  applyThemeLink(snapshot.doc.rev);
+  if (os.doc && incoming < have) {
+    os.snap.doc = os.doc;
+  } else {
+    os.doc = snapshot.doc;
+    applyThemeLink(snapshot.themeKey);
+  }
   emit("doc");
 }
 
@@ -43,8 +60,11 @@ export async function loadOs() {
 /** Re-read the document without re-reading the catalogs (cheap and frequent). */
 export async function refreshDoc() {
   const r = await api.mcp("desktop", "state", {});
-  if (os.snap) { os.snap.doc = r.doc; os.doc = r.doc; applyThemeLink(r.doc.rev); emit("doc"); }
-  return r.doc;
+  // The same race as adopt(): a cheap poll must not rewind the desktop either.
+  if (os.snap && (r.doc?.rev ?? 0) >= (os.doc?.rev ?? -1)) {
+    os.snap.doc = r.doc; os.doc = r.doc; applyThemeLink(r.themeKey); emit("doc");
+  }
+  return os.doc ?? r.doc;
 }
 
 // ── writing ─────────────────────────────────────────────────────────────────
@@ -57,6 +77,26 @@ let catchup = null;
  *  painted against, so a concurrent agent edit is surfaced, not overwritten. */
 const CONDITIONAL = new Set(["move", "resize", "snap", "tile", "widgetSet", "windowSet", "layoutSet", "arrange"]);
 
+/** The keys that describe where something sits. */
+const PLACE_KEYS = ["x", "y", "w", "h", "ws", "min", "max", "pin", "z"];
+
+/**
+ * Is this particular call about a *place*?
+ *
+ * `windowSet` and `widgetSet` do two jobs. The inspector and a drag use them to
+ * say where something goes — that is a place, and it must not silently overwrite
+ * somebody else's. An app uses them to record itself: the Terminal storing which
+ * session its tab is attached to, Files its folder, Jobs the log it is
+ * following. Those are not places, they are not in competition with anyone, and
+ * making them conditional meant two of an app's own writes in one tick collided
+ * with each other — reported to the owner of an untouched machine as "someone
+ * else changed it first", which is the most expensive kind of wrong.
+ */
+function describesAPlace(tool, args) {
+  if (tool !== "windowSet" && tool !== "widgetSet") return true;
+  return PLACE_KEYS.some((k) => args[k] !== undefined);
+}
+
 let staleToastAt = 0;
 
 /**
@@ -68,7 +108,8 @@ let staleToastAt = 0;
  * never retried blindly: last-write-wins is honest only when the loser knows.
  */
 export async function call(tool, args = {}, { conditional = CONDITIONAL.has(tool) } = {}) {
-  const sent = conditional && os.doc && args.expectRev === undefined ? { ...args, expectRev: os.doc.rev } : args;
+  const guard = conditional && describesAPlace(tool, args);
+  const sent = guard && os.doc && args.expectRev === undefined ? { ...args, expectRev: os.doc.rev } : args;
   try {
     const r = await api.mcp("desktop", tool, sent);
     if (typeof r?.rev === "number") {
@@ -129,7 +170,26 @@ let source = null;
 export function connect() {
   if (source) return;
   source = new EventSource(`/${slug}/os/events`);
-  source.addEventListener("hello", () => { os.connected = true; emit("conn"); });
+  // A stream that comes back after a gap has missed every write in it. `hello`
+  // says where the document is now; if that is not where we are, we pull. Without
+  // this a tab that slept through three agent writes painted a desktop that no
+  // longer existed, and said nothing (goal.md T0.6).
+  source.addEventListener("hello", (e) => {
+    os.connected = true;
+    emit("conn");
+    let at = null;
+    try { at = JSON.parse(e.data)?.rev ?? null; } catch { /* an unreadable hello is still a hello */ }
+    if (at != null && at !== (os.doc?.rev ?? null)) loadOs().catch(() => {});
+  });
+  // Every keepalive says where the document is. If that is ahead of us, an
+  // event was lost between the Gateway and this tab, and the desktop on screen is
+  // quietly wrong — so pull, rather than wait for the next write to notice.
+  source.addEventListener("tick", (e) => {
+    os.connected = true;
+    let at = null;
+    try { at = JSON.parse(e.data)?.rev ?? null; } catch { /* an unreadable tick is still a tick */ }
+    if (at != null && at > (os.doc?.rev ?? 0)) refreshDoc().catch(() => {});
+  });
   source.onerror = () => { os.connected = false; emit("conn"); };
   source.onmessage = (e) => {
     let ev;
@@ -139,7 +199,7 @@ export function connect() {
       // out-of-order delivery must never rewind the desktop.
       if ((ev.doc.rev ?? 0) < (os.doc?.rev ?? 0)) return;
       if (os.snap) { os.snap.doc = ev.doc; os.doc = ev.doc; }
-      applyThemeLink(ev.doc.rev);
+      applyThemeLink(ev.themeKey);
       emit("doc");
       // A newly defined app or theme changes the catalogs, not just the document.
       if (["appDefine", "widgetDefine", "appRemove", "widgetKindRemove", "set", "revert", "reset"].includes(ev.op)) {
@@ -163,10 +223,13 @@ export function disconnect() { source?.close(); source = null; }
 // shell, the Studio preview and every custom app frame then read one stylesheet
 // and can never drift from each other.
 
-let themeRev = -1;
-function applyThemeLink(rev) {
-  if (rev === themeRev) return;
-  themeRev = rev;
+// Keyed by what the stylesheet *is*, not by the revision it arrived with: moving
+// a window changes the revision and not the appearance, and re-fetching a
+// stylesheet sixty times during a drag is a cost nobody asked for (goal.md T0.5).
+let themeAt = null;
+function applyThemeLink(key) {
+  if (key == null || key === themeAt) return;
+  themeAt = key;
   let link = document.getElementById("os-theme");
   if (!link) {
     link = document.createElement("link");
@@ -174,7 +237,7 @@ function applyThemeLink(rev) {
     link.rel = "stylesheet";
     document.head.append(link);
   }
-  link.href = `/${slug}/os/theme.css?rev=${rev}`;
+  link.href = `/${slug}/os/theme.css?k=${encodeURIComponent(key)}`;
 }
 
 // ── small shared helpers ────────────────────────────────────────────────────

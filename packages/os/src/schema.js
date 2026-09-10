@@ -15,8 +15,38 @@ import { BUILTIN_THEMES, DEFAULT_THEME, cleanTokens, isWallpaper } from "./theme
 import { BUILTIN_ANIMATIONS, DEFAULT_ANIMATION, cleanAnimation } from "./animations.js";
 import { builtinApp, builtinWidget } from "./catalog.js";
 import { reconcileTree } from "./layout.js";
+// The keyboard grammar is shared with the browser (served from packages/os),
+// so the shell that matches a key and the tool that validates one agree.
+import { DEFAULT_KEYS, cleanKeys } from "./keys.js";
 
+/**
+ * The document's shape version.
+ *
+ * Still 1, deliberately (goal.md T5.4). Everything the document has gained since
+ * — the keymap, do-not-disturb, proposals, checkpoints, first-run state, an app's
+ * suspended flag — is *additive*, and `normalizeDoc` fills each one in from the
+ * defaults when it is absent. No field changed meaning or shape, so there is no
+ * migration to write and nothing a v2 would tell a reader that it does not
+ * already know. A version bump whose only content is a larger number teaches
+ * everyone downstream to ignore the number.
+ *
+ * What was missing was not a bump but the machinery a bump will need, so that is
+ * what exists now: the version is *read* (see `docCompatibility`), and a document
+ * from a build newer than this one is refused at the boundary where it would
+ * otherwise be silently truncated — importing a distro or restoring a backup —
+ * rather than quietly losing the fields this build has never heard of.
+ */
 export const OS_DOC_VERSION = 1;
+
+/**
+ * What this build can say about a document's shape version. `newer` means it was
+ * written by a build that knows fields this one would drop.
+ */
+export function docCompatibility(input) {
+  const raw = Number(input?.version);
+  const version = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 1;
+  return { version, current: OS_DOC_VERSION, newer: version > OS_DOC_VERSION, older: version < OS_DOC_VERSION };
+}
 
 /** Ceilings. Generous enough that nobody meets them by building; low enough that
  *  a runaway agent cannot turn the document into a denial-of-service payload. */
@@ -29,7 +59,18 @@ export const LIMITS = {
   themes: 48,
   animations: 48,
   notifications: 60,
+  // A proposal is a change waiting to be reviewed. A few at a time: they are a
+  // conversation, not a queue, and they cost document bytes.
+  proposals: 8,
+  proposalOps: 24,
   history: 40,
+  // Named states of the whole desktop. Few, on purpose: a checkpoint is a
+  // place you meant to come back to, not an autosave.
+  checkpoints: 12,
+  // Of those, how many the scheduler may hold. Automatic snapshots have their
+  // own budget so an hourly one cannot quietly evict the state you named and
+  // meant to come back to (goal.md T3.4).
+  autoCheckpoints: 6,
   nameLen: 64,
   titleLen: 120,
   docBytes: 512 * 1024,
@@ -50,6 +91,10 @@ export const ID_RE = /^[a-z0-9][a-z0-9_-]{0,47}$/;
 export const isId = (v) => typeof v === "string" && ID_RE.test(v);
 
 export const DOCK_POSITIONS = ["bottom", "left", "right", "top", "hidden"];
+
+/** Who may interrupt you while do-not-disturb is on. A closed vocabulary. */
+export const NOTIFY_KINDS = ["agents", "procs", "apps", "system"];
+
 export const WM_MODES = ["floating", "tiling"];
 
 export function defaultDoc(name = "untitled-os") {
@@ -61,6 +106,11 @@ export function defaultDoc(name = "untitled-os") {
     rev: 0,
     updatedAt: Date.now(),
     distro: null,
+    // First run: which seed was adopted, and whether the welcome screen is done
+    // with. A field rather than a browser flag, because "have I set this machine
+    // up" is a fact about the machine, not about the tab you happen to be in
+    // (goal.md T5.1).
+    setup: { done: false, seed: null, at: null },
     theme: { base: DEFAULT_THEME, tokens: {}, custom: {} },
     // reducedMotion: "auto" honours the viewer's prefers-reduced-motion setting;
     // "ignore" plays the preset regardless. A document choice, so it travels.
@@ -73,7 +123,13 @@ export function defaultDoc(name = "untitled-os") {
         pinned: ["files", "terminal", "assistant", "metrics", "settings"],
       },
       spotlight: { enabled: true },
-      notifications: { enabled: true },
+      // Attention is the user's: `dnd` keeps notifications out of your face
+      // without throwing them away, and `allow` says which kinds get through
+      // even then (an agent coming back usually should).
+      notifications: { enabled: true, dnd: false, allow: ["agents"] },
+      // The keyboard is a document field, so it can be remapped, travel with a
+      // distro, and be read back by the cheat sheet instead of hardcoded twice.
+      keys: { ...DEFAULT_KEYS },
       wallpaperFit: "cover",
       // "Open with": extension → app id. An OS that opens a .png in a text editor
       // is technically correct and practically wrong, and which app wins should be
@@ -92,6 +148,8 @@ export function defaultDoc(name = "untitled-os") {
     apps: {},         // custom app definitions, keyed by id
     widgetKinds: {},  // custom widget definitions, keyed by kind
     notifications: [],
+    proposals: [],    // changes proposed for review (goal.md T2.3)
+    checkpoints: [],  // named states of the whole desktop (goal.md T2.4)
   };
 }
 
@@ -166,6 +224,10 @@ export function normApp(a) {
     hue: typeof a.hue === "string" && HUE_RE.test(a.hue) ? a.hue : "#35d6c4",
     description: str(a.description, 300),
     permissions: cleanPatterns(a.permissions),
+    // Suspended: no capability session is minted for it (goal.md T3.1). It is a
+    // property of the app, so it survives a reload and travels with a distro —
+    // a suspended app arriving from a stranger stays suspended.
+    ...(a.suspended ? { suspended: true } : {}),
     window: {
       w: num(a.window?.w, 180, 6000, 420),
       h: num(a.window?.h, 120, 6000, 300),
@@ -239,6 +301,7 @@ export function normWidgetKind(w) {
     icon: str(w.icon, 40, "apps"),
     description: str(w.description, 300),
     permissions: cleanPatterns(w.permissions),
+    ...(w.suspended ? { suspended: true } : {}),
     entry: safeRelPath(w.entry) ?? "index.html",
     origin,
     size: { w: num(w.size?.w, 80, 3000, 220), h: num(w.size?.h, 60, 3000, 150) },
@@ -278,6 +341,36 @@ export function cleanAssociations(map) {
   return out;
 }
 
+/**
+ * A proposal: a change someone (usually an agent) wants to make, held for review
+ * instead of applied (goal.md T2.3).
+ *
+ * It is a document object rather than client-side theatre, so it survives a
+ * reload, appears in a second tab, is revertible like everything else, and can be
+ * applied by whoever is actually looking at it. The ops are `desktop.*` calls —
+ * names only, arguments as plain data; applying one runs them through the very
+ * same tools, so a proposal can never do something a caller could not.
+ */
+function normProposal(p) {
+  if (!p || typeof p !== "object") return null;
+  const ops = (Array.isArray(p.ops) ? p.ops : [])
+    .slice(0, LIMITS.proposalOps)
+    .map((op) => {
+      const tool = str(op?.tool, 48);
+      if (!/^[a-zA-Z][a-zA-Z0-9]{1,47}$/.test(tool)) return null;
+      return { tool, args: plainProps(op?.args) };
+    })
+    .filter(Boolean);
+  if (!ops.length) return null;
+  return {
+    id: isId(p.id) ? p.id : rid("prop"),
+    label: str(p.label, LIMITS.titleLen, "proposed change"),
+    by: str(p.by, 64, "agent"),
+    createdAt: num(p.createdAt, 0, Number.MAX_SAFE_INTEGER, Date.now()),
+    ops,
+  };
+}
+
 function normNotification(n) {
   if (!n || typeof n !== "object") return null;
   // A notification may carry one place to go: an app to open (with props) and
@@ -292,6 +385,10 @@ function normNotification(n) {
   return {
     id: isId(n.id) ? n.id : rid("n"),
     app: str(n.app, LIMITS.nameLen, "system"),
+    // Who is talking (for do-not-disturb), and whether this one was recorded
+    // without interrupting anyone.
+    source: oneOf(n.source, NOTIFY_KINDS, "system"),
+    ...(n.quiet ? { quiet: true } : {}),
     title: str(n.title, LIMITS.titleLen, ""),
     body: str(n.body, 600),
     kind: oneOf(n.kind, ["ok", "warn", "err", "info", "accent"], "info"),
@@ -317,6 +414,15 @@ export function normalizeDoc(input, { name } = {}) {
   doc.name = str(input.name, LIMITS.nameLen, base.name) || base.name;
   doc.rev = num(input.rev, 0, Number.MAX_SAFE_INTEGER, 0);
   doc.updatedAt = num(input.updatedAt, 0, Number.MAX_SAFE_INTEGER, Date.now());
+  doc.setup = input.setup && typeof input.setup === "object"
+    ? {
+        // bool(), like every other flag here: only a real boolean counts, so a
+        // document that arrived from somewhere else cannot fake having been set up.
+        done: bool(input.setup.done),
+        seed: str(input.setup.seed, 64) || null,
+        at: input.setup.at ? num(input.setup.at, 0, Number.MAX_SAFE_INTEGER, 0) : null,
+      }
+    : { done: false, seed: null, at: null };
   doc.distro = input.distro && typeof input.distro === "object"
     ? {
         id: str(input.distro.id, 64),
@@ -384,7 +490,13 @@ export function normalizeDoc(input, { name } = {}) {
       pinned,
     },
     spotlight: { enabled: bool(input.shell?.spotlight?.enabled, true) },
-    notifications: { enabled: bool(input.shell?.notifications?.enabled, true) },
+    notifications: {
+      enabled: bool(input.shell?.notifications?.enabled, true),
+      dnd: bool(input.shell?.notifications?.dnd, false),
+      allow: (Array.isArray(input.shell?.notifications?.allow) ? input.shell.notifications.allow : ["agents"])
+        .filter((k) => NOTIFY_KINDS.includes(k)).slice(0, NOTIFY_KINDS.length),
+    },
+    keys: cleanKeys(input.shell?.keys),
     wallpaperFit: oneOf(input.shell?.wallpaperFit, ["cover", "contain", "tile"], "cover"),
     associations: cleanAssociations(input.shell?.associations ?? base.shell.associations),
   };
@@ -440,6 +552,26 @@ export function normalizeDoc(input, { name } = {}) {
 
   doc.notifications = (Array.isArray(input.notifications) ? input.notifications : [])
     .slice(-LIMITS.notifications).map(normNotification).filter(Boolean);
+
+  doc.proposals = (Array.isArray(input.proposals) ? input.proposals : [])
+    .slice(-LIMITS.proposals).map(normProposal).filter(Boolean);
+
+  // Checkpoints are an *index*: the documents themselves live beside the OS
+  // document, so a named state survives history being pruned.
+  doc.checkpoints = (Array.isArray(input.checkpoints) ? input.checkpoints : [])
+    .slice(-LIMITS.checkpoints)
+    .map((c) => (c && typeof c === "object" && isId(c.id)
+      ? {
+          id: c.id,
+          name: str(c.name, LIMITS.nameLen, c.id),
+          rev: num(c.rev, 0, Number.MAX_SAFE_INTEGER, 0),
+          ts: num(c.ts, 0, Number.MAX_SAFE_INTEGER, Date.now()),
+          // Written by the scheduler rather than by a person. Kept out of the
+          // document when false, like every other flag here.
+          ...(c.auto ? { auto: true } : {}),
+        }
+      : null))
+    .filter(Boolean);
 
   return doc;
 }

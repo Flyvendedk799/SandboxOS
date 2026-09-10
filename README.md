@@ -45,12 +45,19 @@ laptop and your sandbox in lockstep through **Tide**.
 
 Node 22.13 or newer — the 22 LTS line included — and no dependencies to install.
 (On Node 22.5–22.12 add `--experimental-sqlite`; `node:sqlite` needs no flag from 22.13 on.)
+Linux, macOS and Windows: the Cell resolves whatever shell the host has — including the
+one Git for Windows ships — and says at boot what it found and what is unavailable
+without it.
 
 ```bash
 git clone https://github.com/Flyvendedk799/SandboxOS && cd SandboxOS
 SANDBOXOS_PASSWORD=letmein npm start          # → http://127.0.0.1:3939
 npm test                                       # the whole suite
 npm run smoke                                  # the OS and the Studio, in a headless browser
+npm run bench                                  # the performance budgets, with a pass/fail per row
+npm run day                                    # a whole day of work, driven through the desktop
+DAY_KEYBOARD=1 npm run day                     # …the same day, with no pointer at all
+npm run release-check                          # all of the above on this host, as one page
 ```
 
 Open the URL, sign in, and you land on your slug. Docker is used for real Cell
@@ -82,7 +89,7 @@ Every call goes **authenticate → authorize (default-deny) → route → execut
 | server | what it gives you |
 |--------|-------------------|
 | `fs` | list · read · write · append · mkdir · remove · move · copy · stat · tree · search · readBytes · writeBytes |
-| `proc` | exec · list · **start / logs / jobs / stop / forget / signal** (supervised background processes) |
+| `proc` | exec · list · **start / logs / jobs / stop / forget / signal** (supervised background processes) · **sessions / sessionRename / sessionKill** (shells that outlive their window) |
 | `ports` | expose · unexpose · list · check · scan — and the Gateway proxies them |
 | `net` | fetch, egress-policy gated |
 | `secrets` | put · list · remove · useInEnv — references, never values |
@@ -95,7 +102,8 @@ Every call goes **authenticate → authorize (default-deny) → route → execut
 | `desktop` | the OS itself: windows · widgets · workspaces · dock · themes · motion · custom apps · distros |
 | `tide` | init · status · mark · log · diff · checkout · state objects · push/pull wire primitives |
 | `mcp-registry` | list · enable · disable · configure · install · uninstall |
-| `kernel` | whoami · capabilities · tools · auditQuery · manifestGet · manifestSet |
+| `access` | list · share · revoke · tokens · mint — sharing attenuated against your own grants |
+| `kernel` | whoami · capabilities · tools · auditQuery (filtered) · auditVerify · manifestGet · manifestSet |
 
 ### Paying for the model
 
@@ -128,9 +136,13 @@ of them is revertible from the revision history.
 - **Windows** — floating or tiling, drag, resize, edge-snap to halves and quarters,
   minimise, zoom, across workspaces, all of it on the keyboard. Below 720px the whole
   thing folds into a stack: same document, one front window, dock along the bottom.
-- **Apps** — nine built in (Files, **Terminal** — a real PTY, Console, Notes,
-  Assistant, Observability, Media, Browser, Settings), each a real client of the
-  Kernel. A *custom* app is HTML/CSS/JS you or your agent wrote, served into a
+- **Apps** — sixteen built in. The desk: Files, **Terminal** (a real PTY whose
+  sessions outlive the window — close it, reopen it, the build is still running),
+  Console, Notes, Assistant, Observability, Media, Browser, Settings. And the
+  machine's own work, so a console is never required: **Jobs** (supervised processes,
+  live logs, the cron schedule), **Ports**, **Agents**, **Secrets**, **Sync** (Tide),
+  **Access** (who can reach this machine) and **Audit** (every call, hash-chain
+  verifiable). Each is a real client of the Kernel. A *custom* app is HTML/CSS/JS you or your agent wrote, served into a
   sandboxed opaque-origin frame with `connect-src 'none'` and a token attenuated to
   the intersection of what the app declared and what you hold. The frame never sees a
   credential — and when its source changes, the open window reloads itself.
@@ -231,8 +243,11 @@ for await (const ev of sbx.assistant.ask("summarise today's changes")) {
 | 15 | [The OS experience](docs/15-os-experience.md) | The desktop as a document, the builder for it, apps with two faces, distros, the second surface |
 
 Architecture Decision Records live in [`docs/adr/`](docs/adr). Each build phase has its
-own note: `PHASE0.md` … `PHASE30.md`. [`heroplan.md`](heroplan.md) is the plan Phases
-28–30 implemented.
+own note: `PHASE0.md` … `PHASE38.md`. [`heroplan.md`](heroplan.md) is the plan Phases
+28–30 implemented. [`goal.md`](goal.md) is the one after it — the desktop and the Studio
+as software you would trust: the gaps as measured, ten promises, and the acceptance
+suite that decides when they are kept. All four of its acceptance
+scripts pass on this host (`npm run release-check`); the Docker leg runs in CI.
 
 ## Layout
 

@@ -15,6 +15,7 @@ import { createServer } from "../apps/gateway/src/server.js";
 import { BUILTIN_THEMES, cleanTokens, themeCss, resolveTheme } from "../packages/os/src/themes.js";
 import { normalizeDoc } from "../packages/os/src/schema.js";
 import { summarizeDoc, silhouetteSvg } from "../packages/os/src/summary.js";
+import { killAllSessionsEverywhere } from "../packages/kernel/src/pty-sessions.js";
 
 let kernel, owner, sandbox, held, srv, port, token;
 const call = (tool, args = {}) => kernel.call({ principalId: owner.id, heldPatterns: held, server: "desktop", tool, args });
@@ -31,7 +32,7 @@ test.before(async () => {
   port = srv.address().port;
   await ok("reset", {});
 });
-test.after(() => { srv.close(); _resetKernels(); closeDb(); });
+test.after(() => { killAllSessionsEverywhere(); srv.close(); _resetKernels(); closeDb(); });
 
 // ── E3 · craft you can measure ──────────────────────────────────────────────
 
@@ -49,6 +50,11 @@ test("every built-in theme reads: body text passes AA on panels, muted text pass
     assert.ok(contrast(t.text2, t.bg1) >= 4.5, `${key}: text2 on bg1 is ${contrast(t.text2, t.bg1).toFixed(2)}`);
     assert.ok(contrast(t.text3, t.bg1) >= 3, `${key}: text3 on bg1 is ${contrast(t.text3, t.bg1).toFixed(2)}`);
     assert.ok(contrast(t.accent, t.bg1) >= 3, `${key}: accent on bg1 is ${contrast(t.accent, t.bg1).toFixed(2)}`);
+    // Status colours are tokens too (Phase 32): a running job, a warning and a
+    // refusal have to read, or the honest answer is invisible.
+    for (const status of ["ok", "warn", "err"]) {
+      assert.ok(contrast(t[status], t.bg1) >= 3, `${key}: ${status} on bg1 is ${contrast(t[status], t.bg1).toFixed(2)}`);
+    }
   }
 });
 

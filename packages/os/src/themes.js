@@ -10,6 +10,10 @@
 export const THEME_TOKENS = [
   "bg0", "bg1", "bg2", "bg3", "line", "lineLoud",
   "text", "text2", "text3", "accent", "accent2", "sand", "wall",
+  // Status: a running job, a warning and a refusal have to read on every theme,
+  // so they are tokens that get contrast-checked like any other colour rather
+  // than constants in a stylesheet nobody re-tunes when the palette changes.
+  "ok", "warn", "err",
   // `grain` is a number 0–0.4: how much film grain the wallpaper wears. It is
   // compiled into `--os-grain` and painted from CSS gradients, never an image.
   "grain",
@@ -22,6 +26,7 @@ export const BUILTIN_THEMES = {
     line: "#1e2833", lineLoud: "#31404f",
     text: "#e6edf3", text2: "#9fb0c0", text3: "#6b7f92",
     accent: "#35d6c4", accent2: "#1fb5a6", sand: "#e8c98a",
+    ok: "#43d17f", warn: "#f0b849", err: "#ff6b6b",
     wall: "radial-gradient(1100px 620px at 72% -12%, rgba(53,214,196,.16), transparent 60%), radial-gradient(800px 500px at 8% 108%, rgba(232,201,138,.10), transparent 60%), #070a0e",
     grain: 0.08,
   },
@@ -31,6 +36,7 @@ export const BUILTIN_THEMES = {
     line: "#183246", lineLoud: "#2b5069",
     text: "#e8f4fb", text2: "#9fc0d4", text3: "#6690a8",
     accent: "#3ec8ff", accent2: "#1f9fe0", sand: "#7be3d0",
+    ok: "#52d99b", warn: "#f2c14e", err: "#ff7a7a",
     wall: "radial-gradient(1000px 600px at 30% -10%, rgba(62,200,255,.20), transparent 60%), linear-gradient(160deg,#06131d,#0a2233)",
   },
   aurora: {
@@ -39,6 +45,7 @@ export const BUILTIN_THEMES = {
     line: "#2a1f45", lineLoud: "#463067",
     text: "#f1ecfb", text2: "#c0b0d8", text3: "#8a78a6",
     accent: "#b98cff", accent2: "#8a5cf0", sand: "#5ce0b0",
+    ok: "#5ce0b0", warn: "#f5c869", err: "#ff7d9b",
     wall: "radial-gradient(900px 560px at 78% -8%, rgba(185,140,255,.24), transparent 58%), radial-gradient(760px 520px at 10% 110%, rgba(92,224,176,.16), transparent 60%), #0a0713",
     grain: 0.12,
   },
@@ -48,6 +55,7 @@ export const BUILTIN_THEMES = {
     line: "#3a201a", lineLoud: "#5e3327",
     text: "#fbeee8", text2: "#dcb6a6", text3: "#a97e6c",
     accent: "#ff8f5e", accent2: "#f06a3a", sand: "#ffcf7b",
+    ok: "#7dd68f", warn: "#ffcf7b", err: "#ff6f6f",
     wall: "radial-gradient(1000px 600px at 74% -10%, rgba(255,143,94,.22), transparent 58%), radial-gradient(800px 520px at 6% 108%, rgba(255,207,123,.16), transparent 60%), #140a0c",
     grain: 0.1,
   },
@@ -57,6 +65,7 @@ export const BUILTIN_THEMES = {
     line: "#ded7c8", lineLoud: "#c3b8a2",
     text: "#20262c", text2: "#5a5346", text3: "#8a806c",
     accent: "#0f9e8e", accent2: "#0b7f73", sand: "#a9761c",
+    ok: "#0f7a49", warn: "#7a4f06", err: "#a81f18",
     wall: "radial-gradient(1000px 600px at 74% -10%, rgba(15,158,142,.14), transparent 58%), linear-gradient(160deg,#f7f4ec,#ece7db)",
   },
   mono: {
@@ -65,6 +74,7 @@ export const BUILTIN_THEMES = {
     line: "#282d33", lineLoud: "#414852",
     text: "#eef1f4", text2: "#aeb6bf", text3: "#727a83",
     accent: "#e6edf3", accent2: "#aeb6bf", sand: "#c9b48c",
+    ok: "#9fd8ae", warn: "#e0c07a", err: "#f08a8a",
     wall: "radial-gradient(1000px 600px at 72% -10%, rgba(230,237,243,.08), transparent 58%), linear-gradient(160deg,#0f1114,#191c20)",
   },
 };
@@ -113,6 +123,84 @@ export function resolveTheme(doc) {
   return resolved;
 }
 
+/**
+ * A stable identity for what `theme.css` will compile to.
+ *
+ * The stylesheet used to be linked by `doc.rev`, which made every window move a
+ * fresh download of the same bytes in every open tab (goal.md T0.5). It depends
+ * on exactly two branches of the document, so it is keyed by those: same
+ * appearance, same key, same cached stylesheet — whatever the revision.
+ */
+export function themeKey(doc) {
+  const payload = JSON.stringify([doc?.theme ?? null, doc?.animation ?? null]);
+  let h = 0x811c9dc5; // FNV-1a: short, stable, and no crypto import in a hot path
+  for (let i = 0; i < payload.length; i += 1) {
+    h ^= payload.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return `${h.toString(36)}${payload.length.toString(36)}`;
+}
+
+// ── readability, measured ───────────────────────────────────────────────────
+//
+// Every built-in theme passes a contrast check in the test suite. A theme *you*
+// (or your agent) invent should get the same treatment — but as advice, not as a
+// refusal, because it is your machine: `themeDefine` returns the warnings and
+// only refuses a theme whose own text is genuinely unreadable on its own panels
+// (goal.md T4.5).
+
+const channel = (v) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+
+/** WCAG relative luminance of a hex colour. */
+export function luminance(hex) {
+  if (!HEX.test(hex ?? "") || hex.length < 7) return null;
+  const n = parseInt(hex.slice(1, 7), 16);
+  return 0.2126 * channel((n >> 16) & 255) + 0.7152 * channel((n >> 8) & 255) + 0.0722 * channel(n & 255);
+}
+
+/** WCAG contrast ratio between two hex colours, or null if either is not one. */
+export function contrastRatio(a, b) {
+  const la = luminance(a);
+  const lb = luminance(b);
+  if (la == null || lb == null) return null;
+  const [hi, lo] = la > lb ? [la, lb] : [lb, la];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/** The pairs a theme has to get right, and the ratio each one needs. */
+export const CONTRAST_RULES = [
+  { fg: "text", bg: "bg1", min: 4.5, what: "body text on a panel" },
+  { fg: "text2", bg: "bg1", min: 4.5, what: "secondary text on a panel" },
+  { fg: "text3", bg: "bg1", min: 3, what: "muted text on a panel" },
+  { fg: "accent", bg: "bg1", min: 3, what: "the accent on a panel" },
+  { fg: "ok", bg: "bg1", min: 3, what: "a running job" },
+  { fg: "warn", bg: "bg1", min: 3, what: "a warning" },
+  { fg: "err", bg: "bg1", min: 3, what: "a refusal" },
+];
+
+/**
+ * Check a resolved theme's readability.
+ *
+ * Returns one entry per rule that falls short, with the ratio it got and the
+ * ratio it needed — the sentence a UI can print. `unreadable` is the subset
+ * nobody could work with (body text under 2:1), which is the only case
+ * `themeDefine` refuses outright.
+ */
+export function checkContrast(theme) {
+  const warnings = [];
+  for (const rule of CONTRAST_RULES) {
+    const ratio = contrastRatio(theme?.[rule.fg], theme?.[rule.bg]);
+    if (ratio == null || ratio >= rule.min) continue;
+    warnings.push({
+      fg: rule.fg, bg: rule.bg, what: rule.what,
+      ratio: Math.round(ratio * 100) / 100, min: rule.min,
+      text: `${rule.what} is ${ratio.toFixed(2)}:1 (wants ${rule.min}:1)`,
+    });
+  }
+  const unreadable = warnings.filter((w) => w.fg === "text" && w.ratio < 2);
+  return { ok: warnings.length === 0, warnings, unreadable };
+}
+
 /** Every theme the document can switch to right now — built-in plus custom. */
 export function listThemes(doc) {
   const out = Object.entries(BUILTIN_THEMES).map(([key, th]) => ({ key, name: th.name, scheme: th.scheme, builtin: true, tokens: th }));
@@ -141,6 +229,7 @@ export function themeCss(theme, selector = ":root") {
     "--os-line": theme.line, "--os-line-loud": theme.lineLoud,
     "--os-text": theme.text, "--os-text-2": theme.text2, "--os-text-3": theme.text3,
     "--os-accent": theme.accent, "--os-accent-2": theme.accent2, "--os-sand": theme.sand,
+    "--os-ok": theme.ok, "--os-warn": theme.warn, "--os-err": theme.err,
     "--os-wall": theme.wall,
     "--os-accent-dim": rgba(theme.accent, 0.14),
     "--os-accent-line": rgba(theme.accent, 0.34),

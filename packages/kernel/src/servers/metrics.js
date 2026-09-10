@@ -83,6 +83,14 @@ export function metricsServer(deps) {
       files: num("files"),
       // `ps`/`wc -l` counts the header row too.
       processes: num("procs") == null ? null : Math.max(0, num("procs") - 1),
+      // Why a reading is missing, when it is: a host with no shell, or an image
+      // without /proc, is a different thing from an idle machine, and a panel
+      // that shows zero for both is lying to whoever is looking at it.
+      unavailable: r.failure
+        ? `${r.failure.message}`
+        : (!loadMatch && !parseMeminfo(text("mem")) && diskKb == null
+          ? "this Cell reports no /proc, no uptime and no du — nothing here could be measured"
+          : null),
     };
   }
 
@@ -105,6 +113,7 @@ export function metricsServer(deps) {
           });
           return {
             ts,
+            ...(p.unavailable ? { unavailable: p.unavailable } : {}),
             sandbox: { id: sandbox.id, slug: sandbox.slug, name: sandbox.name, state: sandbox.state },
             cell: { backend: cell.backend ?? sandbox.cell_backend, root: undefined },
             load: p.load,
@@ -152,6 +161,9 @@ export function metricsServer(deps) {
             events: rows.map((r) => ({
               id: r.id, ts: r.ts, server: r.server, tool: r.tool,
               resultKind: r.result_kind, error: r.error, capability: r.capability,
+              // How long it took, when the row has it: older rows predate the
+              // column, and "not recorded" is not "instant".
+              ms: r.ms ?? null,
             })),
           };
         },

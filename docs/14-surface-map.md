@@ -59,8 +59,10 @@ All require a grant on that Sandbox.
 | `GET` | `/:slug/studio` | the OS builder |
 | `GET` | `/:slug/os/doc` | the OS document + resolved theme/motion + catalogs |
 | `GET` | `/:slug/os/events` | SSE: every desktop change, with the new document; catalog and bundle changes too |
-| `GET` | `/static/js/os/lib/*.js` | the pure OS modules (layout, themes, animations, summary) served from `packages/os` |
+| `GET` | `/static/js/os/lib/*.js` | the pure OS modules (layout, themes, animations, summary, keys) served from `packages/os` |
 | `GET` | `/:slug/os/theme.css` | the active theme and motion, compiled |
+| `GET` | `/:slug/os/manual` | the manual: the pages this build ships, and every heading in them |
+| `GET` | `/:slug/os/manual/:page` | one page, as the markdown on disk — a fixed table of ids, never a path |
 | `POST` | `/:slug/os/apps/:id/session` | open a capability session for an app frame |
 | `GET` | `/:slug/os/apps/:id/*` | a custom app's files (sandboxed frame, closed CSP) |
 | `GET` | `/:slug/os/widgets/:kind/*` | a custom widget's files |
@@ -119,9 +121,15 @@ Namespaced `server.tool`. A capability pattern is `*`, `server.*`, or `server.to
 Every path is canonicalized and asserted to stay inside the Cell volume; an in-volume
 symlink pointing out is rejected, and the root cannot be deleted.
 
-**`proc`** — `exec` `list` · `start` `logs` `jobs` `stop` `forget` `signal`
+**`proc`** — `exec` `list` · `start` `logs` `jobs` `stop` `forget` `signal` ·
+`sessions` `sessionRename` `sessionKill`
 `start` supervises a process that outlives the request, with a bounded, line-buffered
-log ring. The job table is keyed per Sandbox and survives Kernel rebuilds.
+log ring. The job table is keyed per Sandbox and survives Kernel rebuilds. A command
+that could not *start* — no shell on the host — fails with `unsupported_host` and the
+missing binary named, rather than an empty stdout and exit code 1.
+The `session*` tools are the terminal sessions: a shell outlives the window it was
+opened in, so closing a Terminal detaches and `/:slug/pty?session=<id>` reattaches with
+the scrollback. Creating one needs a socket, so it happens there; ending one is a tool.
 
 **`ports`** — `expose` `unexpose` `list` `check` `scan`
 Exposure lives in the manifest, so it survives hibernate/wake and travels with a distro.
@@ -135,7 +143,11 @@ Exposure lives in the manifest, so it survives hibernate/wake and travels with a
 **`metrics`** — `snapshot` `history` `activity` `recent`
 **`apps`** — `list` `install` `remove` `launch` (launch mints a scoped token)
 **`desktop`** — the OS itself. Document: `get` `state` `summarize` `silhouette` `set`
-`patch` `rename` `history` (with `rev` → a structural diff) `revert` `reset`.
+`patch` `rename` `history` (with `rev` → a structural diff) `revert` (whole, or
+`only: ["windows"]` to take back one part and leave the rest) `revertScopes` `reset`.
+Checkpoints: `checkpoint` (`auto:true` for the scheduler's own, with its own budget)
+`checkpoints` `checkpointRestore` `checkpointDiff` `checkpointRemove`.
+First run: `setupSeeds` `setup` (adopt a seed, write a welcome project, serve it as a job, report every step).
 Appearance: `themeList` `themeSet` `themeDefine` `themeRemove` `wallpaperSet`
 `animationList` `animationSet` `animationDefine` `animationRemove`. Chrome: `dockSet`
 `dockPin` `shellSet` `layoutSet` (mode, gap, grid, and the tiling tree: `preset` or
@@ -152,7 +164,18 @@ app's live tools) `appDefine` (`mcp` for a tool face, `starter: "tools"` for a c
 Notifications: `notify` (with an `action` deep link) `notificationsRead`
 `notificationsClear` (all, or `id`). Distros: `distroList` (the gallery: `q`, `scope`)
 `distroPublish` (`visibility`, `tags`, composition) `distroSet` `distroFork`
-`distroExport` `distroImport`.
+`distroExport` `distroImport`. Backup: `machineExport` (desktop + apps + composition +
+checkpoints + a manifest of the volume) `machineRestore` (`plan: true` changes nothing
+and reports what it would do, including which volume files the manifest expects and this
+machine no longer has).
+Review: `propose` (ops are desktop tool calls; nothing happens until someone applies
+it) `proposals` `applyProposal` (runs them as *you*, in order, reporting where it
+stopped) `discardProposal`. Checkpoints: `checkpoint` `checkpoints`
+`checkpointRestore` `checkpointDiff` `checkpointRemove` — a named copy of the whole
+document, kept outside the forty-revision window. Keyboard: `keyList` `keySet`
+(`shell.keys` is the map; a collision or an unreadable chord is refused). Apps as
+principals: `appLedger` (declared, granted, withheld, and every call it made)
+`appSuspend` (revokes its tokens, mints no new session, keeps the window and source).
 Every mutation normalizes the document, bumps its revision, pushes the previous version
 onto the undo history and announces itself on `/:slug/os/events`. See docs/15.
 
@@ -164,7 +187,16 @@ from the OS document, governed by the same authorize → route → audit path. A
 `putState` `getState` `listStates` · `fetchObjects` `receiveObjects` (the wire
 primitives a laptop daemon drives). Paths returned to callers are Sandbox-relative.
 **`mcp-registry`** — `list` `enable` `disable` `configure` `install` `uninstall`
-**`kernel`** — `whoami` `capabilities` `tools` `auditQuery` `manifestGet` `manifestSet`
+**`access`** — `list` `share` `revoke` `tokens` `mint`
+Who can reach this machine, as tools rather than as Gateway-only routes, so the desktop
+and an agent can do what Command Central and the CLI could. Sharing and minting are
+attenuated against the caller's own grants; revoking yourself is refused.
+**`kernel`** — `whoami` `capabilities` `tools` `auditQuery` (filtered: `server`,
+`tool`, `principalId`, `resultKind`, `after`, `cursor`) `auditVerify` (the hash chain)
+`limits` (the tenant's quota, live usage, measured disk, and model tokens by provider —
+tokens rather than money, and it says so) `manifestGet` `manifestSet`
+Every audit row carries `ms`, the time its call took, covered by the hash like every
+other column.
 
 Marketplace servers appear under the name they were installed as. Their code runs
 **out of process** with no handle to the control plane; the Kernel registers a proxy, so

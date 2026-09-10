@@ -155,6 +155,16 @@ export class Kernel {
    * @returns {Promise<{ok:true,result:any}|{ok:false,error:string,code:string}>}
    */
   async call({ principalId, heldPatterns = [], server, tool, args = {}, onBehalfOf = null }) {
+    // 0. Shape. A call with no server or no tool is not a denied call or an
+    //    unknown tool — it is not a call at all, and it must not reach the audit
+    //    insert, where it used to surface to the user as a SQLite binding error.
+    const named = (v) => typeof v === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/.test(v);
+    if (!named(server) || !named(tool)) {
+      return { ok: false, code: "bad_request", error: `malformed call: ${!named(server) ? "server" : "tool"} must be a name` };
+    }
+    if (args !== null && (typeof args !== "object" || Array.isArray(args))) {
+      return { ok: false, code: "bad_request", error: "malformed call: args must be an object" };
+    }
     const target = `${server}.${tool}`;
     const base = {
       sandboxId: this.sandbox.id, principalId, onBehalfOf, server, tool, args,
@@ -178,18 +188,28 @@ export class Kernel {
     }
 
     // 3. Execute + 4. Audit.
+    //
+    // The clock starts here: how long a tool took is part of what happened, and
+    // an operator asking "what is slow" should not have to infer it from
+    // timestamps two rows apart.
+    const startedAt = performance.now();
     try {
       const result = await t.handler({ kernel: this, cell: this.cell, sandbox: this.sandbox, principalId, heldPatterns, onBehalfOf }, args);
-      const ev = appendAudit({ ...base, resultKind: "ok", capability });
-      this._emit({ ...base, resultKind: "ok", capability, ...ev });
+      const ms = performance.now() - startedAt;
+      const ev = appendAudit({ ...base, resultKind: "ok", capability, ms });
+      this._emit({ ...base, resultKind: "ok", capability, ms, ...ev });
       return { ok: true, result };
     } catch (err) {
       const message = err?.message ?? String(err);
-      const ev = appendAudit({ ...base, resultKind: "error", error: message, capability });
-      this._emit({ ...base, resultKind: "error", error: message, capability, ...ev });
-      // A conditional write that lost its race is a distinct, expected outcome —
-      // the caller refreshes and retries, which it cannot do from "error" alone.
-      return { ok: false, code: err?.code === "stale_rev" ? "stale_rev" : "error", error: message };
+      const ms = performance.now() - startedAt;
+      const ev = appendAudit({ ...base, resultKind: "error", error: message, capability, ms });
+      this._emit({ ...base, resultKind: "error", error: message, capability, ms, ...ev });
+      // A tool that knows *what kind* of failure this was says so, and the code
+      // travels to the caller: a conditional write that lost its race refreshes
+      // and retries (`stale_rev`), a host that cannot run commands is not a
+      // transient error (`unsupported_host`), and neither is "error".
+      const code = typeof err?.code === "string" && /^[a-z][a-z0-9_]{2,31}$/.test(err.code) ? err.code : "error";
+      return { ok: false, code, error: message };
     }
   }
 

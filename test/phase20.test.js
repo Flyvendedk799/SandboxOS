@@ -184,8 +184,12 @@ test("stopping a process kills what it started, not just the wrapping shell", as
   // the process we spawned kills the shell and orphans the real work — a
   // supervised dev server that reads as "stopped" while still holding its port.
   const port = 7_000 + Math.floor(Math.random() * 900);
+  // The listener is Node, not python3: the thing under test is "the shell's
+  // child dies with the shell", and the only interpreter every host running this
+  // suite is guaranteed to have is the one running the suite.
+  const server = `require('http').createServer((q,s)=>s.end('ok')).listen(${port},'127.0.0.1')`;
   const job = await ok("proc", "start", {
-    cmd: `python3 -m http.server ${port} --bind 127.0.0.1`,
+    cmd: `"${process.execPath}" -e "${server.replace(/"/g, '\\"')}"`,
     name: "listener",
   });
 

@@ -25,6 +25,7 @@ export function defaultManifest(name = "primary") {
       ports: {},
       metrics: {},
       desktop: {},
+      access: {},
       "mcp-registry": {},
       kernel: {},
     },
@@ -43,7 +44,7 @@ export function manifestPath(sandbox) {
  * deliberately removed one does not get it back on every boot. Adding a new core
  * server to SandboxOS should not require every existing Sandbox to be rebuilt.
  */
-const LATE_SERVERS = { desktop: {} };
+const LATE_SERVERS = { desktop: {}, access: {} };
 
 function migrateManifest(sandbox, m) {
   let changed = false;

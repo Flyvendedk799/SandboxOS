@@ -14,7 +14,13 @@ import {
   dirname, basename, extname,
 } from "../core.js";
 import { call, os } from "./client.js";
+import { KEY_ACTIONS, prettyChord } from "./lib/keys.js";
+
+/** Who can still interrupt you while do-not-disturb is on. */
+const NOTIFY_SOURCES = [["agents", "agents"], ["procs", "processes"], ["apps", "apps"], ["system", "the system"]];
 import { mountTerminal } from "./terminal.js";
+import { OPS_APPS } from "./ops.js";
+import { HELP_APP } from "./help.js";
 
 const IMAGE = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".ico"]);
 const fileUrl = (p, download) => `/${slug}/file?path=${encodeURIComponent(p)}${download ? "&download=1" : ""}`;
@@ -46,10 +52,12 @@ const files = {
     // Tide: which files changed since the last mark, as a badge, when the
     // machine has a workspace. No workspace, no badges — not fake ones.
     let changed = new Map();
+    let tideWorkspace = null;
     async function tideStatus() {
       const ws = await api.tryMcp("tide", "listWorkspaces", {});
       const first = ws?.workspaces?.[0];
       const name = typeof first === "string" ? first : first?.name;
+      tideWorkspace = name ?? null;
       if (!name) { changed = new Map(); return; }
       const st = await api.tryMcp("tide", "status", { workspace: name });
       changed = new Map((st?.changes ?? []).map((c) => [String(c.path ?? c.file ?? c).replace(/^\.\//, ""), c.kind ?? c.status ?? "changed"]));
@@ -118,7 +126,15 @@ const files = {
           ondblclick: () => { if (e.type !== "dir") launchWith(p); },
           oncontextmenu: (ev) => { ev.preventDefault(); rowMenu(ev, e, p); },
         }, h("span", e.type === "dir" ? `${e.name}/` : e.name),
-          changed.has(p) ? h("span.tide-badge", { title: `Tide: ${changed.get(p)} since the last mark` }, changed.get(p)[0].toUpperCase()) : null,
+          // The badge is a button, and it goes where the change lives: Sync, on
+          // the workspace it belongs to (T1.4). A badge that only tells you
+          // something changed leaves you to go and find it.
+          changed.has(p)
+            ? h("button.tide-badge", {
+                title: `Tide: ${changed.get(p)} since the last mark — open Sync`,
+                onclick: (ev) => { ev.stopPropagation(); ctx.launch?.("sync", { workspace: tideWorkspace }); },
+              }, changed.get(p)[0].toUpperCase())
+            : null,
           h("span.sz", e.type === "dir" ? "" : fmtBytes(e.size)));
       }));
     }
@@ -472,11 +488,21 @@ const metrics = {
     const sparkLoad = h("div.spark", { title: "load, last 24 samples" });
     const sparkMem = h("div.spark.mem", { title: "memory, last 24 samples" });
     const foot = h("div.metrics-foot");
+    const note = h("div.ops-error", { hidden: true });
+    // What the machine is actually being asked to do: which tools, how often,
+    // how many refusals, and the slowest calls of the window (goal.md T1.9).
+    const busiest = h("div.obs-table");
+    const slowest = h("div.obs-table");
     const recent = h("div.w-feed", { style: { padding: "0 12px 12px", marginTop: "0" } });
-    fill(host, h("div.app", null, h("div.app-body", null, grid,
+    const openAudit = (filter) => ctx?.launch?.("audit", filter ?? {});
+    fill(host, h("div.app", null, h("div.app-body", null, note, grid,
       h("div.spark-label", "Load"), sparkLoad, h("div.spark-label", "Memory"), sparkMem, foot,
+      h("div.spark-label", { style: { display: "flex", justifyContent: "space-between" } }, h("span", "Busiest tools, last hour"),
+        h("button.app-btn", { onclick: () => openAudit() }, "Audit")),
+      busiest,
+      h("div.spark-label", "Slowest calls"), slowest,
       h("div.spark-label", { style: { display: "flex", justifyContent: "space-between" } }, h("span", "Recent calls"),
-        h("a", { href: `/${slug}#activity`, title: "Open the audit explorer in Command Central" }, "audit explorer →")),
+        h("button.app-btn", { onclick: () => openAudit() }, "Every call →")),
       recent)));
 
     const stat = (k, v, sub) => h("div.stat", null, h("div.k", k), h("div.v", v), sub ? h("div.s", sub) : null);
@@ -486,11 +512,15 @@ const metrics = {
     async function tick() {
       if (!alive || document.hidden) return;
       try {
-        const [m, hist, audit] = await Promise.all([
+        const [m, hist, audit, act] = await Promise.all([
           api.mcp("metrics", "snapshot", {}),
           api.tryMcp("metrics", "history", { limit: 24 }),
-          api.tryMcp("metrics", "recent", { limit: 6 }),
+          api.tryMcp("metrics", "recent", { limit: 60 }),
+          api.tryMcp("metrics", "activity", { windowMs: 3_600_000 }),
         ]);
+        // A reading nothing could take is said, not shown as a zero.
+        note.hidden = !m.unavailable;
+        if (m.unavailable) fill(note, icon("bell", 13), h("span", m.unavailable));
         const mem = m.memory;
         fill(grid,
           stat("Load", m.load?.[0]?.toFixed(2) ?? "—", m.load ? `${m.load[1]?.toFixed(2)} · ${m.load[2]?.toFixed(2)}` : null),
@@ -501,7 +531,34 @@ const metrics = {
         bars(sparkLoad, samples.map((s2) => s2.load ?? 0), Math.max(0.01, ...samples.map((s2) => s2.load ?? 0)));
         bars(sparkMem, samples.map((s2) => s2.memory?.used ?? s2.mem ?? 0), Math.max(1, ...samples.map((s2) => s2.memory?.used ?? s2.mem ?? 0)));
         foot.textContent = `${m.servers?.length ?? 0} servers · ports ${m.ports?.join(", ") || "none"} · ${m.disk?.files ?? "—"} files${m.disk?.bytes ? ` · ${fmtBytes(m.disk.bytes)}` : ""}`;
+        // Busiest and slowest, from the same audit rollup the explorer reads.
+        const byTool = act?.byTool ?? [];
+        fill(busiest, ...(byTool.length
+          ? byTool.slice(0, 6).map((t) => {
+            const name = t.tool?.includes(".") ? t.tool : `${t.server ?? ""}.${t.tool ?? ""}`;
+            const denied = t.denied ?? 0;
+            const errors = t.errors ?? 0;
+            const avg = Number.isFinite(t.avgMs) ? Math.round(t.avgMs) : null;
+            return h("button.obs-row", { onclick: () => openAudit({ server: t.server, tool: t.tool }) },
+              h("span.mono", name),
+              h("span.n", String(t.n ?? 0)),
+              avg != null ? h("span.dim", `${avg} ms avg`) : null,
+              denied ? h("span.ops-pill.warn", `${denied} denied`) : null,
+              errors ? h("span.ops-pill.err", `${errors} failed`) : null);
+          })
+          : [h("span.dim", { style: { fontSize: "10px", padding: "0 12px" } }, "nothing in the last hour")]));
+
         const events = audit?.events ?? audit?.recent ?? [];
+        // The slowest individual calls of the window — a different list from the
+        // busiest tools, and usually the more interesting one.
+        const slow = act?.slowest ?? [];
+        fill(slowest, ...(slow.length
+          ? slow.slice(0, 5).map((e) => h("button.obs-row", { onclick: () => openAudit({ server: e.server, tool: e.tool }) },
+              h("span.mono", `${e.server}.${e.tool}`),
+              h("span.n", `${Math.round(e.ms)} ms`),
+              e.kind && e.kind !== "ok" ? h("span.ops-pill.err", e.kind) : null))
+          : [h("span.dim", { style: { fontSize: "10px", padding: "0 12px" } }, "nothing timed in this window yet")]));
+
         fill(recent, ...(events.length ? events.slice(0, 6).map((e) => h("div.line", null,
           h("span", { class: e.result_kind ?? e.resultKind ?? "" }, e.result_kind ?? e.resultKind ?? "?"),
           h("span.what", `${e.server}.${e.tool}`),
@@ -718,6 +775,33 @@ const settings = {
       buildEl.textContent = b ? `${b.commit ?? "unknown commit"} · up since ${new Date(b.startedAt).toLocaleString()}` : "unavailable";
     }).catch(() => { buildEl.textContent = "unavailable"; });
 
+    // What the panel reads but the document does not hold: the tenant's quota
+    // and usage, and the snapshot schedules. Deliberately *outside* `render` —
+    // they were declared inside it, which reset the ten-second cache on every
+    // repaint and put `loadSnapshotJobs` out of reach of the mount that wanted to
+    // call it, so the Settings window failed to build at all.
+    let limits = null;
+    let limitsAt = 0;
+    async function loadLimits() {
+      if (Date.now() - limitsAt < 10_000) return;
+      limitsAt = Date.now();
+      try { limits = await api.mcp("kernel", "limits", {}); }
+      catch (e) { limits = { using: { unavailable: e.message }, quota: {}, model: { total: 0, byModel: [], windowDays: 30, note: e.message } }; }
+      if (section === "machine") render();
+    }
+
+    // Scheduled snapshots are cron jobs, so they are read from the scheduler
+    // rather than from the document: the desktop holds the checkpoints, the
+    // scheduler holds the intention to make more of them.
+    let snapshotJobs = [];
+    async function loadSnapshotJobs() {
+      try {
+        const r = await api.tryMcp("cron", "list", {});
+        snapshotJobs = (r?.jobs ?? []).filter((j) => j.server === "desktop" && j.tool === "checkpoint");
+      } catch { snapshotJobs = []; }
+      render();
+    }
+
     function render() {
       const d = os.doc;
       if (!d) return;
@@ -766,7 +850,47 @@ const settings = {
         row("Status readings", onoff(d.shell.menubar.showStatus, (v) => call("shellSet", { menubar: { showStatus: v } }))),
         label("Notifications"),
         row("Enabled", onoff(d.shell.notifications.enabled, (v) => call("shellSet", { notifications: { enabled: v } }))),
+        // Do-not-disturb records everything and interrupts with nothing; the
+        // allow list is who still gets through (goal.md T3.3).
+        row("Do not disturb", onoff(d.shell.notifications.dnd, (v) => call("shellSet", { notifications: { dnd: v } }))),
+        ...NOTIFY_SOURCES.map(([key, what]) => row(`  …still let ${what} through`,
+          onoff((d.shell.notifications.allow ?? []).includes(key), (v) => {
+            const allow = new Set(d.shell.notifications.allow ?? []);
+            if (v) allow.add(key); else allow.delete(key);
+            return call("shellSet", { notifications: { allow: [...allow] } });
+          }))),
         row("Kept", h("span.v", `${d.notifications.length} of ${os.snap.limits?.notifications ?? 60}`)),
+
+        label("Keyboard"),
+        ...Object.entries(KEY_ACTIONS).map(([action, what]) => row(what, keyField(action, d.shell.keys?.[action] ?? null))),
+        h("div", { style: { padding: "6px 11px 10px" } },
+          h("button.app-btn", { onclick: () => call("keySet", {}).catch((e) => toastError("Could not reset the keyboard", e)) }, "Restore the defaults")),
+        h("div.dim", { style: { padding: "0 11px 10px", fontSize: "11px", lineHeight: "1.6" } },
+          "Click a chord and press the keys you want. The map is in the document, so it travels with a distro — and ⌘? reads it."),
+
+        label("Checkpoints"),
+        ...((d.checkpoints ?? []).length
+          ? d.checkpoints.slice().reverse().map((c) => row(
+              h("span", null, c.name, c.auto ? h("span.dim", { style: { fontSize: "10px" } }, "  scheduled") : null),
+              h("span", { style: { display: "flex", gap: "6px" } },
+                h("span.v.dim", `r${c.rev}`),
+                h("button.app-btn", { onclick: () => restoreCheckpoint(c) }, "Restore"),
+                h("button.app-btn", { onclick: () => call("checkpointRemove", { id: c.id }).catch((e) => toastError("Could not forget it", e)) }, "Forget"))))
+          : [h("div.dim", { style: { padding: "0 11px", fontSize: "11px" } }, "No named states yet. A checkpoint is a desktop you meant to come back to.")]),
+        h("div", { style: { padding: "6px 11px 10px", display: "flex", gap: "6px", flexWrap: "wrap" } },
+          h("button.app-btn", { onclick: () => nameCheckpoint() }, "Save this desktop…"),
+          h("button.app-btn", { onclick: () => scheduleSnapshots() }, "Snapshot on a schedule…")),
+        ...(snapshotJobs.length
+          ? [
+              ...snapshotJobs.map((j) => row(
+                h("span.dim", `every ${Math.round((j.interval_ms ?? 0) / 60000)} minutes`),
+                h("span", { style: { display: "flex", gap: "6px" } },
+                  h("span.v.dim", j.due_at ? new Date(Number(j.due_at)).toLocaleTimeString() : "—"),
+                  h("button.app-btn", { onclick: () => stopSnapshots(j.id) }, "Stop")))),
+              h("div.dim", { style: { padding: "0 11px 10px", fontSize: "11px", lineHeight: "1.6" } },
+                `The scheduler calls desktop.checkpoint with your capabilities, and every run is audited. Scheduled snapshots keep their own ${os.snap.limits?.autoCheckpoints ?? 6} slots, so they cannot push out a desktop you named.`),
+            ]
+          : []),
         label("Opens with"),
         ...(assoc.length ? assoc.map(([ext, appId]) => row(h("span.mono", ext),
           sel([...apps, { value: "", label: "— clear —" }], appId, (v) => call("associate", { ext, app: v || null })))) : [h("div.dim", { style: { padding: "0 11px", fontSize: "11px" } }, "No associations. Right-click a file in Files → Open with…")]),
@@ -778,6 +902,93 @@ const settings = {
         })(),
       ];
 
+      /** Capture a chord by listening for the next keypress, honestly. */
+      function keyField(action, chord) {
+        const btn = h("button.app-btn.chord", { title: "Click, then press the keys" }, chord ? prettyChord(chord) : "unbound");
+        btn.addEventListener("click", () => {
+          btn.textContent = "press keys…";
+          btn.classList.add("listening");
+          const onKey = async (e) => {
+            if (["Shift", "Control", "Meta", "Alt"].includes(e.key)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            window.removeEventListener("keydown", onKey, true);
+            btn.classList.remove("listening");
+            if (e.key === "Escape") { render(); return; }
+            if (e.key === "Backspace" || e.key === "Delete") {
+              try { await call("keySet", { action, chord: null }); } catch (err) { toastError("Could not unbind it", err); render(); }
+              return;
+            }
+            const parts = [];
+            if (e.metaKey || e.ctrlKey) parts.push("mod");
+            if (e.shiftKey && e.key.length > 1) parts.push("shift");
+            if (e.altKey) parts.push("alt");
+            parts.push(e.key.length === 1 ? e.key : e.key);
+            try { await call("keySet", { action, chord: parts.join("+") }); }
+            catch (err) { toastError("That chord did not take", err); render(); }
+          };
+          window.addEventListener("keydown", onKey, true);
+        });
+        return btn;
+      }
+
+      /**
+       * A snapshot on a schedule (goal.md T3.4). Nothing new in the machine: it
+       * is a cron job that calls `desktop.checkpoint` with `auto: true`, on your
+       * behalf and with your capabilities, which is why it appears in Jobs →
+       * Schedule and in the audit log like any other call.
+       */
+      async function scheduleSnapshots() {
+        const got = await dialog({
+          title: "Snapshot this desktop on a schedule",
+          message: "The scheduler calls desktop.checkpoint for you at that interval. Scheduled snapshots keep their own slots, so they cannot push out a state you named yourself.",
+          fields: [
+            { name: "minutes", label: "Every (minutes)", type: "number", value: "60", hint: "60 is hourly; 1440 is daily" },
+            { name: "name", label: "Called", value: "Scheduled snapshot" },
+          ],
+          confirmLabel: "Schedule",
+        });
+        if (!got) return;
+        const minutes = Math.max(1, Math.round(Number(got.minutes) || 60));
+        try {
+          await api.mcp("cron", "every", {
+            intervalMs: minutes * 60_000,
+            server: "desktop", tool: "checkpoint",
+            args: { name: (got.name || "Scheduled snapshot").slice(0, 64), auto: true },
+          });
+          toast(`Snapshotting every ${minutes} minutes`, { kind: "ok", timeout: 2600 });
+          loadSnapshotJobs();
+        } catch (e) { toastError("Could not schedule it", e); }
+      }
+
+      async function stopSnapshots(id) {
+        try { await api.mcp("cron", "cancel", { id }); loadSnapshotJobs(); }
+        catch (e) { toastError("Could not stop it", e); }
+      }
+
+      async function nameCheckpoint() {
+        const got = await dialog({
+          title: "Save this desktop",
+          message: "A named state you can come back to, whatever happens to the revision history.",
+          fields: [{ name: "name", label: "Name", placeholder: "before the redesign" }],
+          confirmLabel: "Save",
+        });
+        if (!got?.name) return;
+        try { await call("checkpoint", { name: got.name }); toast(`Saved “${got.name}”`, { timeout: 2200 }); }
+        catch (e) { toastError("Could not save it", e); }
+      }
+
+      async function restoreCheckpoint(c) {
+        let diff = null;
+        try { diff = (await api.mcp("desktop", "checkpointDiff", { id: c.id })).diff; } catch { /* the diff is a courtesy */ }
+        const summary = diff
+          ? `Windows ${diff.windows.added ? `+${diff.windows.added} ` : ""}${diff.windows.removed ? `−${diff.windows.removed} ` : ""}${diff.windows.changed ? `~${diff.windows.changed}` : ""}`.trim()
+          : "";
+        if (!(await confirmDialog(`Go back to “${c.name}”?`, `${summary ? `${summary}. ` : ""}The restore is itself a revision, so you can undo it.`))) return;
+        try { await call("checkpointRestore", { id: c.id }); }
+        catch (e) { toastError("Could not restore it", e); }
+      }
+
       const machineSection = [
         label("This machine"),
         row("OS name", nameEl),
@@ -786,6 +997,28 @@ const settings = {
         row("Custom apps", h("span.v", `${Object.keys(d.apps).length}${Object.values(d.apps).filter((a) => a.mcp).length ? ` (${Object.values(d.apps).filter((a) => a.mcp).length} with tools)` : ""}`)),
         row("Distro", h("span.v", d.distro?.name ? `${d.distro.name}${d.distro.tenant ? " · another tenant" : ""}` : "none")),
         row("Server build", buildEl),
+
+        // What this machine may use, and what it is using. Power that silently
+        // hits an invisible ceiling is not power (goal.md T3.5).
+        label("Allowance"),
+        ...(limits
+          ? [
+            row("Agents", h("span.v", `${limits.using.agentsRunning} running of ${limits.quota.agents}`)),
+            row("Sandboxes", h("span.v", `${limits.using.sandboxes} of ${limits.quota.sandboxes}`)),
+            row("Cell power", h("span.v", `${limits.quota.memMb} MB · ${limits.quota.cpuShares} CPU`)),
+            row("Shells open", h("span.v", String(limits.using.sessions))),
+            row("Disk", h("span.v", limits.using.unavailable
+              ? limits.using.unavailable
+              : `${fmtBytes(limits.using.volumeBytes ?? 0)} in the volume · ${fmtBytes(limits.using.osBytes ?? 0)} for the desktop`)),
+            label("Model use"),
+            row(`Tokens, last ${limits.model.windowDays} days`, h("span.v", limits.model.total.toLocaleString())),
+            ...(limits.model.byModel.length
+              ? limits.model.byModel.slice(0, 4).map((m) => row(`  ${m.provider}${m.model ? ` · ${m.model}` : ""}`,
+                h("span.v", `${(m.tokens ?? 0).toLocaleString()} · ${m.turns} turn${m.turns === 1 ? "" : "s"}`)))
+              : [h("div.dim", { style: { padding: "0 11px", fontSize: "11px" } }, "No model calls yet.")]),
+            h("div.dim", { style: { padding: "6px 11px 10px", fontSize: "11px", lineHeight: "1.6" } }, limits.model.note),
+          ]
+          : [h("div.dim", { style: { padding: "0 11px", fontSize: "11px" } }, "Reading the allowance…")]),
         h("div", { style: { padding: "10px", display: "flex", gap: "8px", flexWrap: "wrap" } },
           h("button.app-btn", { onclick: () => ctx.openStudio?.() }, "Open Studio"),
           h("button.app-btn", { onclick: () => (location.href = `/${slug}`) }, "Command Central"),
@@ -801,15 +1034,26 @@ const settings = {
 
       fill(body,
         h("div.chip-row", { style: { padding: "4px 6px 8px" } }, tab("desktop", "Desktop"), tab("machine", "Machine")),
-        ...(section === "machine" ? machineSection : desktopSection));
+        h("div.settings-col", null, ...(section === "machine" ? machineSection : desktopSection)));
+      // The allowance is read when the tab that shows it is on screen.
+      if (section === "machine") loadLimits();
     }
 
     render();
+    loadSnapshotJobs();
     return ctx.onDoc?.(render) ?? (() => {});
   },
 };
 
-export const APPS = { files, terminal, console: consoleApp, notes, metrics, media, browser, settings };
+export const APPS = {
+  files, terminal, console: consoleApp, notes, metrics, media, browser, settings,
+  // The machine's own work — processes, ports, agents, secrets, sync, access, the
+  // audit log — lives in ops.js, so this file stays about the desk and that one
+  // stays about the machine.
+  ...OPS_APPS,
+  // The manual, read from the files this build ships (goal.md T5.2).
+  ...HELP_APP,
+};
 
 /** Mount a built-in app into a window body. Returns a stopper, or null when the
  *  id is not built in (a bundle or URL app — the window manager handles those). */

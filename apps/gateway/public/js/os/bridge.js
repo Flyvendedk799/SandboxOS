@@ -37,6 +37,43 @@
     }
   }
 
+  // ── telling someone when this app breaks ──────────────────────────────────
+  //
+  // The frame is opaque-origin, so its console belongs to nobody: an uncaught
+  // error inside a custom app used to die where the person who could fix it
+  // could not see it (goal.md T2.2). These are one-way notes to the shell — no
+  // id, no reply, and they carry only what the app itself printed.
+  function report(level, text, where) {
+    try {
+      parent.postMessage({
+        __sbx: 1, app: appId, kind, type: "log",
+        level, text: String(text ?? "").slice(0, 2000), where: where ?? null, at: Date.now(),
+      }, "*");
+    } catch { /* detached */ }
+  }
+
+  window.addEventListener("error", (e) => {
+    report("error", e.message ?? "script error", e.filename ? `${e.filename.split("/").pop()}:${e.lineno}:${e.colno}` : null);
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    const r = e.reason;
+    report("error", r?.stack ?? r?.message ?? String(r), "unhandled rejection");
+  });
+  for (const level of ["error", "warn", "log", "info"]) {
+    const original = console[level].bind(console);
+    console[level] = (...args) => {
+      original(...args);
+      // Only errors and warnings travel by default; `log` and `info` do too when
+      // the app is being edited, which the shell decides by asking for them.
+      if (level === "error" || level === "warn" || window.sbx?.trace) {
+        report(level, args.map((a) => {
+          if (typeof a === "string") return a;
+          try { return JSON.stringify(a); } catch { return String(a); }
+        }).join(" "));
+      }
+    };
+  }
+
   function post(type, payload) {
     const id = `${appId}:${++seq}`;
     return new Promise((resolve, reject) => {
@@ -48,9 +85,26 @@
     });
   }
 
+  // Focus must never be trapped inside an app (goal.md T4.5). Tab belongs to
+  // the app's own form; Escape hands focus back to the window around it, and
+  // the shell then has the keyboard again. An app that wants Escape for itself
+  // can call preventDefault before this runs.
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || e.defaultPrevented) return;
+    try { parent.postMessage({ __sbx: 1, app: appId, kind, type: "focusOut" }, "*"); } catch { /* detached */ }
+  });
+
   window.addEventListener("message", (e) => {
     const m = e.data;
-    if (!m || m.__sbx !== 1 || !m.id) return;
+    if (!m || m.__sbx !== 1) return;
+    // The shell's liveness check. Answering it costs a message; not answering
+    // it is how the shell knows this app has stopped responding — a frame
+    // stuck in a loop cannot reply, because it cannot run this handler.
+    if (m.type === "event" && m.event === "ping") {
+      try { parent.postMessage({ __sbx: 1, app: appId, kind, type: "pong", at: Date.now() }, "*"); } catch { /* detached */ }
+      return;
+    }
+    if (!m.id) return;
     const p = pending.get(m.id);
     if (!p) {
       if (m.type === "event") {

@@ -15,6 +15,12 @@
    stands alone so the OS can be served without Command Central's stylesheet.
    ========================================================================== */
 
+/* `hidden` means hidden. Several components here set `display` on a class, which
+   out-specifies the attribute's default rule — and a shelf that is hidden in the
+   document but painted on screen is exactly the kind of quiet lie this OS is not
+   supposed to tell. */
+[hidden] { display: none !important; }
+
 :root {
   /* Studio chrome — fixed */
   --stx-bg-0: #080b0f;
@@ -256,7 +262,14 @@ a { color: var(--stx-accent); }
 .stx-stage-bar {
   display: flex; align-items: center; gap: 10px; height: 40px; flex: none; padding: 0 12px;
   background: #0b0f14; border-bottom: 1px solid var(--stx-line);
+  /* The bar carries more than a narrow stage can hold; it scrolls inside itself
+     rather than spilling its controls under the inspector, where they were
+     visible but unclickable. */
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
 }
+.stx-stage-bar::-webkit-scrollbar { height: 0; }
+.stx-stage-bar > * { flex: none; }
+.stx-stage-bar > .spacer { flex: 1 1 auto; min-width: 8px; }
 .ws-btn {
   width: 26px; height: 24px; border: 0; border-radius: 6px;
   font-size: 11px; font-weight: 600; background: transparent; color: var(--stx-text-2);
@@ -269,10 +282,16 @@ a { color: var(--stx-accent); }
 }
 .stage-badge { font-size: 11px; color: var(--stx-text-3); font-family: var(--mono); }
 
-.stx-viewport { flex: 1; min-height: 0; padding: 14px; overflow: hidden; display: flex; }
+.stx-viewport { flex: 1; min-height: 0; padding: 14px; overflow: hidden; display: flex; position: relative; }
 .stx-viewport > .os-screen {
   border-radius: 14px; border: 1px solid var(--stx-line);
   box-shadow: 0 30px 80px rgba(0, 0, 0, .5);
+}
+/* A staged screen renders at the device's size and is scaled to fit the pane, so
+   the window manager is arranging a real viewport rather than a narrow column. */
+.stx-viewport > .os-screen.staged {
+  position: absolute; left: 50%; top: 50%; transform-origin: center center;
+  flex: none;
 }
 
 /* ── Inspector ───────────────────────────────────────────────────────────── */
@@ -617,13 +636,28 @@ body.os-fullscreen .os-screen { height: 100%; border: 0; border-radius: 0; }
 .app-btn.primary { background: var(--os-accent); color: var(--os-bg-0); border-color: transparent; }
 
 .row-line {
-  display: flex; justify-content: space-between; gap: 10px; width: 100%;
-  padding: 4px 10px; border: 0; background: transparent; text-align: left;
-  font-family: var(--mono); font-size: 11px; color: var(--os-text-2);
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
+  min-height: 24px; padding: 3px 10px; border: 0; background: transparent; text-align: left;
+  font-family: var(--mono); font-size: 11px; line-height: 1.5; color: var(--os-text-2);
+  border-left: 2px solid transparent;
 }
+/* The label takes the room that is left and gives up gracefully; everything to
+   its right keeps its size, so the second column lines up down the list. */
+.row-line > span:first-child { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-line > :not(:first-child) { flex: none; }
 .row-line:hover { background: var(--os-chip); color: var(--os-text); }
-.row-line.on { background: var(--os-chip); color: var(--os-text); }
-.row-line .sz { color: var(--os-text-3); }
+.row-line.on { background: var(--os-chip); color: var(--os-text); border-left-color: var(--os-accent); }
+.row-line:focus-visible { outline: none; background: var(--os-chip); border-left-color: var(--os-accent); }
+.row-line .sz { color: var(--os-text-3); font-variant-numeric: tabular-nums; text-align: right; }
+.row-line .dim { color: var(--os-text-3); }
+/* A row that is a refusal or an error carries it at the edge, so a wall of them
+   is visible before anything is read. */
+.row-line.bad { border-left-color: color-mix(in srgb, var(--os-err) 60%, transparent); }
+/* A row whose second half is a sentence about the first — a table of contents, a
+   search hit — wants the sentence, not an ellipsis after four words. */
+.row-line.wrap { align-items: flex-start; padding-top: 6px; padding-bottom: 6px; }
+.row-line.wrap > span:first-child { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.55; }
+.row-line.wrap > :not(:first-child) { margin-top: 1px; }
 
 .term { padding: 11px 13px; font-family: var(--mono); font-size: 11px; line-height: 1.7; }
 .term .in { color: var(--os-accent); }
@@ -648,7 +682,24 @@ body.os-fullscreen .os-screen { height: 100%; border: 0; border-radius: 0; }
 .tile-grid .tile { aspect-ratio: 1; border-radius: 9px; overflow: hidden; background: var(--os-chip); }
 .tile-grid .tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
-.kv { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 11px; border-radius: 8px; }
+.kv {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 8px 11px; border-radius: 8px;
+}
+/* Label and control belong in one another's company. Left to itself a `.kv` in a
+   1200px window puts them a hand's width apart and reads as a spreadsheet, so
+   the column holding them keeps a measure. */
+.settings-col { max-width: 620px; }
+.settings-col .kv { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 14px; align-items: center; }
+.settings-col .kv .k { justify-self: start; }
+.settings-col .kv > :last-child { justify-self: start; width: 100%; max-width: 260px; }
+.settings-col .kv select, .settings-col .kv input { width: 100%; }
+/* Rows whose control is a row of buttons or chips keep their own shape. */
+.settings-col .kv > span[style], .settings-col .kv .v { max-width: none; }
+@media (max-width: 560px) {
+  .settings-col .kv { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .settings-col .kv > :last-child { max-width: none; }
+}
 .kv:hover { background: var(--os-chip); }
 .kv .k { color: var(--os-text); }
 .kv .v { color: var(--os-text-3); font-family: var(--mono); font-size: 11px; }
@@ -1140,7 +1191,8 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
 /* ── Builtins, deeper (Wave E2) ──────────────────────────────────────────── */
 .file-list.second { border-left: 1px solid var(--os-line); }
 .row-line.head { color: var(--os-text-3); border-bottom: 1px solid var(--os-line); }
-.tide-badge { margin-left: auto; margin-right: 8px; padding: 0 5px; border-radius: 4px; font-size: 9px; font-weight: 700; background: var(--os-accent-dim); color: var(--os-accent); }
+.tide-badge { margin-left: auto; margin-right: 8px; padding: 0 5px; border-radius: 4px; font-size: 9px; font-weight: 700; background: var(--os-accent-dim); color: var(--os-accent); border: 0; cursor: pointer; font-family: inherit; line-height: 15px; }
+.tide-badge:hover, .tide-badge:focus-visible { background: var(--os-accent); color: var(--os-bg-0); }
 .console-entry { padding: 8px 13px; border-bottom: 1px solid var(--os-line); font-family: var(--mono); font-size: 11px; line-height: 1.6; }
 .console-entry .in { display: flex; gap: 6px; align-items: baseline; color: var(--os-accent); }
 .console-entry .in b { color: var(--os-text); font-weight: 500; white-space: pre-wrap; flex: 1; }
@@ -1182,3 +1234,393 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
 .spark-label a { color: var(--os-accent); text-decoration: none; text-transform: none; letter-spacing: 0; font-weight: 600; }
 .spark.mem i { background: var(--os-sand); }
 .metrics-foot { padding: 6px 12px 10px; font-size: 11px; color: var(--os-text-3); }
+
+/* ── Ops apps: Jobs, Ports, Agents, Secrets, Sync, Access, Audit ─────────────
+   The machine's own work (ops.js). One shape for all seven — a list of things on
+   the left, the thing you picked on the right — because they answer the same kind
+   of question and should not each invent a layout. */
+
+.app-body.ops-split { display: flex; overflow: hidden; }
+.ops-list {
+  flex: none; width: 34%; min-width: 240px; max-width: 380px;
+  border-right: 1px solid var(--os-line); overflow: auto; padding-bottom: 8px;
+}
+.ops-list.wide { width: 44%; max-width: 520px; }
+/* Under about 640px there is not room for two panes: the list becomes the app,
+   and the pane appears when something is picked. */
+@media (max-width: 720px) {
+  .ops-list, .ops-list.wide { width: 100%; max-width: none; border-right: 0; }
+}
+.ops-pane { flex: 1; min-width: 0; overflow: auto; display: flex; flex-direction: column; }
+
+.ops-head {
+  padding: 9px 10px 4px; font-size: 9.5px; font-weight: 700; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--os-text-3);
+}
+.ops-none { padding: 4px 10px 8px; font-size: 11px; }
+
+.ops-pane-head {
+  display: flex; align-items: center; gap: 9px; padding: 8px 12px; flex: none;
+  border-bottom: 1px solid var(--os-line); font-size: 11.5px;
+}
+.ops-pane-head .spacer { flex: 1; }
+
+.ops-pill {
+  flex: none; align-self: center; padding: 1px 7px; border-radius: 999px;
+  font-size: 9.5px; font-weight: 700; letter-spacing: .02em; line-height: 15px;
+  background: var(--os-chip); color: var(--os-text-3); white-space: nowrap;
+}
+.ops-pill.ok { background: color-mix(in srgb, var(--os-ok) 22%, transparent); color: var(--os-ok); }
+.ops-pill.warn { background: var(--os-accent-dim); color: var(--os-accent); }
+.ops-pill.err { background: color-mix(in srgb, var(--os-err) 22%, transparent); color: var(--os-err); }
+
+.ops-search {
+  height: 22px; min-width: 90px; padding: 0 7px; border: 1px solid var(--os-line);
+  border-radius: 6px; background: var(--os-bg-1); color: var(--os-text);
+  font-size: 11px; font-family: inherit;
+}
+
+.ops-log { flex: 1; min-height: 0; overflow: auto; padding: 6px 0 10px; }
+.ops-line { display: flex; gap: 8px; padding: 1px 12px; font-family: var(--mono); font-size: 11px; line-height: 1.55; }
+.ops-line .t { color: var(--os-text-3); flex: none; }
+.ops-line .m { color: var(--os-text-2); white-space: pre-wrap; word-break: break-word; }
+.ops-line.err .m { color: var(--os-err); }
+
+.ops-out {
+  margin: 0; padding: 10px 12px; overflow: auto; font-family: var(--mono); font-size: 11px;
+  line-height: 1.6; color: var(--os-text-2); white-space: pre-wrap; word-break: break-word;
+}
+.ops-out.select { user-select: all; color: var(--os-text); }
+
+.ops-error {
+  display: flex; align-items: flex-start; gap: 8px; margin: 8px 10px; padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--os-err) 40%, var(--os-line));
+  border-radius: 8px; background: color-mix(in srgb, var(--os-err) 12%, transparent);
+  color: var(--os-err); font-size: 11px; line-height: 1.5;
+}
+.ops-error svg { flex: none; margin-top: 1px; }
+
+@media (max-width: 720px) {
+  .app-body.ops-split { flex-direction: column; }
+  .ops-list, .ops-list.wide { width: auto; max-height: 45%; border-right: 0; border-bottom: 1px solid var(--os-line); }
+}
+
+/* ── Proposals: a change you read before it happens ──────────────────────── */
+
+.agent-proposals { flex: none; max-height: 40%; overflow: auto; padding: 0 10px 8px; display: flex; flex-direction: column; gap: 8px; }
+.proposal {
+  border: 1px solid var(--stx-accent-line, var(--os-accent-line)); border-radius: 10px;
+  background: var(--stx-bg-2, var(--os-bg-2)); overflow: hidden;
+}
+.proposal .hd { display: flex; align-items: baseline; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--stx-line, var(--os-line)); font-size: 11.5px; }
+.proposal .hd .dim { margin-left: auto; font-size: 10.5px; }
+.proposal .ops { padding: 6px 10px; display: flex; flex-direction: column; gap: 3px; }
+.proposal .op { display: flex; gap: 8px; align-items: baseline; font-size: 10.5px; }
+.proposal .op code { font-family: var(--mono); color: var(--stx-accent, var(--os-accent)); }
+.proposal .op .dim { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proposal .act { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--stx-line, var(--os-line)); }
+.app-btn.primary { background: var(--os-accent); border-color: transparent; color: #04211e; }
+
+/* ── Code: find/replace across the bundle, and the app's own console ─────── */
+
+.code-find { flex: none; border-bottom: 1px solid var(--stx-line); background: var(--stx-bg-2); }
+.code-find .row { display: flex; align-items: center; gap: 6px; padding: 7px 10px; }
+.code-find input {
+  height: 24px; min-width: 0; flex: 1 1 120px; padding: 0 8px; border: 1px solid var(--stx-line);
+  border-radius: 6px; background: var(--stx-bg-1); color: var(--stx-text); font-size: 11.5px;
+}
+.code-find .dim { flex: none; font-size: 10.5px; white-space: nowrap; }
+.code-find .hits { max-height: 160px; overflow: auto; border-top: 1px solid var(--stx-line); }
+.code-find .hit {
+  display: flex; gap: 8px; align-items: baseline; width: 100%; padding: 3px 10px;
+  border: 0; background: transparent; text-align: left; font-size: 10.5px; color: var(--stx-text-2);
+}
+.code-find .hit:hover { background: var(--stx-chip); color: var(--stx-text); }
+.code-find .hit code { font-family: var(--mono); color: var(--stx-accent); flex: none; }
+.code-find .hit .ln { color: var(--stx-text-3); flex: none; min-width: 24px; text-align: right; }
+.code-find .hit .tx { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.code-console { flex: none; max-height: 40%; display: flex; flex-direction: column; border-top: 1px solid var(--stx-line); background: var(--stx-bg-2); }
+.code-console .hd { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--stx-line); font-size: 11px; }
+.code-console .hd .spacer { flex: 1; }
+.code-console .lines { overflow: auto; padding: 5px 0 8px; }
+.code-console .line { display: flex; gap: 8px; padding: 1px 10px; font-family: var(--mono); font-size: 10.5px; line-height: 1.5; }
+.code-console .line .t { color: var(--stx-text-3); flex: none; }
+.code-console .line .m { color: var(--stx-text-2); white-space: pre-wrap; word-break: break-word; }
+.code-console .line .where { color: var(--stx-text-3); flex: none; }
+.code-console .line.error .m { color: var(--stx-err); }
+.code-console .line.warn .m { color: var(--stx-warn, #f0b849); }
+
+/* ── The capability badge and ledger ─────────────────────────────────────── */
+
+.os-cap {
+  display: inline-flex; align-items: center; gap: 3px; margin-left: auto; margin-right: 4px;
+  height: 17px; padding: 0 6px; border: 1px solid var(--os-line); border-radius: 999px;
+  background: var(--os-chip); color: var(--os-text-3);
+  font-size: 9.5px; font-weight: 700; letter-spacing: .02em;
+}
+.os-cap:hover { color: var(--os-text); border-color: var(--os-accent-line); }
+.os-cap.off { color: var(--os-err); border-color: color-mix(in srgb, var(--os-err) 45%, var(--os-line)); }
+.ledger .kv { padding: 4px 0; }
+.ledger .v.ok { color: var(--os-ok); }
+.ledger .v.warn { color: var(--os-warn); }
+.ledger-calls { max-height: 200px; overflow: auto; border: 1px solid var(--os-line); border-radius: 8px; padding: 6px 0; }
+
+/* Do-not-disturb: the bell says so rather than the machine just going quiet. */
+.icon-btn.dnd { color: var(--os-text-3); }
+.icon-btn.dnd::after {
+  content: ""; position: absolute; left: 4px; right: 4px; top: 50%;
+  height: 1px; background: currentColor; transform: rotate(-20deg);
+}
+.icon-btn { position: relative; }
+.os-badge.quiet { background: var(--os-chip); color: var(--os-text-3); }
+
+.app-btn.chord { font-family: var(--mono); min-width: 72px; }
+.app-btn.chord.listening { border-color: var(--os-accent); color: var(--os-accent); }
+
+/* ── An app that stopped answering ───────────────────────────────────────────
+   The shell is not the app: the window still drags, closes and zooms, and the
+   card says what happened rather than leaving a dead rectangle. */
+
+.os-stuck {
+  position: absolute; inset: 0; z-index: 4; display: flex; align-items: center; justify-content: center;
+  padding: 16px; background: color-mix(in srgb, var(--os-bg-0) 82%, transparent);
+  backdrop-filter: blur(3px);
+}
+.os-stuck .card {
+  max-width: 320px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 8px;
+  color: var(--os-text-2);
+}
+.os-stuck .card h3 { margin: 0; font-size: 12.5px; color: var(--os-text); }
+.os-stuck .card p { margin: 0; font-size: 11px; line-height: 1.6; }
+.os-stuck .card svg { color: var(--os-warn); }
+.os-stuck .row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin-top: 4px; }
+.app-btn.danger { border-color: color-mix(in srgb, var(--os-err) 45%, var(--os-line)); color: var(--os-err); }
+
+/* Observability: what the machine is being asked to do. */
+.obs-table { display: flex; flex-direction: column; padding: 0 8px 8px; }
+.obs-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 3px 6px;
+  border: 0; border-radius: 6px; background: transparent; text-align: left;
+  font-size: 11px; color: var(--os-text-2);
+}
+.obs-row:hover { background: var(--os-chip); color: var(--os-text); }
+.obs-row .mono { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.obs-row .n { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--os-text); }
+
+/* Publishing: what travels, and what does not. */
+.publish-what { display: flex; gap: 18px; margin: 4px 0 10px; }
+.publish-what .col { flex: 1; min-width: 0; }
+.publish-what .kv { display: flex; gap: 8px; padding: 3px 0; font-size: 11px; }
+.publish-what .kv .k { flex: none; min-width: 108px; color: var(--os-text-3); }
+.publish-what .kv .v { color: var(--os-text-2); }
+
+/* The inspector's definition section: the fields behind a custom app. */
+.app-section { margin: 4px 0 14px; }
+.stx-inspector .field.row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.stx-inspector .field.row label { margin: 0; }
+.stx-inspector .kv { display: flex; gap: 8px; padding: 3px 0; font-size: 10.5px; }
+.stx-inspector .kv .k { flex: none; min-width: 96px; color: var(--stx-text-3); }
+.stx-inspector .kv .v { color: var(--stx-text-2); }
+
+/* ── The Manual (help.js) ────────────────────────────────────────────────────
+   The repository's own documentation, rendered, plus the live tool catalogue.
+   Prose wants a measure and a rhythm the ops panes do not, so it gets its own
+   type here rather than borrowing a list's. */
+
+.help-list { width: 300px; }
+.help-pane { padding: 0; }
+.help-source {
+  padding: 10px 20px 22px; font-size: 10.5px; color: var(--os-text-3);
+  border-top: 1px solid var(--os-line); font-family: var(--mono);
+}
+
+.md { padding: 16px 20px 8px; max-width: 74ch; }
+.md-h {
+  margin: 22px 0 8px; line-height: 1.3; color: var(--os-text);
+  font-weight: 650; scroll-margin-top: 8px;
+}
+.md h1.md-h { font-size: 18px; margin-top: 4px; }
+.md h2.md-h { font-size: 14.5px; }
+.md h3.md-h { font-size: 12.5px; }
+.md h4.md-h { font-size: 11.5px; color: var(--os-text-2); }
+.md-p { margin: 0 0 11px; font-size: 12px; line-height: 1.65; color: var(--os-text-2); }
+.md-list { margin: 0 0 11px; padding-left: 20px; font-size: 12px; line-height: 1.65; color: var(--os-text-2); }
+.md-list li { margin: 2px 0; }
+.md-quote {
+  margin: 0 0 11px; padding: 6px 12px; border-left: 2px solid var(--os-accent);
+  background: var(--os-chip); font-size: 12px; line-height: 1.6; color: var(--os-text-2);
+}
+.md-rule { margin: 18px 0; border: 0; border-top: 1px solid var(--os-line); }
+.md code, .ops-pane .md-code code {
+  font-family: var(--mono); font-size: 11px;
+  background: var(--os-chip); border-radius: 4px; padding: 1px 4px; color: var(--os-text);
+}
+.md-code {
+  margin: 0 0 12px; padding: 10px 12px; border-radius: 8px; overflow-x: auto;
+  background: var(--os-bg-1); border: 1px solid var(--os-line);
+}
+.md-code code { background: none; padding: 0; line-height: 1.6; color: var(--os-text-2); white-space: pre; }
+.md a { color: var(--os-accent); }
+.md-ref { color: var(--os-text); border-bottom: 1px dotted var(--os-line); }
+.md-table-wrap { overflow-x: auto; margin: 0 0 12px; }
+.md-table { border-collapse: collapse; font-size: 11px; min-width: 100%; }
+.md-table th, .md-table td {
+  border: 1px solid var(--os-line); padding: 5px 9px; text-align: left;
+  color: var(--os-text-2); vertical-align: top;
+}
+.md-table th { color: var(--os-text); font-weight: 650; background: var(--os-chip); }
+
+/* A tool page: the arguments, and which of them are not optional. */
+.help-pane .ops-pane-head + .md-p { padding: 0 12px; margin-top: 10px; }
+.help-pane .kv { align-items: flex-start; }
+.help-pane .kv .v { font-family: inherit; text-align: right; max-width: 62%; }
+.help-pane .kv .v div { color: var(--os-text-2); margin-top: 2px; }
+.help-pane .req { color: var(--os-accent); font-size: 9.5px; font-weight: 700; letter-spacing: .06em; }
+.help-pane .md-code { margin: 0 12px 12px; }
+
+/* ── First run (first-run.js) ────────────────────────────────────────────────
+   One screen, over the desktop it is about to build. Deliberately calm: this is
+   the only moment a person is reading rather than doing. */
+
+.fr-scrim {
+  position: fixed; inset: 0; z-index: 900; overflow: auto;
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 5vh 20px; background: var(--os-bg-0);
+}
+.fr-panel {
+  width: min(760px, 100%); background: var(--os-bg-1); color: var(--os-text);
+  border: 1px solid var(--os-line); border-radius: 16px; padding: 26px 28px 22px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .45);
+}
+.fr-head { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 20px; }
+.fr-mark {
+  width: 38px; height: 38px; flex: none; border-radius: 11px; display: grid; place-items: center;
+  background: var(--os-accent-dim); color: var(--os-accent);
+}
+.fr-title { margin: 0 0 3px; font-size: 19px; font-weight: 650; letter-spacing: -.01em; }
+.fr-sub { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--os-text-2); }
+
+.fr-idea { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 24px; }
+.fr-card {
+  position: relative; padding: 12px 14px 12px 34px; border-radius: 10px;
+  background: var(--os-chip); border: 1px solid var(--os-line);
+}
+.fr-card b { display: block; font-size: 12.5px; margin-bottom: 3px; }
+.fr-card p { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--os-text-2); }
+.fr-n {
+  position: absolute; left: 12px; top: 12px; width: 16px; height: 16px; border-radius: 50%;
+  display: grid; place-items: center; font-size: 9.5px; font-weight: 700;
+  background: var(--os-accent-dim); color: var(--os-accent);
+}
+
+.fr-pick h2 { margin: 0 0 3px; font-size: 13.5px; font-weight: 650; }
+.fr-seeds { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+.fr-seed {
+  display: flex; flex-direction: column; gap: 2px; align-items: flex-start;
+  padding: 11px 12px; text-align: left; cursor: pointer; font: inherit;
+  border: 1px solid var(--os-line); border-radius: 10px;
+  background: var(--os-bg-2); color: var(--os-text);
+}
+.fr-seed:hover { border-color: color-mix(in srgb, var(--os-accent) 45%, var(--os-line)); }
+.fr-seed.on { border-color: var(--os-accent); background: var(--os-accent-dim); }
+.fr-seed:disabled { opacity: .5; cursor: default; }
+.fr-swatch { width: 22px; height: 4px; border-radius: 999px; margin-bottom: 5px; }
+.fr-seed-name { font-size: 12px; font-weight: 600; }
+.fr-seed-desc { font-size: 10.5px; line-height: 1.5; color: var(--os-text-3); }
+
+.fr-actions { display: flex; align-items: center; gap: 14px; margin-top: 22px; }
+.fr-go {
+  height: 34px; padding: 0 18px; border: 0; border-radius: 9px; cursor: pointer;
+  background: var(--os-accent); color: var(--os-bg-0); font: inherit; font-size: 12.5px; font-weight: 650;
+}
+.fr-go:disabled { opacity: .6; cursor: default; }
+.fr-go.small { height: 28px; font-size: 11.5px; margin-top: 12px; }
+.fr-skip {
+  border: 0; background: none; cursor: pointer; font: inherit; font-size: 11.5px;
+  color: var(--os-text-3); text-decoration: underline; text-underline-offset: 3px;
+}
+.fr-skip:disabled { opacity: .5; cursor: default; }
+
+.fr-steps { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--os-line); }
+.fr-step { display: flex; align-items: flex-start; gap: 9px; padding: 3px 0; font-size: 11.5px; color: var(--os-text-2); }
+.fr-step.bad { color: var(--os-err); }
+.fr-dot {
+  width: 7px; height: 7px; margin-top: 5px; flex: none; border-radius: 50%;
+  background: var(--os-line);
+}
+.fr-dot.on { background: var(--os-ok); }
+.fr-dot.bad { background: var(--os-err); }
+.fr-why { color: var(--os-text-3); }
+.fr-foot { margin: 16px 0 0; font-size: 10.5px; line-height: 1.6; color: var(--os-text-3); }
+.fr-foot code { font-family: var(--mono); background: var(--os-chip); border-radius: 4px; padding: 1px 4px; }
+
+@media (max-width: 720px) {
+  .fr-idea, .fr-seeds { grid-template-columns: 1fr; }
+  .fr-panel { padding: 20px 18px 18px; }
+  .fr-actions { flex-direction: column; align-items: stretch; gap: 10px; }
+}
+
+/* A job's pane: the ports that are answering right now, so the next question
+   after "it started" has an answer in the same window. Not attributed to the job
+   — a supervised process does not tell us which ports it bound. */
+.ops-ports { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 6px 12px; border-bottom: 1px solid var(--os-line); }
+.ops-ports .dim { font-size: 10.5px; }
+
+/* Symbols and the diff-against-saved panel share the find panel's shape: a row
+   of controls, then a scrolling list. Same furniture, same muscle memory. */
+.code-symbols, .code-diff { flex: none; border-bottom: 1px solid var(--stx-line); background: var(--stx-bg-2); }
+.code-symbols .row, .code-diff .row { display: flex; align-items: center; gap: 6px; padding: 7px 10px; }
+.code-symbols .row .spacer, .code-diff .row .spacer { flex: 1; }
+.code-symbols input {
+  height: 24px; min-width: 0; flex: 1 1 120px; padding: 0 8px; border: 1px solid var(--stx-line);
+  border-radius: 6px; background: var(--stx-bg-1); color: var(--stx-text); font-size: 11.5px;
+}
+.code-symbols .dim, .code-diff .dim { flex: none; font-size: 10.5px; white-space: nowrap; }
+.code-symbols .hits { max-height: 200px; overflow: auto; border-top: 1px solid var(--stx-line); }
+.code-symbols .hit {
+  display: flex; gap: 8px; align-items: baseline; width: 100%; padding: 3px 10px;
+  border: 0; background: transparent; text-align: left; font-size: 10.5px; color: var(--stx-text-2); cursor: pointer;
+}
+.code-symbols .hit:hover, .code-symbols .hit:focus-visible { background: var(--stx-chip); color: var(--stx-text); }
+.code-symbols .hit code { font-family: var(--mono); color: var(--stx-accent); flex: none; min-width: 40px; }
+.code-symbols .hit .tx { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.code-symbols .hit .ln { margin-left: auto; color: var(--stx-text-3); flex: none; }
+
+.code-diff-body { max-height: 220px; overflow: auto; border-top: 1px solid var(--stx-line); padding: 4px 0 6px; }
+.code-diff-line { display: flex; gap: 8px; padding: 0 10px; font-family: var(--mono); font-size: 10.5px; line-height: 1.55; }
+.code-diff-line .ln { flex: none; min-width: 28px; text-align: right; color: var(--stx-text-3); }
+.code-diff-line .mk { flex: none; width: 8px; color: var(--stx-text-3); }
+.code-diff-line .tx { white-space: pre; overflow: hidden; text-overflow: ellipsis; color: var(--stx-text-2); }
+.code-diff-line.add { background: color-mix(in srgb, var(--stx-ok, #43d17f) 12%, transparent); }
+.code-diff-line.add .mk, .code-diff-line.add .tx { color: var(--stx-ok, #43d17f); }
+.code-diff-line.del { background: color-mix(in srgb, var(--stx-err, #ff6b6b) 12%, transparent); }
+.code-diff-line.del .mk, .code-diff-line.del .tx { color: var(--stx-err, #ff6b6b); }
+
+/* A notification that was recorded rather than announced: present, readable, and
+   clearly not asking for anything (goal.md T3.3). */
+.notif.quiet { opacity: .68; }
+.notif.quiet .hd b { font-weight: 550; }
+
+/* A proposal says which parts of the document it would touch, before it runs.
+   Not a predicted diff — a call that has not run cannot be diffed, and after
+   applying, "what changed" reads the history's own (goal.md T2.3). */
+.proposal .touches {
+  display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+  padding: 6px 10px 0; font-size: 10.5px;
+}
+.proposal .touches .dim { flex: none; }
+.chip-tag {
+  padding: 1px 6px; border-radius: 999px; font-size: 9.5px; font-weight: 600;
+  background: var(--stx-chip, var(--os-chip)); color: var(--stx-text-2, var(--os-text-2));
+}
+.chip-tag.warn { background: var(--os-accent-dim); color: var(--os-accent); }
+.proposal.applied { opacity: .85; }
+.proposal.applied .hd b { font-weight: 550; }
+
+/* A search box that is the point of its app takes the width the bar has. */
+.app-bar .ops-search.grow { flex: 1 1 200px; min-width: 120px; }
+
+/* A time column wide enough for the longest time it will hold, so the rows read
+   down as well as across. */
+.row-line .sz.when { min-width: 76px; }
