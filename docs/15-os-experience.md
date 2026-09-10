@@ -241,6 +241,26 @@ app with its capabilities); what they never had arrives at its default. Today's
 ceilings still apply to a document from before them, and a machine from the future
 is named as such instead of being cut down to fit.
 
+### Where a served folder binds
+
+`cell.endpoint(port)` says how the Gateway reaches something inside a Cell: the local
+backend answers `127.0.0.1`, because it shares the host's loopback, and a container
+answers its **own IP**. A server has to bind an address on the other end of that, and
+the narrowest one that works — which on a local Cell is loopback, never the host's LAN
+interfaces, and inside a container is `0.0.0.0`, meaning that container's interfaces.
+
+The welcome server bound `127.0.0.1` unconditionally. On Docker that produced the
+hardest kind of failure to read: the page was written, the job was running, the port
+was exposed, every step reported success — and the page did not load, because nothing
+outside the container can reach the container's loopback. `firstRunBindHost(backend)`
+decides it now, and every branch takes the address as an argument (the Python and
+busybox ones were binding *every* interface all along, which was the opposite mistake).
+
+A job that dies also reports the first line that reads like a failure rather than the
+last line printed: a crashed Node process signs off with its own version number, so
+"could not serve the project — Node.js v22.23.2" was the message that reached a person
+whose real problem was `EADDRINUSE`.
+
 ### What a cell image has to have
 
 Three things, and the default image did not have two of them:

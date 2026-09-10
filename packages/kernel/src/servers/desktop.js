@@ -37,7 +37,7 @@ import {
   summarizeDoc, silhouetteSvg, READ_ONLY_DESKTOP_TOOLS,
   writeCheckpoint, readCheckpoint, removeCheckpoint, restoreCheckpoint,
   KEY_ACTIONS, DEFAULT_KEYS, isChord, NOTIFY_KINDS, prettyChord,
-  firstRunFiles, firstRunServer, firstRunPort, proposalImpact,
+  firstRunFiles, firstRunServer, firstRunPort, firstRunBindHost, proposalImpact,
 } from "../../../os/src/index.js";
 import { loadManifest, saveManifest } from "../../../manifest/src/manifest.js";
 import { CATALOG } from "../catalog.js";
@@ -419,7 +419,11 @@ export function desktopServer(deps) {
             else if (!(port = await firstRunPort(asMe))) {
               step("serve the project", false, "every port it tried is already in use on this host — expose one yourself from Ports");
             } else {
-              const started = await asMe("proc", "start", { cmd: found.cmd(port), name: "welcome" });
+              // The Cell decides the address: the Gateway reaches a local Cell
+              // on loopback and a container on its own IP, and binding the other
+              // one produces a server that runs, exposes, and cannot be reached.
+              const bind = firstRunBindHost(kernel?.cell?.backend ?? "local");
+              const started = await asMe("proc", "start", { cmd: found.cmd(port, bind), name: "welcome" });
               if (!started.ok) step(`serve the project with ${found.label}`, false, started.error);
               else {
                 job = started.result;
@@ -431,8 +435,14 @@ export function desktopServer(deps) {
                 await new Promise((r) => setTimeout(r, 700));
                 const after = await asMe("proc", "logs", { id: job.id, tail: 6 });
                 const alive = after.ok && after.result.state === "running";
+                // The *first* line that reads like a failure, not the last line
+                // printed: a crashed Node process signs off with its own version
+                // number, and reporting "Node.js v22.23.2" as the reason a server
+                // did not start is a sentence that helps nobody.
+                const said = (after.result?.logs ?? []).map((l) => l.text).filter(Boolean);
                 const why = alive ? null
-                  : ((after.result?.logs ?? []).map((l) => l.text).filter(Boolean).at(-1)
+                  : (said.find((t) => /error|EADDRINUSE|EACCES|not found|denied|refused/i.test(t))
+                    ?? said[0]
                     ?? `it exited with code ${after.result?.code ?? "?"}`);
                 if (!step(`serve the project with ${found.label} on :${port}`, alive, why)) {
                   port = null;

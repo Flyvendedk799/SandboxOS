@@ -60,7 +60,7 @@ const { getKernel, _resetKernels } = await import("../packages/kernel/src/kernel
 const { createServer } = await import("../apps/gateway/src/server.js");
 const { killAllSessionsEverywhere, attachSession } = await import("../packages/kernel/src/pty-sessions.js");
 const { _resetCells } = await import("../packages/cell/src/cell.js");
-const { firstRunServer, firstRunServeJs } = await import("../packages/os/src/first-run.js");
+const { firstRunServer, firstRunServeJs, firstRunBindHost } = await import("../packages/os/src/first-run.js");
 const config = (await import("../packages/config/src/config.js")).default;
 
 const failures = [];
@@ -143,7 +143,9 @@ try {
   if (!check(!!server.cmd, `the image has something that can serve a folder (${server.label ?? server.why})`)) {
     throw new Error(server.why);
   }
-  const httpd = await ok("proc", "start", { cmd: server.cmd(8099), name: "welcome" });
+  // 0.0.0.0 inside the container: the Gateway reaches it by the container's IP,
+  // and a server on the container's loopback is invisible from outside it.
+  const httpd = await ok("proc", "start", { cmd: server.cmd(8099, firstRunBindHost("docker")), name: "welcome" });
   await ok("ports", "expose", { port: 8099, name: "www" });
   const served = await until(async () => {
     const r = await fetch(`${base}/${slug}/p/8099/`, { headers: { cookie: `sbx_session=${session}` }, signal: AbortSignal.timeout(3000) }).catch(() => null);
