@@ -20,7 +20,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import os from "node:os";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { safeSpawn } from "./spawn.js";
 import config from "../../config/src/config.js";
 import { allocateTap, releaseTap, getTapForSandbox } from "../../control-db/src/registry.js";
@@ -277,8 +277,11 @@ export class FirecrackerBackend {
     const fullCmd = `cd ${WORKDIR} && echo $$ > ${pidFile(marker)} 2>/dev/null; exec ${inner}`;
     const proc = safeSpawn("ssh", this._sshArgs([fullCmd]), {}, (err) => callback({ type: "stderr", chunk: `sandboxos: could not run ssh: ${err.code ?? err.message}
 ` }));
-    const handle = remoteHandle(proc, marker, (script) =>
-      sh("ssh", [...this._sshArgs(), script], { timeoutMs: 10_000 }));
+    const handle = remoteHandle(proc, marker,
+      (script) => sh("ssh", [...this._sshArgs(), script], { timeoutMs: 10_000 }),
+      // …and synchronously for the shutdown path, which exits straight after
+      // calling this: a promise there is a kill that never happens.
+      { runInCellSync: (script) => { try { spawnSync("ssh", [...this._sshArgs(), script], { timeout: 10_000, stdio: "ignore" }); } catch { /* the VM may be gone */ } } });
     const timer = setTimeout(() => handle.kill("SIGKILL"), timeoutMs);
     proc.stdout.on("data", (d) => callback({ type: "stdout", chunk: d.toString() }));
     proc.stderr.on("data", (d) => callback({ type: "stderr", chunk: d.toString() }));

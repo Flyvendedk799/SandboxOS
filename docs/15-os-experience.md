@@ -241,6 +241,28 @@ app with its capabilities); what they never had arrives at its default. Today's
 ceilings still apply to a document from before them, and a machine from the future
 is named as such instead of being cut down to fit.
 
+### Stopping something you reach indirectly
+
+A supervised process in a Docker or Firecracker Cell is not our child. The local
+`docker exec` / `ssh` client is; the process that matters lives inside, and the
+in-Cell shell records its pid so `remoteHandle` can signal *that*.
+
+That kill used to be a fire-and-forget promise. On the one path where it matters
+most — the Gateway's shutdown, which calls `stopAllProcs` and then `process.exit` —
+it never left the starting line. A dev server inside a container survived every
+restart, holding its port, with nothing left running that knew it existed: exactly
+the orphan the shutdown path exists to prevent, and the same mistake `killTree` made
+on Windows before it was made synchronous.
+
+Every backend that reaches a Cell indirectly now hands `remoteHandle` a synchronous
+killer as well as the async one, and `kill()` prefers it. "Stopped" means stopped by
+the time the call returns. A backend that cannot offer one still works the old way.
+
+The container leg checks both halves of this on a real container: that `ports.scan`
+*finds* a listening port on an image with neither `ss` nor `netstat` — the
+`/proc/net/tcp` fallback, which the new default image is the first to need — and that
+stopping a job actually frees the port inside the container.
+
 ### Where a served folder binds
 
 `cell.endpoint(port)` says how the Gateway reaches something inside a Cell: the local

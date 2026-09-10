@@ -68,7 +68,7 @@ export function killScript(marker, signal) {
  * @param {string} marker the pid-file marker the remote shell recorded to
  * @param {(script: string) => Promise<any>} runInCell run a shell one-liner inside the Cell
  */
-export function remoteHandle(client, marker, runInCell) {
+export function remoteHandle(client, marker, runInCell, { runInCellSync = null } = {}) {
   return {
     // The locally visible pid is the client; the in-Cell pid is what we signal.
     pid: client.pid ?? null,
@@ -77,7 +77,20 @@ export function remoteHandle(client, marker, runInCell) {
     kill(signal = "SIGTERM") {
       // Signal inside the Cell first so the real process dies, then drop the
       // client so its streams close and `done` fires.
-      Promise.resolve(runInCell(killScript(marker, signal))).catch(() => {});
+      //
+      // Synchronously wherever the backend can offer it. This used to be a
+      // fire-and-forget promise, and on the path that matters most — the
+      // Gateway's shutdown, which calls stopAllProcs and then `process.exit` —
+      // the exec never left the starting line. A dev server inside a container
+      // outlived every restart, holding its port, with nothing left running that
+      // knew it existed: the exact orphan the shutdown path was written to
+      // prevent, and the same mistake killTree made on Windows.
+      const script = killScript(marker, signal);
+      if (runInCellSync) {
+        try { runInCellSync(script); } catch { /* the Cell may already be gone */ }
+      } else {
+        Promise.resolve(runInCell(script)).catch(() => {});
+      }
       try { client.kill("SIGKILL"); } catch { /* already gone */ }
       return true;
     },

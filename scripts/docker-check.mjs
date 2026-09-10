@@ -152,9 +152,24 @@ try {
     return !!r && r.ok && (await r.text()).includes("served from a container");
   });
   check(served, "a port listening inside the container is served under the slug");
+  // `node:22-slim` has neither `ss` nor `netstat`, so this is the /proc/net/tcp
+  // fallback doing the work — and the check is that it *finds* the port, not
+  // merely that it ran. A scan that can look and sees nothing is the same empty
+  // list as a scan that could not look, to everyone downstream of it.
   const scan = await ok("ports", "scan", {});
-  check(!scan.unavailable, `the port scan can run in this image (${scan.unavailable ?? `${scan.listening?.length ?? 0} listening`})`);
+  check(!scan.unavailable, `the port scan can run in this image (${scan.unavailable ?? "it can"})`);
+  check((scan.listening ?? []).some((p) => p.port === 8099),
+    `and it finds the server that is listening (${(scan.listening ?? []).map((p) => p.port).join(", ") || "nothing"})`);
+
+  // Stopping it releases the port. The kill has to reach *inside* the container:
+  // a fire-and-forget `docker exec` left dev servers holding their ports across
+  // a Gateway restart, with nothing left running that knew about them.
   await ok("proc", "stop", { id: httpd.id });
+  const released = await until(async () => {
+    const s2 = await ok("ports", "scan", {});
+    return !(s2.listening ?? []).some((p) => p.port === 8099);
+  }, 15_000);
+  check(released, "stopping the job frees the port inside the container");
 
   // ── a shell session in a container ────────────────────────────────────────
   let saw = "";
