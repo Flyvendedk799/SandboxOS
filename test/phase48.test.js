@@ -140,3 +140,76 @@ test("the manager is resolved once, not on every call", async () => {
   const probes = cell.ran.filter((c) => c.startsWith("command -v"));
   assert.equal(probes.length, 1, `asked once (${probes.length})`);
 });
+
+// ── where a welcome server binds ───────────────────────────────────────────
+//
+// A deployment showed the shape of this one whole: the page was written, the
+// server was running, the port was exposed — and the page did not load, because
+// the server had bound the *container's* loopback and the Gateway reaches a
+// container by its IP. Running, exposed, unreachable: the hardest failure to
+// read, because every part of it reports success.
+
+test("the bind address is the other end of cell.endpoint()", async () => {
+  const { firstRunBindHost } = await import("../packages/os/src/first-run.js");
+  // The local Cell shares the host's loopback, and the Gateway connects there.
+  assert.equal(firstRunBindHost("local"), "127.0.0.1");
+  // A container is reached by its own IP, so loopback inside it is invisible.
+  assert.equal(firstRunBindHost("docker"), "0.0.0.0");
+  assert.equal(firstRunBindHost("hardened-docker"), "0.0.0.0");
+  assert.equal(firstRunBindHost("firecracker"), "0.0.0.0");
+  assert.equal(firstRunBindHost(undefined), "0.0.0.0", "an unknown backend is not assumed to be local");
+});
+
+test("every server it can start takes the address, not just the port", async () => {
+  const { firstRunServer } = await import("../packages/os/src/first-run.js");
+  const shell = (binaries, applets = ["httpd"]) => async (_s, _t, a) => {
+    const cmd = String(a.cmd);
+    const which = /^command -v (\S+)/.exec(cmd);
+    if (which) return { ok: true, result: { code: binaries.includes(which[1]) ? 0 : 1 } };
+    if (cmd.startsWith("busybox --list")) {
+      const wanted = /grep -qx (\S+)/.exec(cmd)?.[1];
+      return { ok: true, result: { code: binaries.includes("busybox") && applets.includes(wanted) ? 0 : 1 } };
+    }
+    return { ok: true, result: { code: 1 } };
+  };
+
+  const node = await firstRunServer(shell(["node"]));
+  assert.equal(node.cmd(8080, "0.0.0.0"), "node welcome/serve.cjs 8080 0.0.0.0");
+  const py = await firstRunServer(shell(["python3"]));
+  assert.match(py.cmd(8080, "0.0.0.0"), /--bind 0\.0\.0\.0/);
+  const bb = await firstRunServer(shell(["busybox"]));
+  assert.match(bb.cmd(8080, "0.0.0.0"), /-p 0\.0\.0\.0:8080/);
+  const hd = await firstRunServer(shell(["httpd"]));
+  assert.match(hd.cmd(8080, "127.0.0.1"), /-p 127\.0\.0\.1:8080/);
+
+  // Every one of them, on a local Cell, keeps to loopback rather than the LAN.
+  for (const bins of [["node"], ["python3"], ["busybox"], ["httpd"]]) {
+    const s = await firstRunServer(shell(bins));
+    assert.match(s.cmd(8080, "127.0.0.1"), /127\.0\.0\.1/, `${bins[0]} binds what it is told`);
+    assert.equal(/0\.0\.0\.0/.test(s.cmd(8080, "127.0.0.1")), false);
+  }
+});
+
+test("the node server binds what it is given and says where it listened", async () => {
+  const { firstRunServeJs } = await import("../packages/os/src/first-run.js");
+  const src = firstRunServeJs();
+  assert.match(src, /const host = process\.argv\[3\] \|\| '127\.0\.0\.1';/,
+    "the address is an argument, and the safe one is the default");
+  assert.match(src, /\.listen\(port, host,/);
+  assert.equal(/listen\(port, '127\.0\.0\.1'/.test(src), false, "not hardcoded any more");
+  assert.match(src, /welcome on ' \+ host \+ ':' \+ port/, "and the log says which address it got");
+});
+
+test("setup asks the Cell where to bind rather than assuming", () => {
+  const desktop = readSource(new URL("../packages/kernel/src/servers/desktop.js", import.meta.url));
+  assert.match(desktop, /const bind = firstRunBindHost\(kernel\?\.cell\?\.backend \?\? "local"\);/);
+  assert.match(desktop, /found\.cmd\(port, bind\)/);
+});
+
+test("a job that died reports the line that says why, not the last line printed", () => {
+  const desktop = readSource(new URL("../packages/kernel/src/servers/desktop.js", import.meta.url));
+  assert.match(desktop, /said\.find\(\(t\) => \/error\|EADDRINUSE\|EACCES\|not found\|denied\|refused\/i\.test\(t\)\)/);
+  // The failure that prompted this reported "Node.js v22.23.2" as the reason a
+  // server could not start, which is Node's sign-off line after a stack.
+  assert.match(desktop, /a crashed Node process signs off with its own version/);
+});

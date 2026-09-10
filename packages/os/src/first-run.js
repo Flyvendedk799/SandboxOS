@@ -102,14 +102,28 @@ export function firstRunFiles(machineName, seed) {
  * Kernel's result envelope, so this stays pure and testable.
  */
 export async function firstRunServer(probe) {
+  // Every builder takes the address to bind as well as the port, because the two
+  // Cell backends are reached differently and a server that binds the wrong one
+  // is invisible rather than broken — the hardest kind of failure to read.
+  //
+  //   local:  the Cell shares the host's loopback, so 127.0.0.1 is both what the
+  //           Gateway connects to and the narrowest thing that can work.
+  //   docker: the Gateway connects to the *container's* IP, so a server on the
+  //           container's loopback is unreachable from outside its namespace.
+  //           0.0.0.0 there means "this container's interfaces", which is what a
+  //           sandbox is for.
+  //
+  // The python and busybox branches bound every interface all along; only the
+  // node one was narrow, which is how a deployment ended up with a welcome page
+  // that was running, exposed, and unreachable.
   const candidates = [
-    { label: "node", test: "command -v node", cmd: (port) => `node welcome/serve.cjs ${port}` },
-    { label: "python3", test: "command -v python3", cmd: (port) => `python3 -m http.server ${port} --directory welcome` },
-    { label: "python", test: "command -v python", cmd: (port) => `python -m http.server ${port} --directory welcome` },
+    { label: "node", test: "command -v node", cmd: (port, host) => `node welcome/serve.cjs ${port} ${host}` },
+    { label: "python3", test: "command -v python3", cmd: (port, host) => `python3 -m http.server ${port} --bind ${host} --directory welcome` },
+    { label: "python", test: "command -v python", cmd: (port, host) => `python -m http.server ${port} --bind ${host} --directory welcome` },
     // Not "is busybox here" but "does this busybox have httpd": `--list` prints
     // the applets it was built with, and exits 0 while `--help` exits 1.
-    { label: "busybox httpd", test: "busybox --list 2>/dev/null | grep -qx httpd", cmd: (port) => `busybox httpd -f -p ${port} -h welcome` },
-    { label: "httpd", test: "command -v httpd", cmd: (port) => `httpd -f -p ${port} -h welcome` },
+    { label: "busybox httpd", test: "busybox --list 2>/dev/null | grep -qx httpd", cmd: (port, host) => `busybox httpd -f -p ${host}:${port} -h welcome` },
+    { label: "httpd", test: "command -v httpd", cmd: (port, host) => `httpd -f -p ${host}:${port} -h welcome` },
   ];
   const tried = [];
   for (const c of candidates) {
@@ -121,6 +135,18 @@ export async function firstRunServer(probe) {
     tried.push(c.label);
   }
   return { cmd: null, why: `this image has none of: ${tried.join(", ")} — the folder is there, but nothing here can serve it` };
+}
+
+/**
+ * Where the welcome server should listen, for a given Cell backend.
+ *
+ * Not a preference: it is the other end of `cell.endpoint()`. The local backend
+ * answers 127.0.0.1 and a container answers its own IP, so the server has to bind
+ * something the Gateway will actually connect to — and the narrowest such thing,
+ * which on a local Cell is loopback and never the host's LAN interfaces.
+ */
+export function firstRunBindHost(backend) {
+  return backend === "local" ? "127.0.0.1" : "0.0.0.0";
 }
 
 /** The tiny static server the Node branch runs. Written with the project. */
@@ -137,6 +163,9 @@ export function firstRunServeJs() {
     "const path = require('node:path');",
     "",
     "const port = Number(process.argv[2]) || 8080;",
+    "// The address is passed in rather than assumed: inside a container, binding",
+    "// loopback would make this page unreachable from outside the container.",
+    "const host = process.argv[3] || '127.0.0.1';",
     "const root = path.join(__dirname);",
     "const types = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json' };",
     "",
@@ -150,7 +179,7 @@ export function firstRunServeJs() {
     "    res.writeHead(200, { 'Content-Type': types[path.extname(file)] || 'application/octet-stream' });",
     "    res.end(body);",
     "  });",
-    "}).listen(port, '127.0.0.1', () => console.log('welcome on :' + port));",
+    "}).listen(port, host, () => console.log('welcome on ' + host + ':' + port));",
     "",
   ].join("\n");
 }
