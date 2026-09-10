@@ -3,12 +3,12 @@
 // Two kinds of thing here, both found by looking at the OS rather than at the
 // code: a conditional-write rule that surfaced as an accusation, and a set of
 // layout rules that were quietly wrong in every list the machine has.
-import "./_setup.js";
+import { readSource } from "./_setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
-const read = (rel) => fs.readFileSync(new URL(rel, import.meta.url), "utf8");
+const read = (rel) => readSource(new URL(rel, import.meta.url));
 const client = read("../apps/gateway/public/js/os/client.js");
 const css = read("../apps/gateway/public/os.css");
 const ops = read("../apps/gateway/public/js/os/ops.js");

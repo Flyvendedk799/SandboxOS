@@ -13,7 +13,7 @@
 //     was reused whatever it had been built from.
 //   · `pkg` hardcoded `apk`, so on any other image its first call died with
 //     "cannot read properties of undefined".
-import "./_setup.js";
+import { readSource } from "./_setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -22,7 +22,7 @@ import config from "../packages/config/src/config.js";
 import { ptyWrapper } from "../packages/cell/src/pty.js";
 import { pkgServer } from "../packages/kernel/src/servers/pkg.js";
 
-const read = (rel) => fs.readFileSync(new URL(rel, import.meta.url), "utf8");
+const read = (rel) => readSource(new URL(rel, import.meta.url));
 
 // ── the default image can be a machine ─────────────────────────────────────
 

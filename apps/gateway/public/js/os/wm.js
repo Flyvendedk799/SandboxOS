@@ -450,6 +450,16 @@ export function createDesktop({ root, ctx = {} }) {
       onkeydown: (e) => {
         // The window's own keyboard, on its chrome: move it, size it, close it,
         // without a pointer.
+        //
+        // These commit *unconditionally*, unlike a drag or an inspector field.
+        // An arrow key means "eight pixels right of wherever it is now": it is
+        // relative, it is repeated, and it is not competing with anybody about a
+        // position. Sent with `expectRev`, a nudge pressed in the moment between
+        // an agent's write and this tab hearing about it was refused and
+        // *silently dropped* — the window simply did not move, and pressing the
+        // key again worked, which is the kind of intermittence people stop
+        // reporting and start working around.
+        const commit = { conditional: false };
         const step = e.shiftKey ? 40 : 8;
         const w = doc().windows.find((x) => x.id === win.id);
         if (!w) return;
@@ -458,13 +468,15 @@ export function createDesktop({ root, ctx = {} }) {
             e.preventDefault();
             const dw = e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0;
             const dh = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
-            call("resize", { id: win.id, w: Math.max(200, w.w + dw), h: Math.max(120, w.h + dh) }).catch(() => {});
+            call("resize", { id: win.id, w: Math.max(200, w.w + dw), h: Math.max(120, w.h + dh) }, commit)
+              .catch((err) => { if (!err?.silent) toastError("Could not resize it", err); });
             return;
           }
           e.preventDefault();
           const dx = e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0;
           const dy = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
-          call("move", { id: win.id, x: Math.max(0, w.x + dx), y: Math.max(0, w.y + dy) }).catch(() => {});
+          call("move", { id: win.id, x: Math.max(0, w.x + dx), y: Math.max(0, w.y + dy) }, commit)
+            .catch((err) => { if (!err?.silent) toastError("Could not move it", err); });
           return;
         }
         if (e.key === "Enter") { e.preventDefault(); raise(win.id); (wins.get(win.id)?.body?.querySelector("input, textarea, button, [tabindex]") ?? bar).focus?.(); }

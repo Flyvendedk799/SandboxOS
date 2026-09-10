@@ -3,7 +3,7 @@
 // Track 3 (and T2.4) of goal.md: a desktop you can name and come back to, a
 // keyboard that is a document field rather than a hardcoded list, and attention
 // that belongs to the person rather than to whatever wants to interrupt them.
-import "./_setup.js";
+import { readSource } from "./_setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -149,7 +149,7 @@ test("the chord grammar matches events the way a shell needs", () => {
 });
 
 test("the shell reads the map rather than a hardcoded list", () => {
-  const shell = fs.readFileSync(new URL("../apps/gateway/public/js/os/shell.js", import.meta.url), "utf8");
+  const shell = readSource(new URL("../apps/gateway/public/js/os/shell.js", import.meta.url));
   assert.match(shell, /import \{ KEY_ACTIONS, matchesChord, prettyChord \} from "\.\/lib\/keys\.js"/);
   assert.match(shell, /function actionFor\(e\)/, "one place decides which action a key is");
   assert.match(shell, /const keys = os\.doc\?\.shell\?\.keys \?\? \{\}/, "and it reads the document");
@@ -189,7 +189,7 @@ test("the allow list is closed, and normalization keeps it that way", async () =
 });
 
 test("the switch is reachable from the keyboard and says which way it went", () => {
-  const shell = fs.readFileSync(new URL("../apps/gateway/public/js/os/shell.js", import.meta.url), "utf8");
+  const shell = readSource(new URL("../apps/gateway/public/js/os/shell.js", import.meta.url));
   assert.match(shell, /toggleDnd: \(\) => \{/);
   assert.match(shell, /Everything is still recorded/, "and it explains what it does");
   assert.match(shell, /class: dnd \? "dnd" : ""/, "the bell shows the state");

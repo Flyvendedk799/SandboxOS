@@ -4,7 +4,7 @@
 // things you actually do with a machine — processes, ports, agents, secrets,
 // sync, access, the audit log — are apps on the desktop rather than reasons to
 // leave it for a console.
-import "./_setup.js";
+import { readSource } from "./_setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -131,8 +131,8 @@ test("every built-in declares the capabilities it needs, and they are real tools
 });
 
 test("the built-ins are wired into the shell, not just listed", () => {
-  const ops = fs.readFileSync(new URL("../apps/gateway/public/js/os/ops.js", import.meta.url), "utf8");
-  const builtins = fs.readFileSync(new URL("../apps/gateway/public/js/os/builtins.js", import.meta.url), "utf8");
+  const ops = readSource(new URL("../apps/gateway/public/js/os/ops.js", import.meta.url));
+  const builtins = readSource(new URL("../apps/gateway/public/js/os/builtins.js", import.meta.url));
   const exported = ops.split("export const OPS_APPS")[1] ?? "";
   for (const id of ["jobs", "ports", "agents", "secrets", "sync", "access", "audit"]) {
     assert.ok(new RegExp(`^const ${id} = \\{`, "m").test(ops), `ops.js has no app called ${id}`);

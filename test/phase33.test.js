@@ -4,7 +4,7 @@
 // app whose errors reach the person who can fix them, and a capability ledger
 // that answers "what can this app do, and what has it done" from the window it
 // is doing it in.
-import "./_setup.js";
+import { readSource } from "./_setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -128,7 +128,7 @@ test("the assistant captures desktop writes and lets desktop reads through", () 
   // read it: a mutation is captured, a read is not.
   for (const t of ["state", "summarize", "appRead", "proposals"]) assert.ok(READ_ONLY_DESKTOP_TOOLS.has(t), t);
   for (const t of ["themeSet", "open", "move", "appWrite", "distroFork"]) assert.ok(!READ_ONLY_DESKTOP_TOOLS.has(t), t);
-  const src = fs.readFileSync(new URL("../packages/assistant/src/assistant.js", import.meta.url), "utf8");
+  const src = readSource(new URL("../packages/assistant/src/assistant.js", import.meta.url));
   assert.match(src, /if \(propose && server === "desktop" && !READ_ONLY_DESKTOP_TOOLS\.has\(tool\)\)/);
   assert.match(src, /tool: "propose"/, "and the turn writes one proposal at the end");
 });
@@ -136,7 +136,7 @@ test("the assistant captures desktop writes and lets desktop reads through", () 
 // ── T2.2 · an app's errors reach the person who can fix them ────────────────
 
 test("the bridge reports an app's errors out of its opaque frame", () => {
-  const src = fs.readFileSync(new URL("../apps/gateway/public/js/os/bridge.js", import.meta.url), "utf8");
+  const src = readSource(new URL("../apps/gateway/public/js/os/bridge.js", import.meta.url));
   assert.match(src, /addEventListener\("error"/, "uncaught errors");
   assert.match(src, /unhandledrejection/, "rejected promises");
   assert.match(src, /console\[level\] = /, "and what the app prints");
@@ -147,18 +147,18 @@ test("the bridge reports an app's errors out of its opaque frame", () => {
 });
 
 test("the broker keeps each app's output, bounded, and hands it to the Studio", () => {
-  const src = fs.readFileSync(new URL("../apps/gateway/public/js/os/frames.js", import.meta.url), "utf8");
+  const src = readSource(new URL("../apps/gateway/public/js/os/frames.js", import.meta.url));
   assert.match(src, /export function frameLogs/);
   assert.match(src, /export function onFrameLog/);
   assert.match(src, /while \(list\.length > LOG_KEEP\) list\.shift\(\)/, "an app in a loop is not a leak");
-  const code = fs.readFileSync(new URL("../apps/gateway/public/js/os/code.js", import.meta.url), "utf8");
+  const code = readSource(new URL("../apps/gateway/public/js/os/code.js", import.meta.url));
   assert.match(code, /frameLogs, clearFrameLogs, onFrameLog/, "and the Code tab shows them");
 });
 
 test("the editor can be told to go to a line, which is what a search hit needs", () => {
-  const src = fs.readFileSync(new URL("../apps/gateway/public/js/editor.js", import.meta.url), "utf8");
+  const src = readSource(new URL("../apps/gateway/public/js/editor.js", import.meta.url));
   assert.match(src, /reveal\(line, \{ column = 1, length = 0 \} = \{\}\)/);
-  const code = fs.readFileSync(new URL("../apps/gateway/public/js/os/code.js", import.meta.url), "utf8");
+  const code = readSource(new URL("../apps/gateway/public/js/os/code.js", import.meta.url));
   assert.match(code, /async function replaceIn\(onlyPath\)/, "replace in one file or all of them");
   assert.match(code, /\.reveal\(line, \{ column, length \}\)/, "and a hit is somewhere you can go");
 });

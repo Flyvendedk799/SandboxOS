@@ -8,7 +8,7 @@
 //      sentence about SQLite.
 //   4. A window move costs one document write and no stylesheet bytes, and a
 //      stream that comes back after a gap catches up.
-import "./_setup.js";
+import { readSource } from "./_setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -78,7 +78,7 @@ test("execFileSafe separates 'never ran' from 'ran and failed'", async () => {
 test("the Gateway installs a floor under unhandled errors", () => {
   // The entry point is what installs them; assert the contract rather than
   // re-importing a module that would boot a second Gateway inside the suite.
-  const src = fs.readFileSync(new URL("../apps/gateway/src/index.js", import.meta.url), "utf8");
+  const src = readSource(new URL("../apps/gateway/src/index.js", import.meta.url));
   assert.match(src, /process\.on\("uncaughtException"/);
   assert.match(src, /process\.on\("unhandledRejection"/);
   assert.doesNotMatch(src, /import \{ spawn \} from "node:child_process"/, "the entry point spawns through safeSpawn");
@@ -306,7 +306,7 @@ test("the event stream says where the document is, so a reconnect can catch up",
 });
 
 test("the client pulls when hello disagrees with what it holds", () => {
-  const src = fs.readFileSync(new URL("../apps/gateway/public/js/os/client.js", import.meta.url), "utf8");
+  const src = readSource(new URL("../apps/gateway/public/js/os/client.js", import.meta.url));
   assert.match(src, /addEventListener\("hello"/);
   assert.match(src, /if \(at != null && at !== \(os\.doc\?\.rev \?\? null\)\) loadOs\(\)/);
 });

@@ -16,9 +16,9 @@
 // of the release check already covers, and saying so is more useful than a red
 // mark that means "you did not install something optional".
 //
-// The image is `alpine:latest` unless SANDBOXOS_CELL_IMAGE says otherwise, so
-// the checks below use only what busybox has. There is no Node inside the
-// container, and this script does not pretend there is.
+// The image is whatever SANDBOXOS_CELL_IMAGE says, so nothing here assumes what
+// is inside one: what can serve a folder is asked of the image, with the same
+// probe first run uses, which means this leg exercises that probe too.
 
 import os from "node:os";
 import path from "node:path";
@@ -26,12 +26,24 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 
-const dockerVersion = await new Promise((res) => {
-  const p = execFile("docker", ["version", "--format", "{{.Server.Version}}"], (err, out) => res(err ? null : String(out).trim()));
+const ask = (args) => new Promise((res) => {
+  const p = execFile("docker", args, (err, out) => res(err ? null : String(out).trim()));
   p.on("error", () => res(null));
 });
+
+const dockerVersion = await ask(["version", "--format", "{{.Server.Version}}"]);
 if (!dockerVersion) {
   console.log("docker: not present — skipping the container leg (the local backend is what runs here)");
+  process.exit(0);
+}
+
+// A Windows runner has Docker and runs *Windows* containers, where every Linux
+// image in this project is unrunnable. That is a host this leg does not cover,
+// not a failure of the thing being tested, and reporting it as red taught the
+// matrix to be ignored on one of the three platforms it exists to check.
+const engineOs = await ask(["version", "--format", "{{.Server.Os}}"]);
+if (engineOs && engineOs !== "linux") {
+  console.log(`docker: this engine runs ${engineOs} containers — skipping the container leg (the cell images are Linux)`);
   process.exit(0);
 }
 
@@ -48,6 +60,7 @@ const { getKernel, _resetKernels } = await import("../packages/kernel/src/kernel
 const { createServer } = await import("../apps/gateway/src/server.js");
 const { killAllSessionsEverywhere, attachSession } = await import("../packages/kernel/src/pty-sessions.js");
 const { _resetCells } = await import("../packages/cell/src/cell.js");
+const { firstRunServer, firstRunServeJs } = await import("../packages/os/src/first-run.js");
 const config = (await import("../packages/config/src/config.js")).default;
 
 const failures = [];
@@ -118,8 +131,19 @@ try {
   check(stopped, "and stopping it stops it");
 
   // ── a port inside the container, reachable through the slug ───────────────
-  await ok("fs", "write", { path: "www/index.html", content: "<h1>served from a container</h1>\n" });
-  const httpd = await ok("proc", "start", { cmd: "httpd -f -p 8099 -h /sandbox/www", name: "httpd" });
+  //
+  // What can serve a folder is a property of the image, not something this
+  // script gets to assume: it used to hardcode busybox's httpd, which is absent
+  // from Alpine's busybox build *and* from every Debian image, so this check
+  // failed on both of the images this project has shipped as a default. It asks
+  // the same question first run asks — and by asking it here, exercises it.
+  await ok("fs", "write", { path: "welcome/index.html", content: "<h1>served from a container</h1>\n" });
+  await ok("fs", "write", { path: "welcome/serve.cjs", content: firstRunServeJs() });
+  const server = await firstRunServer((s, t, a) => call(s, t, a));
+  if (!check(!!server.cmd, `the image has something that can serve a folder (${server.label ?? server.why})`)) {
+    throw new Error(server.why);
+  }
+  const httpd = await ok("proc", "start", { cmd: server.cmd(8099), name: "welcome" });
   await ok("ports", "expose", { port: 8099, name: "www" });
   const served = await until(async () => {
     const r = await fetch(`${base}/${slug}/p/8099/`, { headers: { cookie: `sbx_session=${session}` }, signal: AbortSignal.timeout(3000) }).catch(() => null);

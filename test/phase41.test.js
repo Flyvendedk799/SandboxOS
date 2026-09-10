@@ -5,7 +5,7 @@
 // your capabilities, audited like any other call. What is new is that it cannot
 // quietly cost you the desktop you named on purpose — the scheduler's snapshots
 // hold their own slots.
-import "./_setup.js";
+import { readSource } from "./_setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -22,7 +22,7 @@ let kernel, owner, sandbox, held;
 const call = (server, tool, args = {}) => kernel.call({ principalId: owner.id, heldPatterns: held, server, tool, args });
 const ok = async (server, tool, args) => { const r = await call(server, tool, args); assert.ok(r.ok, `${server}.${tool}: ${r.error}`); return r.result; };
 const doc = async () => (await ok("desktop", "state", {})).doc;
-const read = (rel) => fs.readFileSync(new URL(rel, import.meta.url), "utf8");
+const read = (rel) => readSource(new URL(rel, import.meta.url));
 
 test.before(async () => {
   openDb();

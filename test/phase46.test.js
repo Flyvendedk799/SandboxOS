@@ -12,7 +12,7 @@
 // call changes. That is `PROPOSAL_TOUCHES`, checked here against the real tool
 // list so a new tool cannot be added without saying what it touches — and after
 // applying, the history's own structural diff says exactly what did change.
-import "./_setup.js";
+import { readSource } from "./_setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -26,7 +26,7 @@ import { READ_ONLY_DESKTOP_TOOLS } from "../packages/os/src/catalog.js";
 let kernel, owner, sandbox, held;
 const call = (server, tool, args = {}) => kernel.call({ principalId: owner.id, heldPatterns: held, server, tool, args });
 const ok = async (server, tool, args) => { const r = await call(server, tool, args); assert.ok(r.ok, `${server}.${tool}: ${r.error}`); return r.result; };
-const read = (rel) => fs.readFileSync(new URL(rel, import.meta.url), "utf8");
+const read = (rel) => readSource(new URL(rel, import.meta.url));
 
 test.before(async () => {
   openDb();

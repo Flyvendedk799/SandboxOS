@@ -4,7 +4,7 @@
 // than shipped into every window; the inspector edits the fields an agent can
 // write, with the ceilings printed; publishing says what travels and what does
 // not; and the whole OS is reachable without a pointer.
-import "./_setup.js";
+import { readSource } from "./_setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -21,7 +21,7 @@ let kernel, owner, sandbox, held;
 const call = (tool, args = {}) => kernel.call({ principalId: owner.id, heldPatterns: held, server: "desktop", tool, args });
 const ok = async (tool, args) => { const r = await call(tool, args); assert.ok(r.ok, `desktop.${tool}: ${r.error}`); return r.result; };
 
-const read = (rel) => fs.readFileSync(new URL(rel, import.meta.url), "utf8");
+const read = (rel) => readSource(new URL(rel, import.meta.url));
 
 test.before(async () => {
   openDb();
