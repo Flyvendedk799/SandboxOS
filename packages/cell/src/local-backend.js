@@ -18,6 +18,78 @@ import { resolveShell, baseEnv, shellTmp, toShellPath, unsupportedHost } from ".
 
 const isWin = process.platform === "win32";
 
+function readMarkerPid(p) {
+  try {
+    const text = fs.readFileSync(p, "utf8");
+    const lines = text.split("\n");
+    if (lines.length >= 2 && lines[1].trim().length > 0) {
+      const pid = parseInt(lines[1].trim(), 10);
+      if (!Number.isNaN(pid) && pid > 0) return pid;
+    }
+  } catch {}
+  return null;
+}
+
+function killSessionTree(rootPid, mPath) {
+  if (!rootPid || process.platform === "win32") return;
+  const pidsToKill = new Set();
+  pidsToKill.add(rootPid);
+
+  const markerPid = readMarkerPid(mPath);
+  if (markerPid) pidsToKill.add(markerPid);
+
+  try {
+    const entries = fs.readdirSync("/proc");
+    const ppidMap = new Map();
+    const pidInfo = new Map();
+    for (const name of entries) {
+      if (!/^\d+$/.test(name)) continue;
+      const pid = parseInt(name, 10);
+      try {
+        const stat = fs.readFileSync(`/proc/${name}/stat`, "utf8");
+        const lastParen = stat.lastIndexOf(")");
+        if (lastParen === -1) continue;
+        const rest = stat.slice(lastParen + 2).split(" ");
+        const ppid = parseInt(rest[1], 10);
+        const pgrp = parseInt(rest[2], 10);
+        const sid = parseInt(rest[3], 10);
+        pidInfo.set(pid, { ppid, pgrp, sid });
+        if (!ppidMap.has(ppid)) ppidMap.set(ppid, []);
+        ppidMap.get(ppid).push(pid);
+      } catch {}
+    }
+
+    const queue = [...pidsToKill];
+    const sessions = new Set();
+    while (queue.length > 0) {
+      const p = queue.shift();
+      const info = pidInfo.get(p);
+      if (info && info.sid && info.sid !== 1 && info.sid !== process.pid) {
+        sessions.add(info.sid);
+      }
+      const children = ppidMap.get(p) || [];
+      for (const c of children) {
+        if (!pidsToKill.has(c)) {
+          pidsToKill.add(c);
+          queue.push(c);
+        }
+      }
+    }
+
+    for (const [pid, info] of pidInfo) {
+      if (pid === process.pid || pid === 1) continue;
+      if (sessions.has(info.sid) || sessions.has(info.pgrp)) {
+        pidsToKill.add(pid);
+      }
+    }
+  } catch {}
+
+  for (const pid of pidsToKill) {
+    try { process.kill(-pid, "SIGKILL"); } catch {}
+    try { process.kill(pid, "SIGKILL"); } catch {}
+  }
+}
+
 export class LocalBackend {
   constructor(sandbox) {
     this.sandbox = sandbox;
@@ -162,17 +234,15 @@ export class LocalBackend {
     if (sh.pty) {
       checkInterval = setInterval(() => {
         if (ready) { clearInterval(checkInterval); return; }
-        try {
-          if (fs.existsSync(mPath)) {
-            clearInterval(checkInterval);
-            flushWrites();
-          }
-        } catch {}
+        if (readMarkerPid(mPath) !== null) {
+          clearInterval(checkInterval);
+          flushWrites();
+        }
       }, 5);
       safetyTimer = setTimeout(() => {
         clearInterval(checkInterval);
         flushWrites();
-      }, 500);
+      }, 5000);
     }
 
     if (!sh.pty) {
@@ -182,11 +252,11 @@ export class LocalBackend {
     }
 
     proc.stdout?.on("data", (d) => {
-      if (!ready) flushWrites();
+      if (!ready && readMarkerPid(mPath) !== null) flushWrites();
       onData(d);
     });
     proc.stderr?.on("data", (d) => {
-      if (!ready) flushWrites();
+      if (!ready && readMarkerPid(mPath) !== null) flushWrites();
       onData(d);
     });
 
@@ -195,23 +265,38 @@ export class LocalBackend {
       : () => {};
     // The pty starts unsized (our stdin is a pipe): size it once the shell is up.
     const first = sh.pty ? setTimeout(() => resize(cols, rows), 250) : null;
+    let cleaned = false;
     const cleanup = () => {
-      if (sh.pty) detachedSpawn(sh.bin, sh.argv(cleanupScript(marker, tmp)), { detached: process.platform !== "win32" });
-      killTree(proc.pid, "SIGKILL", proc);
-    };
-    proc.on("exit", () => {
       clearTimeout(first);
       if (checkInterval) clearInterval(checkInterval);
       if (safetyTimer) clearTimeout(safetyTimer);
+
+      killSessionTree(proc.pid, mPath);
+
+      if (sh.pty && !cleaned) {
+        try {
+          if (fs.existsSync(mPath)) {
+            const content = fs.readFileSync(mPath, "utf8");
+            const lines = content.split("\n");
+            if (lines.length < 2 || !lines[1].trim()) {
+              fs.writeFileSync(mPath, `${lines[0] || ""}\n${proc.pid}\n`);
+            }
+          }
+        } catch {}
+        detachedSpawn(sh.bin, sh.argv(cleanupScript(marker, tmp)), { detached: process.platform !== "win32" });
+      }
+      cleaned = true;
+      killTree(proc.pid, "SIGKILL", proc);
+      try { proc.stdin?.destroy(); } catch {}
+    };
+    proc.on("exit", () => {
       cleanup();
       close();
     });
     return {
       write(data) {
-        if (!ready) {
-          try {
-            if (fs.existsSync(mPath)) flushWrites();
-          } catch {}
+        if (!ready && readMarkerPid(mPath) !== null) {
+          flushWrites();
         }
         if (!ready) {
           pendingWrites.push(data);
