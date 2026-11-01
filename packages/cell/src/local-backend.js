@@ -12,7 +12,7 @@
 
 import fs from "node:fs";
 import { groupHandle } from "./handles.js";
-import { newMarker, ptyWrapper, resizeScript, cleanupScript } from "./pty.js";
+import { newMarker, markerPath, ptyWrapper, resizeScript, cleanupScript } from "./pty.js";
 import { safeSpawn, detachedSpawn, execFileSafe, killTree } from "./spawn.js";
 import { resolveShell, baseEnv, shellTmp, toShellPath, unsupportedHost } from "./shell.js";
 
@@ -52,12 +52,13 @@ export class LocalBackend {
    *  failed (`code` non-zero, `stderr`), or it never started (`failure`). Folding
    *  the third into the second is what made a shell-less host look like an empty
    *  machine rather than a broken one. */
-  async exec(command, { timeoutMs = 30_000, env = {} } = {}) {
+  async exec(command, { timeoutMs = 30_000, env = {}, signal = null } = {}) {
     const sh = this.shell;
     if (!sh.ok) return failedExec(command, sh.why);
     fs.mkdirSync(this.root, { recursive: true }); // cwd must exist (docker waits on ensureRunning; local mirrors that)
     const r = await execFileSafe(sh.bin, sh.argv(command), {
       cwd: this.root, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, env: this._minimalEnv(env),
+      ...(signal ? { signal } : {}),
     });
     if (r.spawnError) return failedExec(command, `${sh.bin}: ${r.spawnError.code ?? r.spawnError.message}`);
     return { stdout: r.stdout, stderr: r.stderr, code: r.code, timedOut: r.timedOut };
@@ -144,14 +145,50 @@ export class LocalBackend {
       close();
     });
 
+    const mPath = markerPath(marker, tmp);
+    let ready = !sh.pty;
+    const pendingWrites = [];
+    const flushWrites = () => {
+      if (ready) return;
+      ready = true;
+      while (pendingWrites.length > 0) {
+        const chunk = pendingWrites.shift();
+        try { proc.stdin?.write(chunk); } catch {}
+      }
+    };
+
+    let checkInterval = null;
+    let safetyTimer = null;
+    if (sh.pty) {
+      checkInterval = setInterval(() => {
+        if (ready) { clearInterval(checkInterval); return; }
+        try {
+          if (fs.existsSync(mPath)) {
+            clearInterval(checkInterval);
+            flushWrites();
+          }
+        } catch {}
+      }, 5);
+      safetyTimer = setTimeout(() => {
+        clearInterval(checkInterval);
+        flushWrites();
+      }, 500);
+    }
+
     if (!sh.pty) {
       queueMicrotask(() => onData(
         `\x1b[2m(line mode: ${sh.label} has no \`script\` for a pseudo-terminal — full-screen programs and job control are unavailable)\x1b[0m\r\n`,
       ));
     }
 
-    proc.stdout?.on("data", onData);
-    proc.stderr?.on("data", onData);
+    proc.stdout?.on("data", (d) => {
+      if (!ready) flushWrites();
+      onData(d);
+    });
+    proc.stderr?.on("data", (d) => {
+      if (!ready) flushWrites();
+      onData(d);
+    });
 
     const resize = sh.pty
       ? (c, r) => detachedSpawn(sh.bin, sh.argv(resizeScript(marker, c, r, tmp)), { env: fullEnv })
@@ -162,9 +199,26 @@ export class LocalBackend {
       if (sh.pty) detachedSpawn(sh.bin, sh.argv(cleanupScript(marker, tmp)), { detached: process.platform !== "win32" });
       killTree(proc.pid, "SIGKILL", proc);
     };
-    proc.on("exit", () => { clearTimeout(first); cleanup(); close(); });
+    proc.on("exit", () => {
+      clearTimeout(first);
+      if (checkInterval) clearInterval(checkInterval);
+      if (safetyTimer) clearTimeout(safetyTimer);
+      cleanup();
+      close();
+    });
     return {
-      write(data) { try { proc.stdin?.write(data); } catch { /* the session is going away */ } },
+      write(data) {
+        if (!ready) {
+          try {
+            if (fs.existsSync(mPath)) flushWrites();
+          } catch {}
+        }
+        if (!ready) {
+          pendingWrites.push(data);
+        } else {
+          try { proc.stdin?.write(data); } catch { /* the session is going away */ }
+        }
+      },
       // Ending a session ends what the session started. `cleanup` is the whole
       // of it: killTree walks the tree down from the wrapper, and killing our own
       // child alongside it would race that walk — on Windows `taskkill /T` reads
