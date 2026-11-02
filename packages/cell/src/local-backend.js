@@ -11,6 +11,7 @@
 // of returning an empty string and exit code 1.
 
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import { groupHandle } from "./handles.js";
 import { newMarker, markerPath, ptyWrapper, resizeScript, cleanupScript } from "./pty.js";
 import { safeSpawn, detachedSpawn, execFileSafe, killTree } from "./spawn.js";
@@ -30,63 +31,152 @@ function readMarkerPid(p) {
   return null;
 }
 
-function killSessionTree(rootPid, mPath) {
-  if (!rootPid || process.platform === "win32") return;
-  const pidsToKill = new Set();
-  pidsToKill.add(rootPid);
-
-  const markerPid = readMarkerPid(mPath);
-  if (markerPid) pidsToKill.add(markerPid);
-
+function getProcessTable() {
+  const table = new Map();
+  if (fs.existsSync("/proc")) {
+    try {
+      const entries = fs.readdirSync("/proc");
+      for (const name of entries) {
+        if (!/^\d+$/.test(name)) continue;
+        const pid = parseInt(name, 10);
+        try {
+          const stat = fs.readFileSync(`/proc/${name}/stat`, "utf8");
+          const lastParen = stat.lastIndexOf(")");
+          if (lastParen === -1) continue;
+          const rest = stat.slice(lastParen + 2).split(" ");
+          table.set(pid, {
+            pid,
+            ppid: parseInt(rest[1], 10),
+            pgrp: parseInt(rest[2], 10),
+            sid: parseInt(rest[3], 10),
+          });
+        } catch {}
+      }
+      return table;
+    } catch {}
+  }
   try {
-    const entries = fs.readdirSync("/proc");
-    const ppidMap = new Map();
-    const pidInfo = new Map();
-    for (const name of entries) {
-      if (!/^\d+$/.test(name)) continue;
-      const pid = parseInt(name, 10);
-      try {
-        const stat = fs.readFileSync(`/proc/${name}/stat`, "utf8");
-        const lastParen = stat.lastIndexOf(")");
-        if (lastParen === -1) continue;
-        const rest = stat.slice(lastParen + 2).split(" ");
-        const ppid = parseInt(rest[1], 10);
-        const pgrp = parseInt(rest[2], 10);
-        const sid = parseInt(rest[3], 10);
-        pidInfo.set(pid, { ppid, pgrp, sid });
-        if (!ppidMap.has(ppid)) ppidMap.set(ppid, []);
-        ppidMap.get(ppid).push(pid);
-      } catch {}
-    }
-
-    const queue = [...pidsToKill];
-    const sessions = new Set();
-    while (queue.length > 0) {
-      const p = queue.shift();
-      const info = pidInfo.get(p);
-      if (info && info.sid && info.sid !== 1 && info.sid !== process.pid) {
-        sessions.add(info.sid);
-      }
-      const children = ppidMap.get(p) || [];
-      for (const c of children) {
-        if (!pidsToKill.has(c)) {
-          pidsToKill.add(c);
-          queue.push(c);
-        }
-      }
-    }
-
-    for (const [pid, info] of pidInfo) {
-      if (pid === process.pid || pid === 1) continue;
-      if (sessions.has(info.sid) || sessions.has(info.pgrp)) {
-        pidsToKill.add(pid);
+    const r = spawnSync("ps", ["-A", "-o", "pid,ppid,pgid,sess"], { encoding: "utf8", timeout: 2000 });
+    const lines = String(r.stdout ?? "").trim().split("\n");
+    for (let i = 1; i < lines.length; i++) {
+      const parts = lines[i].trim().split(/\s+/);
+      if (parts.length >= 4) {
+        const pid = parseInt(parts[0], 10);
+        table.set(pid, {
+          pid,
+          ppid: parseInt(parts[1], 10),
+          pgrp: parseInt(parts[2], 10),
+          sid: parseInt(parts[3], 10),
+        });
       }
     }
   } catch {}
+  return table;
+}
+
+function snapshotSession(rootPid, mPath, recorded = { sessions: new Set(), pgids: new Set(), pids: new Set() }) {
+  if (!rootPid || process.platform === "win32") return;
+  const markerPid = readMarkerPid(mPath);
+  const table = getProcessTable();
+  const myInfo = table.get(process.pid);
+  const mySid = myInfo?.sid ?? process.pid;
+  const myPgrp = myInfo?.pgrp ?? process.pid;
+
+  const isSafePid = (pid) => pid && pid > 1 && pid !== process.pid && pid !== myPgrp && pid !== mySid;
+
+  const queue = [];
+  if (isSafePid(rootPid)) queue.push(rootPid);
+  if (isSafePid(markerPid)) queue.push(markerPid);
+
+  const seen = new Set(queue);
+  while (queue.length > 0) {
+    const p = queue.shift();
+    const info = table.get(p);
+    if (info) {
+      if (info.sid && info.sid !== 1 && info.sid !== mySid && info.sid !== process.pid) {
+        recorded.sessions.add(info.sid);
+      }
+      if (info.pgrp && info.pgrp !== 1 && info.pgrp !== myPgrp && info.pgrp !== process.pid) {
+        recorded.pgids.add(info.pgrp);
+      }
+      if (isSafePid(p)) {
+        recorded.pids.add(p);
+      }
+    }
+    for (const [pid, child] of table) {
+      if (child.ppid === p && !seen.has(pid) && isSafePid(pid)) {
+        seen.add(pid);
+        queue.push(pid);
+      }
+    }
+  }
+}
+
+function killSessionTree(rootPid, mPath, recorded = { sessions: new Set(), pgids: new Set(), pids: new Set() }) {
+  if (process.platform === "win32") return;
+  const markerPid = readMarkerPid(mPath);
+  const table = getProcessTable();
+  const myInfo = table.get(process.pid);
+  const mySid = myInfo?.sid ?? process.pid;
+  const myPgrp = myInfo?.pgrp ?? process.pid;
+
+  const isSafePid = (pid) => pid && pid > 1 && pid !== process.pid && pid !== myPgrp && pid !== mySid;
+
+  const pidsToKill = new Set();
+  for (const p of recorded.pids) {
+    if (isSafePid(p)) pidsToKill.add(p);
+  }
+  if (isSafePid(rootPid)) pidsToKill.add(rootPid);
+  if (isSafePid(markerPid)) pidsToKill.add(markerPid);
+
+  const sessions = new Set();
+  for (const s of recorded.sessions) {
+    if (s > 1 && s !== mySid && s !== process.pid) sessions.add(s);
+  }
+  const pgids = new Set();
+  for (const g of recorded.pgids) {
+    if (g > 1 && g !== myPgrp && g !== process.pid) pgids.add(g);
+  }
+
+  const queue = [...pidsToKill];
+  while (queue.length > 0) {
+    const p = queue.shift();
+    const info = table.get(p);
+    if (info) {
+      if (info.sid && info.sid !== 1 && info.sid !== mySid && info.sid !== process.pid) {
+        sessions.add(info.sid);
+      }
+      if (info.pgrp && info.pgrp !== 1 && info.pgrp !== myPgrp && info.pgrp !== process.pid) {
+        pgids.add(info.pgrp);
+      }
+    }
+    for (const [pid, child] of table) {
+      if (child.ppid === p && !pidsToKill.has(pid) && isSafePid(pid)) {
+        pidsToKill.add(pid);
+        queue.push(pid);
+      }
+    }
+  }
+
+  for (const [pid, info] of table) {
+    if (!isSafePid(pid)) continue;
+    if (info.sid === mySid || info.pgrp === myPgrp) continue;
+    if (sessions.has(info.sid) || pgids.has(info.pgrp)) {
+      pidsToKill.add(pid);
+    }
+  }
+
+  for (const pgid of pgids) {
+    if (pgid > 1 && pgid !== myPgrp && pgid !== process.pid) {
+      try { process.kill(-pgid, "SIGKILL"); } catch {}
+    }
+  }
 
   for (const pid of pidsToKill) {
-    try { process.kill(-pid, "SIGKILL"); } catch {}
-    try { process.kill(pid, "SIGKILL"); } catch {}
+    if (isSafePid(pid)) {
+      try { process.kill(-pid, "SIGKILL"); } catch {}
+      try { process.kill(pid, "SIGKILL"); } catch {}
+    }
   }
 }
 
@@ -124,13 +214,12 @@ export class LocalBackend {
    *  failed (`code` non-zero, `stderr`), or it never started (`failure`). Folding
    *  the third into the second is what made a shell-less host look like an empty
    *  machine rather than a broken one. */
-  async exec(command, { timeoutMs = 30_000, env = {}, signal = null } = {}) {
+  async exec(command, { timeoutMs = 30_000, env = {} } = {}) {
     const sh = this.shell;
     if (!sh.ok) return failedExec(command, sh.why);
     fs.mkdirSync(this.root, { recursive: true }); // cwd must exist (docker waits on ensureRunning; local mirrors that)
     const r = await execFileSafe(sh.bin, sh.argv(command), {
       cwd: this.root, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, env: this._minimalEnv(env),
-      ...(signal ? { signal } : {}),
     });
     if (r.spawnError) return failedExec(command, `${sh.bin}: ${r.spawnError.code ?? r.spawnError.message}`);
     return { stdout: r.stdout, stderr: r.stderr, code: r.code, timedOut: r.timedOut };
@@ -218,11 +307,21 @@ export class LocalBackend {
     });
 
     const mPath = markerPath(marker, tmp);
+    const recorded = {
+      sessions: new Set(),
+      pgids: new Set(),
+      pids: new Set(),
+    };
+    if (proc.pid) {
+      snapshotSession(proc.pid, mPath, recorded);
+    }
+
     let ready = !sh.pty;
     const pendingWrites = [];
     const flushWrites = () => {
       if (ready) return;
       ready = true;
+      snapshotSession(proc.pid, mPath, recorded);
       while (pendingWrites.length > 0) {
         const chunk = pendingWrites.shift();
         try { proc.stdin?.write(chunk); } catch {}
@@ -233,14 +332,19 @@ export class LocalBackend {
     let safetyTimer = null;
     if (sh.pty) {
       checkInterval = setInterval(() => {
-        if (ready) { clearInterval(checkInterval); return; }
+        if (ready) {
+          clearInterval(checkInterval);
+          checkInterval = null;
+          return;
+        }
         if (readMarkerPid(mPath) !== null) {
           clearInterval(checkInterval);
+          checkInterval = null;
           flushWrites();
         }
       }, 5);
       safetyTimer = setTimeout(() => {
-        clearInterval(checkInterval);
+        if (checkInterval) clearInterval(checkInterval);
         flushWrites();
       }, 5000);
     }
@@ -271,7 +375,8 @@ export class LocalBackend {
       if (checkInterval) clearInterval(checkInterval);
       if (safetyTimer) clearTimeout(safetyTimer);
 
-      killSessionTree(proc.pid, mPath);
+      snapshotSession(proc.pid, mPath, recorded);
+      killSessionTree(proc.pid, mPath, recorded);
 
       if (sh.pty && !cleaned) {
         try {

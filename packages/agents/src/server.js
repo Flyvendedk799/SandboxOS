@@ -27,16 +27,15 @@ const maxConcurrentAgentsGlobal = () => Number(process.env.SANDBOXOS_MAX_AGENTS_
 export function agentsServer(deps) {
   const { sandbox, cell } = deps;
 
-  // In-process tracker for running tasks: agentId → { cancelled, abort }
+  // In-process tracker for running tasks: agentId → { cancelled }
   const _live = new Map();
 
   async function _runShell(agentId, cmd) {
     updateAgentState(agentId, "running", { startedAt: Date.now() });
-    const ac = new AbortController();
-    const tracker = { cancelled: false, abort: () => ac.abort() };
+    const tracker = { cancelled: false };
     _live.set(agentId, tracker);
     try {
-      const r = await cell.exec(cmd, { timeoutMs: 60_000, signal: ac.signal });
+      const r = await cell.exec(cmd, { timeoutMs: 60_000 });
       if (tracker.cancelled) return; // killed — discard result
       updateAgentState(agentId, r.code === 0 ? "done" : "failed", {
         result: r.stdout, error: r.stderr || null, exitCode: r.code, finishedAt: Date.now(),
@@ -170,10 +169,7 @@ export function agentsServer(deps) {
             return { killed: false, reason: `already ${agent.state}` };
           }
           const tracker = _live.get(a.id);
-          if (tracker) {
-            tracker.cancelled = true;
-            try { tracker.abort?.(); } catch {}
-          }
+          if (tracker) tracker.cancelled = true;
           updateAgentState(a.id, "killed", { finishedAt: Date.now() });
           return { killed: true };
         },
