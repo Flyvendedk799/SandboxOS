@@ -11,12 +11,176 @@
 // of returning an empty string and exit code 1.
 
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import { groupHandle } from "./handles.js";
-import { newMarker, ptyWrapper, resizeScript, cleanupScript } from "./pty.js";
+import { newMarker, markerPath, ptyWrapper, resizeScript, cleanupScript } from "./pty.js";
 import { safeSpawn, detachedSpawn, execFileSafe, killTree } from "./spawn.js";
 import { resolveShell, baseEnv, shellTmp, toShellPath, unsupportedHost } from "./shell.js";
 
 const isWin = process.platform === "win32";
+
+function readMarkerPid(p) {
+  try {
+    const text = fs.readFileSync(p, "utf8");
+    const lines = text.split("\n");
+    if (lines.length >= 2 && lines[1].trim().length > 0) {
+      const pid = parseInt(lines[1].trim(), 10);
+      if (!Number.isNaN(pid) && pid > 0) return pid;
+    }
+  } catch {}
+  return null;
+}
+
+function getProcessTable() {
+  const table = new Map();
+  if (fs.existsSync("/proc")) {
+    try {
+      const entries = fs.readdirSync("/proc");
+      for (const name of entries) {
+        if (!/^\d+$/.test(name)) continue;
+        const pid = parseInt(name, 10);
+        try {
+          const stat = fs.readFileSync(`/proc/${name}/stat`, "utf8");
+          const lastParen = stat.lastIndexOf(")");
+          if (lastParen === -1) continue;
+          const rest = stat.slice(lastParen + 2).split(" ");
+          table.set(pid, {
+            pid,
+            ppid: parseInt(rest[1], 10),
+            pgrp: parseInt(rest[2], 10),
+            sid: parseInt(rest[3], 10),
+          });
+        } catch {}
+      }
+      return table;
+    } catch {}
+  }
+  try {
+    const r = spawnSync("ps", ["-A", "-o", "pid,ppid,pgid,sess"], { encoding: "utf8", timeout: 2000 });
+    const lines = String(r.stdout ?? "").trim().split("\n");
+    for (let i = 1; i < lines.length; i++) {
+      const parts = lines[i].trim().split(/\s+/);
+      if (parts.length >= 4) {
+        const pid = parseInt(parts[0], 10);
+        table.set(pid, {
+          pid,
+          ppid: parseInt(parts[1], 10),
+          pgrp: parseInt(parts[2], 10),
+          sid: parseInt(parts[3], 10),
+        });
+      }
+    }
+  } catch {}
+  return table;
+}
+
+function snapshotSession(rootPid, mPath, recorded = { sessions: new Set(), pgids: new Set(), pids: new Set() }) {
+  if (!rootPid || process.platform === "win32") return;
+  const markerPid = readMarkerPid(mPath);
+  const table = getProcessTable();
+  const myInfo = table.get(process.pid);
+  const mySid = myInfo?.sid ?? process.pid;
+  const myPgrp = myInfo?.pgrp ?? process.pid;
+
+  const isSafePid = (pid) => pid && pid > 1 && pid !== process.pid && pid !== myPgrp && pid !== mySid;
+
+  const queue = [];
+  if (isSafePid(rootPid)) queue.push(rootPid);
+  if (isSafePid(markerPid)) queue.push(markerPid);
+
+  const seen = new Set(queue);
+  while (queue.length > 0) {
+    const p = queue.shift();
+    const info = table.get(p);
+    if (info) {
+      if (info.sid && info.sid !== 1 && info.sid !== mySid && info.sid !== process.pid) {
+        recorded.sessions.add(info.sid);
+      }
+      if (info.pgrp && info.pgrp !== 1 && info.pgrp !== myPgrp && info.pgrp !== process.pid) {
+        recorded.pgids.add(info.pgrp);
+      }
+      if (isSafePid(p)) {
+        recorded.pids.add(p);
+      }
+    }
+    for (const [pid, child] of table) {
+      if (child.ppid === p && !seen.has(pid) && isSafePid(pid)) {
+        seen.add(pid);
+        queue.push(pid);
+      }
+    }
+  }
+}
+
+function killSessionTree(rootPid, mPath, recorded = { sessions: new Set(), pgids: new Set(), pids: new Set() }) {
+  if (process.platform === "win32") return;
+  const markerPid = readMarkerPid(mPath);
+  const table = getProcessTable();
+  const myInfo = table.get(process.pid);
+  const mySid = myInfo?.sid ?? process.pid;
+  const myPgrp = myInfo?.pgrp ?? process.pid;
+
+  const isSafePid = (pid) => pid && pid > 1 && pid !== process.pid && pid !== myPgrp && pid !== mySid;
+
+  const pidsToKill = new Set();
+  for (const p of recorded.pids) {
+    // A recorded pid that has left the table may since have been recycled by an
+    // unrelated process: only a pid still in the table is ours to signal.
+    if (isSafePid(p) && table.has(p)) pidsToKill.add(p);
+  }
+  if (isSafePid(rootPid)) pidsToKill.add(rootPid);
+  if (isSafePid(markerPid)) pidsToKill.add(markerPid);
+
+  const sessions = new Set();
+  for (const s of recorded.sessions) {
+    if (s > 1 && s !== mySid && s !== process.pid) sessions.add(s);
+  }
+  const pgids = new Set();
+  for (const g of recorded.pgids) {
+    if (g > 1 && g !== myPgrp && g !== process.pid) pgids.add(g);
+  }
+
+  const queue = [...pidsToKill];
+  while (queue.length > 0) {
+    const p = queue.shift();
+    const info = table.get(p);
+    if (info) {
+      if (info.sid && info.sid !== 1 && info.sid !== mySid && info.sid !== process.pid) {
+        sessions.add(info.sid);
+      }
+      if (info.pgrp && info.pgrp !== 1 && info.pgrp !== myPgrp && info.pgrp !== process.pid) {
+        pgids.add(info.pgrp);
+      }
+    }
+    for (const [pid, child] of table) {
+      if (child.ppid === p && !pidsToKill.has(pid) && isSafePid(pid)) {
+        pidsToKill.add(pid);
+        queue.push(pid);
+      }
+    }
+  }
+
+  for (const [pid, info] of table) {
+    if (!isSafePid(pid)) continue;
+    if (info.sid === mySid || info.pgrp === myPgrp) continue;
+    if (sessions.has(info.sid) || pgids.has(info.pgrp)) {
+      pidsToKill.add(pid);
+    }
+  }
+
+  for (const pgid of pgids) {
+    if (pgid > 1 && pgid !== myPgrp && pgid !== process.pid) {
+      try { process.kill(-pgid, "SIGKILL"); } catch {}
+    }
+  }
+
+  for (const pid of pidsToKill) {
+    if (isSafePid(pid) && (table.has(pid) || pid === rootPid || pid === markerPid)) {
+      try { process.kill(-pid, "SIGKILL"); } catch {}
+      try { process.kill(pid, "SIGKILL"); } catch {}
+    }
+  }
+}
 
 export class LocalBackend {
   constructor(sandbox) {
@@ -144,27 +308,109 @@ export class LocalBackend {
       close();
     });
 
+    const mPath = markerPath(marker, tmp);
+    const recorded = {
+      sessions: new Set(),
+      pgids: new Set(),
+      pids: new Set(),
+    };
+    if (proc.pid) {
+      snapshotSession(proc.pid, mPath, recorded);
+    }
+
+    let ready = !sh.pty;
+    const pendingWrites = [];
+    const flushWrites = () => {
+      if (ready) return;
+      ready = true;
+      snapshotSession(proc.pid, mPath, recorded);
+      while (pendingWrites.length > 0) {
+        const chunk = pendingWrites.shift();
+        try { proc.stdin?.write(chunk); } catch {}
+      }
+    };
+
+    let checkInterval = null;
+    let safetyTimer = null;
+    if (sh.pty) {
+      checkInterval = setInterval(() => {
+        if (ready) {
+          clearInterval(checkInterval);
+          checkInterval = null;
+          return;
+        }
+        if (readMarkerPid(mPath) !== null) {
+          clearInterval(checkInterval);
+          checkInterval = null;
+          flushWrites();
+        }
+      }, 5);
+      safetyTimer = setTimeout(() => {
+        if (checkInterval) clearInterval(checkInterval);
+        flushWrites();
+      }, 5000);
+    }
+
     if (!sh.pty) {
       queueMicrotask(() => onData(
         `\x1b[2m(line mode: ${sh.label} has no \`script\` for a pseudo-terminal — full-screen programs and job control are unavailable)\x1b[0m\r\n`,
       ));
     }
 
-    proc.stdout?.on("data", onData);
-    proc.stderr?.on("data", onData);
+    proc.stdout?.on("data", (d) => {
+      if (!ready && readMarkerPid(mPath) !== null) flushWrites();
+      onData(d);
+    });
+    proc.stderr?.on("data", (d) => {
+      if (!ready && readMarkerPid(mPath) !== null) flushWrites();
+      onData(d);
+    });
 
     const resize = sh.pty
       ? (c, r) => detachedSpawn(sh.bin, sh.argv(resizeScript(marker, c, r, tmp)), { env: fullEnv })
       : () => {};
     // The pty starts unsized (our stdin is a pipe): size it once the shell is up.
     const first = sh.pty ? setTimeout(() => resize(cols, rows), 250) : null;
+    let cleaned = false;
     const cleanup = () => {
-      if (sh.pty) detachedSpawn(sh.bin, sh.argv(cleanupScript(marker, tmp)), { detached: process.platform !== "win32" });
+      clearTimeout(first);
+      if (checkInterval) clearInterval(checkInterval);
+      if (safetyTimer) clearTimeout(safetyTimer);
+
+      snapshotSession(proc.pid, mPath, recorded);
+      killSessionTree(proc.pid, mPath, recorded);
+
+      if (sh.pty && !cleaned) {
+        try {
+          if (fs.existsSync(mPath)) {
+            const content = fs.readFileSync(mPath, "utf8");
+            const lines = content.split("\n");
+            if (lines.length < 2 || !lines[1].trim()) {
+              fs.writeFileSync(mPath, `${lines[0] || ""}\n${proc.pid}\n`);
+            }
+          }
+        } catch {}
+        detachedSpawn(sh.bin, sh.argv(cleanupScript(marker, tmp)), { detached: process.platform !== "win32" });
+      }
+      cleaned = true;
       killTree(proc.pid, "SIGKILL", proc);
+      try { proc.stdin?.destroy(); } catch {}
     };
-    proc.on("exit", () => { clearTimeout(first); cleanup(); close(); });
+    proc.on("exit", () => {
+      cleanup();
+      close();
+    });
     return {
-      write(data) { try { proc.stdin?.write(data); } catch { /* the session is going away */ } },
+      write(data) {
+        if (!ready && readMarkerPid(mPath) !== null) {
+          flushWrites();
+        }
+        if (!ready) {
+          pendingWrites.push(data);
+        } else {
+          try { proc.stdin?.write(data); } catch { /* the session is going away */ }
+        }
+      },
       // Ending a session ends what the session started. `cleanup` is the whole
       // of it: killTree walks the tree down from the wrapper, and killing our own
       // child alongside it would race that walk — on Windows `taskkill /T` reads
