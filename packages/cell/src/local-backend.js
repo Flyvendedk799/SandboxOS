@@ -124,7 +124,9 @@ function killSessionTree(rootPid, mPath, recorded = { sessions: new Set(), pgids
 
   const pidsToKill = new Set();
   for (const p of recorded.pids) {
-    if (isSafePid(p)) pidsToKill.add(p);
+    // A recorded pid that has left the table may since have been recycled by an
+    // unrelated process: only a pid still in the table is ours to signal.
+    if (isSafePid(p) && table.has(p)) pidsToKill.add(p);
   }
   if (isSafePid(rootPid)) pidsToKill.add(rootPid);
   if (isSafePid(markerPid)) pidsToKill.add(markerPid);
@@ -173,7 +175,7 @@ function killSessionTree(rootPid, mPath, recorded = { sessions: new Set(), pgids
   }
 
   for (const pid of pidsToKill) {
-    if (isSafePid(pid)) {
+    if (isSafePid(pid) && (table.has(pid) || pid === rootPid || pid === markerPid)) {
       try { process.kill(-pid, "SIGKILL"); } catch {}
       try { process.kill(pid, "SIGKILL"); } catch {}
     }
