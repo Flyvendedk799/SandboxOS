@@ -77,13 +77,6 @@ const OS_SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..
 const OS_SHARED = new Set(["layout.js", "animations.js", "themes.js", "summary.js", "keys.js", "proposals.js", "diff.js"]);
 const RESERVED = new Set(["", "login", "logout", "signup", "health", "api", "static", "favicon.ico"]);
 
-if (process.env.ANTHROPIC_BASE_URL && !process.env.SANDBOXOS_ANTHROPIC_URL) {
-  process.env.SANDBOXOS_ANTHROPIC_URL = `${process.env.ANTHROPIC_BASE_URL.replace(/\/+$/, "")}/v1/messages`;
-}
-if (process.env.OPENAI_BASE_URL && !process.env.SANDBOXOS_OPENAI_URL) {
-  process.env.SANDBOXOS_OPENAI_URL = `${process.env.OPENAI_BASE_URL.replace(/\/+$/, "")}/v1/chat/completions`;
-}
-
 // ---- small http helpers ---------------------------------------------------
 
 const sendJson = (res, code, obj) => {
