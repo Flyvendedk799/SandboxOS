@@ -26,6 +26,9 @@ import {
   verifyAuditChain,
   createConversation, getConversation, listConversations, renameConversation,
   deleteConversation, appendConversationMessages, conversationMessages,
+  updatePrincipalName, updateTenantName, setSandboxVanityDomain, getSandboxByVanityDomain,
+  listTeamMembers, createTeamMember, removeTeamMember,
+  runningCountForTenant, runningAgentCountForTenant, modelUsage,
 } from "../../../packages/control-db/src/registry.js";
 import { authorize } from "../../../packages/kernel/src/capabilities.js";
 import { exposedPorts } from "../../../packages/kernel/src/servers/ports.js";
@@ -398,11 +401,12 @@ function clientIp(req) {
   return (req.headers["x-forwarded-for"]?.split(",")[0]?.trim()) || req.socket?.remoteAddress || "unknown";
 }
 function authRateLimited(req) {
-  if (!AUTH_RATE || AUTH_RATE <= 0) return false;
+  const rate = Number(process.env.SANDBOXOS_AUTH_RATE ?? 10);
+  if (!rate || rate <= 0) return false;
   const ip = clientIp(req);
   const tnow = Date.now();
   const hits = (_authHits.get(ip) ?? []).filter((t) => tnow - t < AUTH_WINDOW_MS);
-  if (hits.length >= AUTH_RATE) { _authHits.set(ip, hits); return true; }
+  if (hits.length >= rate) { _authHits.set(ip, hits); return true; }
   hits.push(tnow);
   _authHits.set(ip, hits);
   return false;
@@ -411,17 +415,24 @@ function authRateLimited(req) {
 // ---- the request router ---------------------------------------------------
 
 // Subdomain routing: if SANDBOXOS_DOMAIN is set and the Host header looks like
-// "{slug}.{domain}", rewrite top to that slug so the rest of the handler works
-// identically to path-based routing.
-const SANDBOXOS_DOMAIN = process.env.SANDBOXOS_DOMAIN ?? "";
+// "{slug}.{domain}", or matches a registered vanity domain, rewrite top to that slug so
+// the rest of the handler works identically to path-based routing.
+const GLOBAL_RESERVED = new Set(["health", "login", "logout", "signup", "static", "favicon.ico", "api"]);
+
 function extractSubdomainSlug(req) {
-  if (!SANDBOXOS_DOMAIN) return null;
-  const host = (req.headers.host ?? "").split(":")[0];
-  const suffix = `.${SANDBOXOS_DOMAIN}`;
-  if (host.endsWith(suffix)) {
-    const sub = host.slice(0, -suffix.length);
-    if (sub && SLUG_RE.test(sub)) return sub;
+  const hostHeader = (req.headers["x-forwarded-host"] ?? req.headers.host ?? "").split(",")[0];
+  const host = hostHeader.split(":")[0].toLowerCase().trim();
+  if (!host) return null;
+  const configuredDomain = (process.env.SANDBOXOS_DOMAIN ?? "").trim().toLowerCase();
+  if (configuredDomain) {
+    const suffix = `.${configuredDomain}`;
+    if (host.endsWith(suffix)) {
+      const sub = host.slice(0, -suffix.length);
+      if (sub && SLUG_RE.test(sub)) return sub;
+    }
   }
+  const vanity = getSandboxByVanityDomain(host);
+  if (vanity) return vanity.slug;
   return null;
 }
 
@@ -431,7 +442,7 @@ async function handle(req, res) {
 
   // Subdomain slug rewrites path: "alice.example.com/exec" → top="alice", action="exec"
   const subSlug = extractSubdomainSlug(req);
-  if (subSlug) {
+  if (subSlug && !GLOBAL_RESERVED.has(segments[1])) {
     segments.splice(1, 0, subSlug); // insert slug at position 1
   }
 
@@ -453,23 +464,26 @@ async function handle(req, res) {
     return sendJson(res, 429, { ok: false, error: "too many attempts, slow down" });
   }
   if (top === "login" && req.method === "POST") {
-    const { password, username } = await readBody(req);
+    const body = await readBody(req);
+    const username = typeof body?.username === "string" ? body.username.trim() : null;
+    const password = typeof body?.password === "string" ? body.password : (body?.password == null ? null : String(body.password));
     // Username+password login (Phase 4 accounts).
-    if (username) {
-      const principal = verifyAccount(username, password ?? "");
+    if (username !== null) {
+      if (!username || !password) return sendJson(res, 401, { ok: false, error: "invalid username or password" });
+      const principal = verifyAccount(username, password);
       if (!principal) return sendJson(res, 401, { ok: false, error: "invalid username or password" });
       const sb = getPrimarySandboxForTenant(principal.tenant_id);
       if (!sb) return sendJson(res, 500, { ok: false, error: "no sandbox for account" });
       const token = createSession(principal.id, "session");
       res.setHeader("Set-Cookie", `sbx_session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`);
-      return sendJson(res, 200, { ok: true, slug: sb.slug, username });
+      return sendJson(res, 200, { ok: true, slug: sb.slug, username, token });
     }
     // Legacy single-password login.
-    if (password !== config.password) return sendJson(res, 401, { ok: false, error: "wrong password" });
+    if (!password || password !== config.password) return sendJson(res, 401, { ok: false, error: "wrong password" });
     const { owner, sandbox } = ensureSeed(config.cellBackend === "local" ? "local" : config.cellBackend);
     const token = createSession(owner.id, "session");
     res.setHeader("Set-Cookie", `sbx_session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`);
-    return sendJson(res, 200, { ok: true, slug: sandbox.slug });
+    return sendJson(res, 200, { ok: true, slug: sandbox.slug, token });
   }
   if (top === "logout" && req.method === "POST") {
     revokeSession(cookies(req).sbx_session);
@@ -479,7 +493,9 @@ async function handle(req, res) {
 
   // Self-service signup: create a new tenant + sandbox for a new user.
   if (top === "signup" && req.method === "POST") {
-    const { username, password } = await readBody(req);
+    const body = await readBody(req);
+    const username = typeof body?.username === "string" ? body.username.trim() : "";
+    const password = typeof body?.password === "string" ? body.password : "";
     if (!username || !password || username.length < 2 || password.length < 8)
       return sendJson(res, 400, { ok: false, error: "username (min 2 chars) and password (min 8 chars) required" });
     const slug = username.toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 32);
@@ -492,7 +508,7 @@ async function handle(req, res) {
       seedVolume(sandbox); // an empty machine is an uninformative first impression
       const token = createSession(acc.principalId, "session");
       res.setHeader("Set-Cookie", `sbx_session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`);
-      return sendJson(res, 200, { ok: true, slug: sandbox.slug, username });
+      return sendJson(res, 200, { ok: true, slug: sandbox.slug, username, token });
     } catch (e) {
       return sendJson(res, 409, { ok: false, error: e.message });
     }
@@ -517,12 +533,34 @@ async function handle(req, res) {
   if (top === "api" && segments[2] === "stats") {
     const principal = authenticate(req);
     if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
+    const tenantQuota = getQuota(principal.tenant_id);
+    const agentStats = tenantAgentStats(principal.tenant_id);
+    const sandboxesCount = sandboxCountForTenant(principal.tenant_id);
+    const runningCount = runningCountForTenant(principal.tenant_id);
+    const runningAgents = runningAgentCountForTenant(principal.tenant_id);
+    const usage = modelUsage(principal.tenant_id);
     return sendJson(res, 200, {
       ok: true,
       tenant: { id: principal.tenant_id, name: principal.name },
-      sandboxes: sandboxCountForTenant(principal.tenant_id),
-      agents: tenantAgentStats(principal.tenant_id),
-      quota: { maxSandboxes: maxSandboxes(), maxAgents: Number(process.env.SANDBOXOS_MAX_AGENTS ?? 10) },
+      sandboxes: sandboxesCount,
+      runningSandboxes: runningCount,
+      agents: agentStats,
+      runningAgents,
+      quota: {
+        maxSandboxes: Math.min(tenantQuota.max_sandboxes, maxSandboxes()),
+        maxAgents: tenantQuota.max_agents,
+        maxRunning: tenantQuota.max_running,
+        memMb: tenantQuota.mem_mb,
+        cpuShares: tenantQuota.cpu_shares,
+        maxDiskMb: tenantQuota.max_disk_mb,
+        networkEgress: tenantQuota.network_egress,
+      },
+      usage: {
+        sandboxes: sandboxesCount,
+        runningSandboxes: runningCount,
+        runningAgents,
+        tokens: usage.total,
+      },
     });
   }
 
@@ -533,11 +571,27 @@ async function handle(req, res) {
     if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
     if (req.method === "GET") return sendJson(res, 200, await profileResponse(principal));
     if (req.method === "POST") {
-      const { llmProvider, apiKey, clearApiKey, completeOnboarding, onboardingCompleted } = await readBody(req);
+      const body = await readBody(req);
+      const { llmProvider, apiKey, clearApiKey, completeOnboarding, onboardingCompleted, name, tenantName } = body ?? {};
       const current = getTenantProfile(principal.tenant_id);
-      const provider = llmProvider == null ? current.llm_provider : String(llmProvider).trim().toLowerCase();
-      if (!LLM_PROVIDERS.includes(provider)) {
-        return sendJson(res, 400, { ok: false, error: `provider must be one of: ${LLM_PROVIDERS.join(", ")}` });
+      let provider = current.llm_provider;
+      if (llmProvider != null) {
+        if (typeof llmProvider !== "string") {
+          return sendJson(res, 400, { ok: false, error: "llmProvider must be a string" });
+        }
+        provider = String(llmProvider).trim().toLowerCase();
+        if (!LLM_PROVIDERS.includes(provider)) {
+          return sendJson(res, 400, { ok: false, error: `provider must be one of: ${LLM_PROVIDERS.join(", ")}` });
+        }
+      }
+
+      if (name != null) {
+        if (typeof name !== "string") return sendJson(res, 400, { ok: false, error: "name must be a string" });
+        updatePrincipalName(principal.id, name.trim());
+      }
+      if (tenantName != null) {
+        if (typeof tenantName !== "string") return sendJson(res, 400, { ok: false, error: "tenantName must be a string" });
+        updateTenantName(principal.tenant_id, tenantName.trim());
       }
 
       // A subscription provider has no key to store: its credential is an OAuth login
@@ -556,7 +610,8 @@ async function handle(req, res) {
         llmProvider: provider,
         onboardingCompleted: completeOnboarding ?? onboardingCompleted,
       });
-      return sendJson(res, 200, await profileResponse(principal));
+      const refreshed = getPrincipal(principal.id) ?? principal;
+      return sendJson(res, 200, await profileResponse(refreshed));
     }
   }
 
@@ -661,10 +716,18 @@ async function handle(req, res) {
     const principal = authenticate(req);
     if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
     if (req.method === "GET") {
-      return sendJson(res, 200, { ok: true, quota: getQuota(principal.tenant_id) });
+      const q = getQuota(principal.tenant_id);
+      const usage = {
+        sandboxes: sandboxCountForTenant(principal.tenant_id),
+        runningSandboxes: runningCountForTenant(principal.tenant_id),
+        runningAgents: runningAgentCountForTenant(principal.tenant_id),
+        agentStats: tenantAgentStats(principal.tenant_id),
+        tokensUsed: modelUsage(principal.tenant_id).total,
+      };
+      return sendJson(res, 200, { ok: true, quota: q, usage });
     }
     if (req.method === "POST") {
-      const { tenantId, maxSandboxes, maxAgents, maxRunning, memMb, cpuShares } = await readBody(req);
+      const { tenantId, maxSandboxes, maxAgents, maxRunning, memMb, cpuShares, maxDiskMb, networkEgress } = await readBody(req);
       // Backlog #1 (IDOR fix): a caller may only write its OWN tenant's quota.
       // Administering ANY OTHER tenant's quota (the attacker-supplied tenantId
       // path — e.g. setting a victim's max_running to 0) requires operator authority.
@@ -672,9 +735,93 @@ async function handle(req, res) {
       if (targetTenant !== principal.tenant_id && !requireOperator(principal)) {
         return sendJson(res, 403, { ok: false, error: "operator authority required to modify another tenant's quota" });
       }
-      const updated = setQuota(targetTenant, { maxSandboxes, maxAgents, maxRunning, memMb, cpuShares });
-      return sendJson(res, 200, { ok: true, quota: updated });
+      const updated = setQuota(targetTenant, { maxSandboxes, maxAgents, maxRunning, memMb, cpuShares, maxDiskMb, networkEgress });
+      const usage = {
+        sandboxes: sandboxCountForTenant(targetTenant),
+        runningSandboxes: runningCountForTenant(targetTenant),
+        runningAgents: runningAgentCountForTenant(targetTenant),
+        agentStats: tenantAgentStats(targetTenant),
+        tokensUsed: modelUsage(targetTenant).total,
+      };
+      return sendJson(res, 200, { ok: true, quota: updated, usage });
     }
+  }
+
+  // API: organization team access.
+  if (top === "api" && segments[2] === "team") {
+    const principal = authenticate(req);
+    if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
+    if (req.method === "GET" && !segments[3]) {
+      const members = listTeamMembers(principal.tenant_id);
+      return sendJson(res, 200, { ok: true, members });
+    }
+    if (req.method === "POST" && !segments[3]) {
+      const body = await readBody(req);
+      const username = typeof body?.username === "string" ? body.username.trim() : "";
+      const password = typeof body?.password === "string" ? body.password : "";
+      const name = typeof body?.name === "string" ? body.name.trim() : null;
+      if (!username || !password) {
+        return sendJson(res, 400, { ok: false, error: "username and password required" });
+      }
+      try {
+        const member = createTeamMember(principal.tenant_id, { username, password, name });
+        return sendJson(res, 201, { ok: true, member });
+      } catch (err) {
+        return sendJson(res, 409, { ok: false, error: err.message });
+      }
+    }
+    if (req.method === "DELETE" && segments[3]) {
+      const targetId = segments[3];
+      if (targetId === principal.id) {
+        return sendJson(res, 400, { ok: false, error: "cannot remove yourself from the team" });
+      }
+      try {
+        const result = removeTeamMember(principal.tenant_id, targetId);
+        return sendJson(res, 200, { ok: true, ...result });
+      } catch (err) {
+        return sendJson(res, 404, { ok: false, error: err.message });
+      }
+    }
+    return sendJson(res, 405, { ok: false, error: "method not allowed" });
+  }
+
+  // API: domain / slug resolution.
+  if (top === "api" && segments[2] === "resolve" && req.method === "GET") {
+    const domainParam = url.searchParams.get("domain")?.trim().toLowerCase();
+    const slugParam = url.searchParams.get("slug")?.trim().toLowerCase();
+    const configuredDomain = (process.env.SANDBOXOS_DOMAIN ?? "").trim().toLowerCase();
+
+    if (domainParam) {
+      let sb = getSandboxByVanityDomain(domainParam);
+      if (!sb && configuredDomain && domainParam.endsWith(`.${configuredDomain}`)) {
+        const extracted = domainParam.slice(0, -(`.${configuredDomain}`).length);
+        sb = getSandboxBySlug(extracted);
+      }
+      if (!sb) return sendJson(res, 404, { ok: false, error: `no sandbox resolving for domain: ${domainParam}` });
+      return sendJson(res, 200, {
+        ok: true,
+        slug: sb.slug,
+        sandboxId: sb.id,
+        tenantId: sb.tenant_id,
+        domain: configuredDomain ? `${sb.slug}.${configuredDomain}` : null,
+        vanityDomain: sb.vanity_domain ?? null,
+      });
+    }
+
+    if (slugParam) {
+      const sb = getSandboxBySlug(slugParam);
+      if (!sb) return sendJson(res, 404, { ok: false, error: `no sandbox found for slug: ${slugParam}` });
+      return sendJson(res, 200, {
+        ok: true,
+        slug: sb.slug,
+        sandboxId: sb.id,
+        tenantId: sb.tenant_id,
+        domain: configuredDomain ? `${sb.slug}.${configuredDomain}` : null,
+        vanityDomain: sb.vanity_domain ?? null,
+      });
+    }
+
+    return sendJson(res, 400, { ok: false, error: "domain or slug query parameter required" });
   }
 
   // API: control-DB backup — streams the raw SQLite file. Backlog #1: this is a
@@ -719,6 +866,8 @@ async function handle(req, res) {
     if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
     const sandboxes = listSandboxesForTenant(principal.tenant_id).map((sb) => ({
       id: sb.id, slug: sb.slug, name: sb.name,
+      vanity_domain: sb.vanity_domain ?? null,
+      vanityDomain: sb.vanity_domain ?? null,
       cell_backend: sb.cell_backend,
       state: scheduler.isRunning(sb.id) ? "running" : sb.state,
       last_active_at: sb.last_active_at, created_at: sb.created_at,
@@ -726,8 +875,25 @@ async function handle(req, res) {
     return sendJson(res, 200, { ok: true, sandboxes });
   }
 
+  // API: configure vanity domain for a sandbox
+  if (top === "api" && segments[2] === "sandboxes" && segments[3] && segments[4] === "domain" && req.method === "POST") {
+    const principal = authenticate(req);
+    if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
+    const sb = getSandboxBySlug(segments[3]);
+    if (!sb || sb.tenant_id !== principal.tenant_id)
+      return sendJson(res, 404, { ok: false, error: "sandbox not found" });
+    const { domain, vanityDomain } = await readBody(req);
+    const targetDomain = vanityDomain !== undefined ? vanityDomain : domain;
+    try {
+      const result = setSandboxVanityDomain(sb.id, targetDomain ?? null);
+      return sendJson(res, 200, { ok: true, slug: sb.slug, vanityDomain: result.vanityDomain });
+    } catch (e) {
+      return sendJson(res, 409, { ok: false, error: e.message });
+    }
+  }
+
   // API: delete a Sandbox — hibernate + destroy cell + remove from DB.
-  if (top === "api" && segments[2] === "sandboxes" && segments[3] && req.method === "DELETE") {
+  if (top === "api" && segments[2] === "sandboxes" && segments[3] && !segments[4] && req.method === "DELETE") {
     const principal = authenticate(req);
     if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
     const sb = getSandboxBySlug(segments[3]);
@@ -748,7 +914,7 @@ async function handle(req, res) {
   if (top === "api" && segments[2] === "sandboxes" && req.method === "POST" && !segments[3]) {
     const principal = authenticate(req);
     if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
-    const { slug: newSlug, name, distro: distroName, seed } = await readBody(req);
+    const { slug: newSlug, name, distro: distroName, seed, vanityDomain, domain } = await readBody(req);
     if (!SLUG_RE.test(newSlug ?? "") || RESERVED.has(newSlug)) return sendJson(res, 400, { ok: false, error: "invalid slug" });
     // Backlog #7: fail safe — never create a Cell on the unisolated local backend
     // when isolation is required (production multi-tenant posture).
@@ -761,6 +927,15 @@ async function handle(req, res) {
       return sendJson(res, 429, { ok: false, error: `sandbox quota exceeded (max ${effectiveMaxSb})` });
     try {
       const sb = createSandboxForTenant(principal.tenant_id, principal.id, { slug: newSlug, name, cellBackend: cellBackend() });
+      if (vanityDomain || domain) {
+        try {
+          setSandboxVanityDomain(sb.id, vanityDomain || domain);
+          sb.vanity_domain = (vanityDomain || domain).trim().toLowerCase();
+        } catch (domErr) {
+          deleteSandbox(sb.id);
+          return sendJson(res, 409, { ok: false, error: domErr.message });
+        }
+      }
       seedVolume(sb);
       let wearing = null;
       if (distroName) {
@@ -789,7 +964,7 @@ async function handle(req, res) {
         const spec = builtinDistro(String(seed));
         if (spec) { saveOs(sb, docFromDistroSpec(spec, { name: name ?? spec.name }), { label: `seed ${spec.name}` }); wearing = spec.name; }
       }
-      return sendJson(res, 200, { ok: true, slug: sb.slug, ...(wearing ? { wearing } : {}) });
+      return sendJson(res, 200, { ok: true, slug: sb.slug, ...(wearing ? { wearing } : {}), ...(sb.vanity_domain ? { vanityDomain: sb.vanity_domain } : {}) });
     } catch (e) {
       return sendJson(res, 409, { ok: false, error: e.message });
     }
@@ -1265,7 +1440,9 @@ async function handle(req, res) {
     // Agent spawn quota: check before delegating to the kernel.
     if (mcpSrv === "agents" && mcpTool === "spawn") {
       const agentQuota = getQuota(principal.tenant_id);
-      if (runningAgentCount(sandbox.id) >= agentQuota.max_agents)
+      const tenantRunning = runningAgentCountForTenant(principal.tenant_id);
+      const sbRunning = runningAgentCount(sandbox.id);
+      if (tenantRunning >= agentQuota.max_agents || sbRunning >= agentQuota.max_agents)
         return sendJson(res, 429, { ok: false, error: `agent quota exceeded (max ${agentQuota.max_agents})` });
     }
     const result = await kernel.call({ principalId: principal.id, heldPatterns: held, server: mcpSrv, tool: mcpTool, args: args ?? {} });

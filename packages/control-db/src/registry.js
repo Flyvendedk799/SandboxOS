@@ -27,21 +27,25 @@ function normalizeLlmProvider(provider) {
 // ---- Tenants & principals -------------------------------------------------
 
 export function createTenant(name) {
+  if (typeof name !== "string" || !name.trim()) throw new Error("tenant name required");
   const db = openDb();
-  const t = { id: id("ten"), name, created_at: now() };
+  const t = { id: id("ten"), name: name.trim(), created_at: now() };
   db.prepare("INSERT INTO tenants (id,name,created_at) VALUES (?,?,?)").run(t.id, t.name, t.created_at);
   return t;
 }
 
 export function getTenantByName(name) {
+  if (typeof name !== "string" || !name) return null;
   return openDb().prepare("SELECT * FROM tenants WHERE name=?").get(name) ?? null;
 }
 
 export function getTenant(tenantId) {
+  if (typeof tenantId !== "string" || !tenantId) return null;
   return openDb().prepare("SELECT * FROM tenants WHERE id=?").get(tenantId) ?? null;
 }
 
 export function getTenantProfile(tenantId) {
+  if (typeof tenantId !== "string" || !tenantId) return null;
   const db = openDb();
   db.prepare(`INSERT OR IGNORE INTO tenant_profiles
       (tenant_id, llm_provider, onboarding_completed, updated_at)
@@ -51,11 +55,12 @@ export function getTenantProfile(tenantId) {
 }
 
 export function updateTenantProfile(tenantId, { llmProvider, onboardingCompleted } = {}) {
+  if (typeof tenantId !== "string" || !tenantId) return null;
   const current = getTenantProfile(tenantId);
   const next = {
-    llm_provider: llmProvider == null ? current.llm_provider : normalizeLlmProvider(llmProvider),
+    llm_provider: llmProvider == null ? (current?.llm_provider ?? "claude") : normalizeLlmProvider(llmProvider),
     onboarding_completed: onboardingCompleted == null
-      ? current.onboarding_completed
+      ? (current?.onboarding_completed ?? 0)
       : (onboardingCompleted ? 1 : 0),
     updated_at: now(),
   };
@@ -70,15 +75,29 @@ export function updateTenantProfile(tenantId, { llmProvider, onboardingCompleted
   return getTenantProfile(tenantId);
 }
 
+export function updatePrincipalName(principalId, name) {
+  if (typeof principalId !== "string" || !principalId || typeof name !== "string" || !name.trim()) return;
+  openDb().prepare("UPDATE principals SET name=? WHERE id=?").run(name.trim(), principalId);
+}
+
+export function updateTenantName(tenantId, name) {
+  if (typeof tenantId !== "string" || !tenantId || typeof name !== "string" || !name.trim()) return;
+  try {
+    openDb().prepare("UPDATE tenants SET name=? WHERE id=?").run(name.trim(), tenantId);
+  } catch { /* unique constraint or invalid */ }
+}
+
 export function createPrincipal(tenantId, kind, name) {
+  if (typeof tenantId !== "string" || !tenantId) throw new Error("tenantId required");
   const db = openDb();
-  const p = { id: id("prn"), tenant_id: tenantId, kind, name, created_at: now() };
+  const p = { id: id("prn"), tenant_id: tenantId, kind: String(kind ?? "human"), name: String(name ?? ""), created_at: now() };
   db.prepare("INSERT INTO principals (id,tenant_id,kind,name,created_at) VALUES (?,?,?,?,?)")
     .run(p.id, p.tenant_id, p.kind, p.name, p.created_at);
   return p;
 }
 
 export function getPrincipal(principalId) {
+  if (typeof principalId !== "string" || !principalId) return null;
   return openDb().prepare("SELECT * FROM principals WHERE id=?").get(principalId) ?? null;
 }
 
@@ -92,12 +111,14 @@ export function getPrincipal(principalId) {
 
 /** Mark (or clear) a principal as a host operator. */
 export function setOperator(principalId, isOp = true) {
+  if (typeof principalId !== "string" || !principalId) return;
   openDb().prepare("UPDATE principals SET is_operator=? WHERE id=?")
     .run(isOp ? 1 : 0, principalId);
 }
 
 /** Is this principal a host operator? Returns a boolean (never the raw int). */
 export function isOperator(principalId) {
+  if (typeof principalId !== "string" || !principalId) return false;
   const row = openDb().prepare("SELECT is_operator FROM principals WHERE id=?").get(principalId);
   return !!(row && row.is_operator);
 }
@@ -105,32 +126,55 @@ export function isOperator(principalId) {
 // ---- Sandboxes ------------------------------------------------------------
 
 export function createSandbox(tenantId, { slug, name, cellBackend }) {
+  if (typeof tenantId !== "string" || !tenantId) throw new Error("tenantId required");
+  if (typeof slug !== "string" || !slug) throw new Error("slug required");
   const db = openDb();
   const sid = id("sbx");
   const volume = path.join(config.sandboxesDir, sid, "volume");
   const s = {
-    id: sid, tenant_id: tenantId, slug, name,
-    cell_backend: cellBackend, volume_path: volume,
+    id: sid, tenant_id: tenantId, slug, name: name ?? slug,
+    cell_backend: cellBackend ?? "local", volume_path: volume,
     state: "stopped", last_active_at: null, created_at: now(),
+    vanity_domain: null,
   };
   db.prepare(`INSERT INTO sandboxes
-      (id,tenant_id,slug,name,cell_backend,volume_path,state,last_active_at,created_at)
-      VALUES (?,?,?,?,?,?,?,?,?)`)
-    .run(s.id, s.tenant_id, s.slug, s.name, s.cell_backend, s.volume_path, s.state, s.last_active_at, s.created_at);
+      (id,tenant_id,slug,name,cell_backend,volume_path,state,last_active_at,created_at,vanity_domain)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`)
+    .run(s.id, s.tenant_id, s.slug, s.name, s.cell_backend, s.volume_path, s.state, s.last_active_at, s.created_at, null);
   return s;
 }
 
 export function getSandboxBySlug(slug) {
+  if (typeof slug !== "string" || !slug) return null;
   return openDb().prepare("SELECT * FROM sandboxes WHERE slug=?").get(slug) ?? null;
 }
 
 export function getSandbox(sandboxId) {
+  if (typeof sandboxId !== "string" || !sandboxId) return null;
   return openDb().prepare("SELECT * FROM sandboxes WHERE id=?").get(sandboxId) ?? null;
 }
 
 export function setSandboxState(sandboxId, state) {
+  if (typeof sandboxId !== "string" || !sandboxId) return;
   openDb().prepare("UPDATE sandboxes SET state=?, last_active_at=? WHERE id=?")
-    .run(state, now(), sandboxId);
+    .run(String(state), now(), sandboxId);
+}
+
+export function setSandboxVanityDomain(sandboxId, domain) {
+  if (typeof sandboxId !== "string" || !sandboxId) throw new Error("sandboxId required");
+  const cleanDomain = domain ? String(domain).trim().toLowerCase() : null;
+  if (cleanDomain) {
+    const existing = openDb().prepare("SELECT id FROM sandboxes WHERE vanity_domain=? AND id<>?").get(cleanDomain, sandboxId);
+    if (existing) throw new Error(`vanity domain already in use: ${cleanDomain}`);
+  }
+  openDb().prepare("UPDATE sandboxes SET vanity_domain=? WHERE id=?").run(cleanDomain, sandboxId);
+  return { sandboxId, vanityDomain: cleanDomain };
+}
+
+export function getSandboxByVanityDomain(domain) {
+  if (typeof domain !== "string" || !domain) return null;
+  const cleanDomain = domain.trim().toLowerCase();
+  return openDb().prepare("SELECT * FROM sandboxes WHERE vanity_domain=?").get(cleanDomain) ?? null;
 }
 
 // ---- Capability grants ----------------------------------------------------
@@ -756,7 +800,15 @@ export function sandboxCountForTenant(tenantId) {
 
 // ---- Phase-14/15 per-tenant quotas ----------------------------------------
 
-const QUOTA_DEFAULTS = { max_sandboxes: 3, max_agents: 10, max_running: 2, mem_mb: 512, cpu_shares: 1.0 };
+const QUOTA_DEFAULTS = {
+  max_sandboxes: 3,
+  max_agents: 10,
+  max_running: 2,
+  mem_mb: 512,
+  cpu_shares: 1.0,
+  max_disk_mb: 1024,
+  network_egress: "allow",
+};
 
 /** Return the quota row for a tenant, falling back to defaults if none is set. */
 // ---- model usage ----------------------------------------------------------
@@ -792,12 +844,14 @@ export function modelUsage(tenantId, { since = 0, sandboxId = null } = {}) {
 }
 
 export function getQuota(tenantId) {
+  if (typeof tenantId !== "string" || !tenantId) return { tenant_id: null, ...QUOTA_DEFAULTS };
   const row = openDb().prepare("SELECT * FROM tenant_quotas WHERE tenant_id=?").get(tenantId);
   return row ?? { tenant_id: tenantId, ...QUOTA_DEFAULTS };
 }
 
 /** Upsert per-tenant quota limits. Only provided fields are written. */
-export function setQuota(tenantId, { maxSandboxes, maxAgents, maxRunning, memMb, cpuShares } = {}) {
+export function setQuota(tenantId, { maxSandboxes, maxAgents, maxRunning, memMb, cpuShares, maxDiskMb, networkEgress } = {}) {
+  if (typeof tenantId !== "string" || !tenantId) throw new Error("tenantId required");
   const current = getQuota(tenantId);
   const vals = {
     max_sandboxes: maxSandboxes ?? current.max_sandboxes,
@@ -805,11 +859,21 @@ export function setQuota(tenantId, { maxSandboxes, maxAgents, maxRunning, memMb,
     max_running:   maxRunning   ?? current.max_running,
     mem_mb:        memMb        ?? current.mem_mb,
     cpu_shares:    cpuShares    ?? current.cpu_shares,
+    max_disk_mb:   maxDiskMb   ?? current.max_disk_mb ?? QUOTA_DEFAULTS.max_disk_mb,
+    network_egress: networkEgress ?? current.network_egress ?? QUOTA_DEFAULTS.network_egress,
   };
-  openDb().prepare(`INSERT OR REPLACE INTO tenant_quotas
-    (tenant_id, max_sandboxes, max_agents, max_running, mem_mb, cpu_shares)
-    VALUES (?, ?, ?, ?, ?, ?)`)
-    .run(tenantId, vals.max_sandboxes, vals.max_agents, vals.max_running, vals.mem_mb, vals.cpu_shares);
+  openDb().prepare(`INSERT INTO tenant_quotas
+    (tenant_id, max_sandboxes, max_agents, max_running, mem_mb, cpu_shares, max_disk_mb, network_egress)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(tenant_id) DO UPDATE SET
+      max_sandboxes=excluded.max_sandboxes,
+      max_agents=excluded.max_agents,
+      max_running=excluded.max_running,
+      mem_mb=excluded.mem_mb,
+      cpu_shares=excluded.cpu_shares,
+      max_disk_mb=excluded.max_disk_mb,
+      network_egress=excluded.network_egress`)
+    .run(tenantId, vals.max_sandboxes, vals.max_agents, vals.max_running, vals.mem_mb, vals.cpu_shares, vals.max_disk_mb, vals.network_egress);
   return { tenant_id: tenantId, ...vals };
 }
 
@@ -870,6 +934,7 @@ export function deleteSandbox(sandboxId) {
 }
 
 export function runningAgentCount(sandboxId) {
+  if (typeof sandboxId !== "string" || !sandboxId) return 0;
   return openDb().prepare("SELECT COUNT(*) as n FROM agents WHERE sandbox_id=? AND state IN ('queued','running')").get(sandboxId)?.n ?? 0;
 }
 
@@ -877,6 +942,13 @@ export function runningAgentCount(sandboxId) {
  *  host-global concurrency ceiling that protects co-tenants on the single Mac Mini. */
 export function runningAgentCountGlobal() {
   return openDb().prepare("SELECT COUNT(*) as n FROM agents WHERE state IN ('queued','running')").get()?.n ?? 0;
+}
+
+export function runningAgentCountForTenant(tenantId) {
+  if (typeof tenantId !== "string" || !tenantId) return 0;
+  return openDb().prepare(
+    `SELECT COUNT(*) as n FROM agents a JOIN sandboxes s ON a.sandbox_id=s.id WHERE s.tenant_id=? AND a.state IN ('queued','running')`
+  ).get(tenantId)?.n ?? 0;
 }
 
 export function totalSandboxCount() {
@@ -969,21 +1041,26 @@ function _hashPassword(password, saltHex) {
 }
 
 export function createAccount(tenantId, { username, password }) {
+  if (typeof tenantId !== "string" || !tenantId) throw new Error("tenantId required");
+  if (typeof username !== "string" || !username.trim()) throw new Error("username required");
+  if (typeof password !== "string" || !password) throw new Error("password required");
+  const cleanUsername = username.trim();
   const db = openDb();
-  const existing = db.prepare("SELECT id FROM accounts WHERE username=?").get(username);
-  if (existing) throw new Error(`username taken: ${username}`);
+  const existing = db.prepare("SELECT id FROM accounts WHERE username=?").get(cleanUsername);
+  if (existing) throw new Error(`username taken: ${cleanUsername}`);
   // Self-service signups are NEVER operators (backlog #1): createPrincipal leaves
   // is_operator at its default 0 and we never elevate here.
-  const principal = createPrincipal(tenantId, "human", username);
+  const principal = createPrincipal(tenantId, "human", cleanUsername);
   const salt = randomBytes(16).toString("hex");
   const hash = _hashPassword(password, salt); // self-describing scrypt$... string
-  const acc = { id: id("acc"), principal_id: principal.id, username, salt, hash, created_at: now() };
+  const acc = { id: id("acc"), principal_id: principal.id, username: cleanUsername, salt, hash, created_at: now() };
   db.prepare("INSERT INTO accounts (id,principal_id,username,salt,hash,created_at) VALUES (?,?,?,?,?,?)")
     .run(acc.id, acc.principal_id, acc.username, acc.salt, acc.hash, acc.created_at);
   return { ...acc, principalId: principal.id };
 }
 
 export function verifyAccount(username, password) {
+  if (typeof username !== "string" || !username || typeof password !== "string" || !password) return null;
   const row = openDb().prepare("SELECT * FROM accounts WHERE username=?").get(username);
   if (!row) return null;
 
@@ -1007,7 +1084,68 @@ export function verifyAccount(username, password) {
 }
 
 export function getAccountByUsername(username) {
+  if (typeof username !== "string" || !username) return null;
   return openDb().prepare("SELECT * FROM accounts WHERE username=?").get(username) ?? null;
+}
+
+// ---- Team Members (Organization Access) -----------------------------------
+
+export function listTeamMembers(tenantId) {
+  if (typeof tenantId !== "string" || !tenantId) return [];
+  const rows = openDb().prepare(
+    `SELECT p.id AS principal_id, p.name, p.kind, p.is_operator, p.created_at,
+            a.username,
+            (SELECT COUNT(*) FROM sessions s WHERE s.principal_id = p.id AND s.expires_at > ?) AS live_sessions
+       FROM principals p
+       LEFT JOIN accounts a ON a.principal_id = p.id
+      WHERE p.tenant_id = ? AND p.kind = 'human'
+      ORDER BY p.created_at ASC`
+  ).all(now(), tenantId);
+
+  return rows.map((r) => ({
+    id: r.principal_id,
+    principalId: r.principal_id,
+    username: r.username ?? r.name,
+    name: r.name,
+    kind: r.kind,
+    isOperator: !!r.is_operator,
+    createdAt: r.created_at,
+    liveSessions: r.live_sessions,
+  }));
+}
+
+export function createTeamMember(tenantId, { username, password, name } = {}) {
+  if (typeof tenantId !== "string" || !tenantId) throw new Error("tenantId required");
+  if (typeof username !== "string" || !username.trim()) throw new Error("username is required");
+  if (typeof password !== "string" || !password) throw new Error("password is required");
+  const acc = createAccount(tenantId, { username: username.trim(), password });
+  if (name && typeof name === "string" && name.trim()) {
+    updatePrincipalName(acc.principalId, name.trim());
+  }
+  return {
+    id: acc.principalId,
+    principalId: acc.principalId,
+    username: acc.username,
+    name: name && typeof name === "string" && name.trim() ? name.trim() : acc.username,
+    tenantId,
+  };
+}
+
+export function removeTeamMember(tenantId, principalId) {
+  if (typeof tenantId !== "string" || !tenantId || typeof principalId !== "string" || !principalId) {
+    throw new Error("invalid tenantId or principalId");
+  }
+  const db = openDb();
+  const p = db.prepare("SELECT * FROM principals WHERE id=? AND tenant_id=?").get(principalId, tenantId);
+  if (!p) throw new Error("team member not found");
+
+  return withTransaction((db) => {
+    db.prepare("DELETE FROM grants WHERE principal_id=?").run(principalId);
+    db.prepare("DELETE FROM sessions WHERE principal_id=?").run(principalId);
+    db.prepare("DELETE FROM accounts WHERE principal_id=?").run(principalId);
+    db.prepare("DELETE FROM principals WHERE id=?").run(principalId);
+    return { ok: true, removedId: principalId };
+  });
 }
 
 // ---- First-boot seed ------------------------------------------------------
