@@ -12,7 +12,7 @@
 
 import fs from "node:fs";
 import { groupHandle } from "./handles.js";
-import { newMarker, ptyWrapper, resizeScript, cleanupScript } from "./pty.js";
+import { newMarker, markerPath, ptyWrapper, resizeScript, cleanupScript } from "./pty.js";
 import { safeSpawn, detachedSpawn, execFileSafe, killTree } from "./spawn.js";
 import { resolveShell, baseEnv, shellTmp, toShellPath, unsupportedHost } from "./shell.js";
 
@@ -172,9 +172,28 @@ export class LocalBackend {
       : () => {};
     // The pty starts unsized (our stdin is a pipe): size it once the shell is up.
     const first = sh.pty ? setTimeout(() => resize(cols, rows), 250) : null;
+    let cleaned = false;
     const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
       clearTimeout(readyTimer);
-      if (sh.pty) detachedSpawn(sh.bin, sh.argv(cleanupScript(marker, tmp)), { detached: process.platform !== "win32" });
+      if (sh.pty) {
+        try {
+          const mPath = markerPath(marker, tmp);
+          if (fs.existsSync(mPath)) {
+            const content = fs.readFileSync(mPath, "utf8");
+            const p = parseInt(content.split("\n")[1]?.trim(), 10);
+            if (p && !Number.isNaN(p)) {
+              if (process.platform !== "win32") {
+                try { process.kill(-p, "SIGKILL"); } catch {}
+              }
+              try { process.kill(p, "SIGKILL"); } catch {}
+            }
+            try { fs.unlinkSync(mPath); } catch {}
+          }
+        } catch {}
+        detachedSpawn(sh.bin, sh.argv(cleanupScript(marker, tmp)), { detached: process.platform !== "win32" });
+      }
       killTree(proc.pid, "SIGKILL", proc);
     };
     proc.on("error", close);
