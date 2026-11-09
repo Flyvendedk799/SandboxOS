@@ -6,6 +6,13 @@
 // authorized way in; the Gateway serves what this package stores. Nothing here
 // knows about HTTP, sessions or principals on purpose.
 
+if (process.env.ANTHROPIC_BASE_URL && !process.env.SANDBOXOS_ANTHROPIC_URL) {
+  process.env.SANDBOXOS_ANTHROPIC_URL = `${process.env.ANTHROPIC_BASE_URL.replace(/\/+$/, "")}/v1/messages`;
+}
+if (process.env.OPENAI_BASE_URL && !process.env.SANDBOXOS_OPENAI_URL) {
+  process.env.SANDBOXOS_OPENAI_URL = `${process.env.OPENAI_BASE_URL.replace(/\/+$/, "")}/v1/chat/completions`;
+}
+
 export * from "./schema.js";
 export * from "./layout.js";
 export * from "./keys.js";
