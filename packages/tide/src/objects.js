@@ -139,66 +139,107 @@ export function checkoutTree(store, treeHash, dir) {
   }
 }
 
-/** All blob paths under a tree (recursive). */
-export function listTree(store, treeHash, prefix = "") {
+/** All leaf blobs under a tree: [{ path, hash }]. */
+export function collectTreeBlobs(store, treeHash, prefix = "") {
   const out = [];
   for (const e of treeHash ? readTree(store, treeHash) : []) {
-    if (e.type === "tree") out.push(...listTree(store, e.hash, prefix + e.name + "/"));
-    else out.push(prefix + e.name);
+    if (e.type === "tree") {
+      out.push(...collectTreeBlobs(store, e.hash, prefix + e.name + "/"));
+    } else {
+      out.push({ path: prefix + e.name, hash: e.hash });
+    }
   }
   return out;
 }
 
-/** Flat path-level diff between two trees: {path, status, oldHash?, newHash?}. */
-export function diffTrees(store, aHash, bHash, prefix = "") {
+/** All blob paths under a tree (recursive). */
+export function listTree(store, treeHash, prefix = "") {
+  return collectTreeBlobs(store, treeHash, prefix).map((b) => b.path);
+}
+
+/** Compute summary mutation counts for a change list. */
+export function summarizeDiff(changes) {
+  const added = changes.filter((c) => c.status === "added").length;
+  const modified = changes.filter((c) => c.status === "modified").length;
+  const deleted = changes.filter((c) => c.status === "deleted").length;
+  return { added, modified, deleted, files: changes.length };
+}
+
+/** Flat path-level diff between two trees: {path, status} by default; {path, status, oldHash, newHash} with detail: true. */
+export function diffTrees(store, aHash, bHash, prefix = "", opts = {}) {
+  let options = {};
+  let pfx = "";
+  if (typeof prefix === "object" && prefix !== null) {
+    options = prefix;
+    pfx = options.prefix ?? "";
+  } else {
+    pfx = prefix || "";
+    if (typeof opts === "object" && opts !== null) {
+      options = opts;
+    }
+  }
+  const detail = !!options.detail;
+
   const a = aHash ? readTree(store, aHash) : [];
   const b = bHash ? readTree(store, bHash) : [];
   const am = new Map(a.map((e) => [e.name, e]));
   const bm = new Map(b.map((e) => [e.name, e]));
   const out = [];
+
+  const makeEntry = (itemPath, status, oldHash = null, newHash = null) => {
+    return detail
+      ? { path: itemPath, status, oldHash, newHash }
+      : { path: itemPath, status };
+  };
+
   for (const [name, be] of bm) {
     const ae = am.get(name);
-    const p = prefix + name;
+    const p = pfx + name;
     if (!ae) {
       if (be.type === "tree") {
-        out.push(...listTree(store, be.hash, p + "/").map((x) => ({ path: x, status: "added", oldHash: null, newHash: be.hash })));
+        for (const leaf of collectTreeBlobs(store, be.hash, p + "/")) {
+          out.push(makeEntry(leaf.path, "added", null, leaf.hash));
+        }
       } else {
-        out.push({ path: p, status: "added", oldHash: null, newHash: be.hash });
+        out.push(makeEntry(p, "added", null, be.hash));
       }
     } else if (ae.hash !== be.hash) {
       if (ae.type === "tree" && be.type === "tree") {
-        out.push(...diffTrees(store, ae.hash, be.hash, p + "/"));
+        out.push(...diffTrees(store, ae.hash, be.hash, p + "/", options));
       } else if (ae.type === "tree" && be.type === "blob") {
-        out.push(...listTree(store, ae.hash, p + "/").map((x) => ({ path: x, status: "deleted", oldHash: null, newHash: null })));
-        out.push({ path: p, status: "added", oldHash: ae.hash, newHash: be.hash });
+        for (const leaf of collectTreeBlobs(store, ae.hash, p + "/")) {
+          out.push(makeEntry(leaf.path, "deleted", leaf.hash, null));
+        }
+        out.push(makeEntry(p, "added", null, be.hash));
       } else if (ae.type === "blob" && be.type === "tree") {
-        out.push({ path: p, status: "deleted", oldHash: ae.hash, newHash: null });
-        out.push(...listTree(store, be.hash, p + "/").map((x) => ({ path: x, status: "added", oldHash: null, newHash: be.hash })));
+        out.push(makeEntry(p, "deleted", ae.hash, null));
+        for (const leaf of collectTreeBlobs(store, be.hash, p + "/")) {
+          out.push(makeEntry(leaf.path, "added", null, leaf.hash));
+        }
       } else {
-        out.push({ path: p, status: "modified", oldHash: ae.hash, newHash: be.hash });
+        out.push(makeEntry(p, "modified", ae.hash, be.hash));
       }
     }
   }
   for (const [name, ae] of am) {
     if (!bm.has(name)) {
-      const p = prefix + name;
+      const p = pfx + name;
       if (ae.type === "tree") {
-        out.push(...listTree(store, ae.hash, p + "/").map((x) => ({ path: x, status: "deleted", oldHash: ae.hash, newHash: null })));
+        for (const leaf of collectTreeBlobs(store, ae.hash, p + "/")) {
+          out.push(makeEntry(leaf.path, "deleted", leaf.hash, null));
+        }
       } else {
-        out.push({ path: p, status: "deleted", oldHash: ae.hash, newHash: null });
+        out.push(makeEntry(p, "deleted", ae.hash, null));
       }
     }
   }
 
-  // Calculate summary stats and attach to output array
-  const stats = {
-    added: out.filter((c) => c.status === "added").length,
-    modified: out.filter((c) => c.status === "modified").length,
-    deleted: out.filter((c) => c.status === "deleted").length,
-    files: out.length,
-  };
-  out.stats = stats;
   return out;
+}
+
+/** Opt-in detailed flat path-level diff between two trees: {path, status, oldHash, newHash}. */
+export function diffTreesDetailed(store, aHash, bHash, prefix = "") {
+  return diffTrees(store, aHash, bHash, prefix, { detail: true });
 }
 
 // ---- history & sync -------------------------------------------------------

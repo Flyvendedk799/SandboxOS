@@ -14,7 +14,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 
 import {
-  writeBlob, writeTree, buildTreeFromDir, diffTrees,
+  writeBlob, writeTree, buildTreeFromDir, diffTrees, diffTreesDetailed, summarizeDiff,
   assertSafePath, exportVolume, restoreVolume,
 } from "./objects.js";
 import { Repo } from "./repo.js";
@@ -99,13 +99,27 @@ test("[C1] structural diffs accurately report added, modified, deleted and type 
   fs.unlinkSync(path.join(workdir, "todelete.txt"));
   write(workdir, "newfile.txt", "brand new");
 
-  // Structural diff between working tree and revA
+  // Default diff between working tree and revA returns plain {path, status}
   const diffA = repo.diff("diff-ws", revA);
-  assert.ok(diffA.stats, "structural diff carries summary statistics");
-  assert.equal(diffA.stats.added, 1);
-  assert.equal(diffA.stats.modified, 1);
-  assert.equal(diffA.stats.deleted, 1);
-  assert.equal(diffA.stats.files, 3);
+  assert.equal(diffA.stats, undefined, "default diff has no stats property");
+  for (const entry of diffA) {
+    assert.deepEqual(Object.keys(entry).sort(), ["path", "status"]);
+  }
+
+  // Default status also returns plain {path, status}
+  const statusA = repo.status("diff-ws");
+  assert.equal(statusA.stats, undefined, "default status has no stats property");
+  for (const entry of statusA) {
+    assert.deepEqual(Object.keys(entry).sort(), ["path", "status"]);
+  }
+
+  // Summary statistics are computed via summarizeDiff helper or repo.summarizeDiff
+  const statsA = summarizeDiff(diffA);
+  assert.equal(statsA.added, 1);
+  assert.equal(statsA.modified, 1);
+  assert.equal(statsA.deleted, 1);
+  assert.equal(statsA.files, 3);
+  assert.deepEqual(repo.summarizeDiff(diffA), statsA);
 
   const byPath = Object.fromEntries(diffA.map((d) => [d.path, d.status]));
   assert.equal(byPath["file.txt"], "modified");
@@ -117,7 +131,21 @@ test("[C1] structural diffs accurately report added, modified, deleted and type 
   // Direct diff between two revisions
   const diffBetween = repo.diff("diff-ws", revA, revB);
   assert.equal(diffBetween.length, 3);
-  assert.equal(diffBetween.stats.files, 3);
+  assert.equal(summarizeDiff(diffBetween).files, 3);
+  assert.equal(diffBetween.stats, undefined);
+
+  // Detailed diff carries oldHash and newHash
+  const diffDetail = repo.diff("diff-ws", revA, null, { detail: true });
+  for (const entry of diffDetail) {
+    assert.deepEqual(Object.keys(entry).sort(), ["newHash", "oldHash", "path", "status"]);
+  }
+  const detailByPath = Object.fromEntries(diffDetail.map((d) => [d.path, d]));
+  assert.equal(detailByPath["newfile.txt"].oldHash, null);
+  assert.ok(detailByPath["newfile.txt"].newHash);
+  assert.ok(detailByPath["todelete.txt"].oldHash);
+  assert.equal(detailByPath["todelete.txt"].newHash, null);
+  assert.ok(detailByPath["file.txt"].oldHash);
+  assert.ok(detailByPath["file.txt"].newHash);
 
   // Structural diff handles directory replaced by file
   const tree1 = buildTreeFromDir(store, workdir);
@@ -130,6 +158,23 @@ test("[C1] structural diffs accurately report added, modified, deleted and type 
   const repPaths = Object.fromEntries(diffReplaced.map((d) => [d.path, d.status]));
   assert.equal(repPaths["nested/sub.txt"], "deleted");
   assert.equal(repPaths["nested"], "added");
+
+  // Detailed type-change diff: file replacing directory gets null oldHash and file blob newHash;
+  // deleted children get child blob oldHash and null newHash
+  const diffReplacedDetail = diffTreesDetailed(store, tree1, tree2);
+  const repDetail = Object.fromEntries(diffReplacedDetail.map((d) => [d.path, d]));
+  assert.ok(repDetail["nested/sub.txt"].oldHash);
+  assert.equal(repDetail["nested/sub.txt"].newHash, null);
+  assert.equal(repDetail["nested"].oldHash, null);
+  assert.ok(repDetail["nested"].newHash);
+
+  // Symmetric case: file replaced by directory
+  const diffReplacedReverse = diffTreesDetailed(store, tree2, tree1);
+  const repRev = Object.fromEntries(diffReplacedReverse.map((d) => [d.path, d]));
+  assert.ok(repRev["nested"].oldHash);
+  assert.equal(repRev["nested"].newHash, null);
+  assert.equal(repRev["nested/sub.txt"].oldHash, null);
+  assert.ok(repRev["nested/sub.txt"].newHash);
 });
 
 test("[C1] bidirectional sync between two repos fast-forwards and merges divergence", async () => {

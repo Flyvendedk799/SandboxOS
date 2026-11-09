@@ -10,7 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import {
-  buildTreeFromDir, checkoutTree, diffTrees, writeCommit, readCommit,
+  buildTreeFromDir, checkoutTree, diffTrees, summarizeDiff, writeCommit, readCommit,
   reachable, exportObjects, importObjects, isAncestor, writeState, readState,
   hasObject, assertSafePath, assertSafeEntryName, buildVolumeManifest,
   exportVolume, restoreVolume,
@@ -142,11 +142,11 @@ export class Repo {
   }
 
   /** Working-tree vs head: list of {path, status}. */
-  status(name) {
+  status(name, opts = {}) {
     const ws = this.get(name);
     const workTree = buildTreeFromDir(this.store, ws.path);
     const headTree = ws.head ? readCommit(this.store, ws.head).tree : null;
-    return diffTrees(this.store, headTree, workTree);
+    return diffTrees(this.store, headTree, workTree, "", opts);
   }
 
   /** Snapshot the working tree as a new tide mark. Returns the commit hash (or null if no change). */
@@ -177,10 +177,22 @@ export class Repo {
     return out;
   }
 
-  diff(name, fromRef, toRef) {
+  diff(name, fromRef, toRef, opts = {}) {
     const ws = this.get(name);
-    const resolvedFrom = this._resolveCommit(name, fromRef);
-    const resolvedTo = this._resolveCommit(name, toRef);
+    let optObj = opts;
+    let from = fromRef;
+    let to = toRef;
+    if (typeof from === "object" && from !== null) {
+      optObj = from;
+      from = null;
+      to = null;
+    } else if (typeof to === "object" && to !== null) {
+      optObj = to;
+      to = null;
+    }
+
+    const resolvedFrom = this._resolveCommit(name, from);
+    const resolvedTo = this._resolveCommit(name, to);
 
     const aTree = resolvedFrom
       ? readCommit(this.store, resolvedFrom).tree
@@ -188,7 +200,12 @@ export class Repo {
     const bTree = resolvedTo
       ? readCommit(this.store, resolvedTo).tree
       : buildTreeFromDir(this.store, ws.path);
-    return diffTrees(this.store, aTree, bTree);
+    return diffTrees(this.store, aTree, bTree, "", optObj);
+  }
+
+  /** Compute summary mutation counts for a change list. */
+  summarizeDiff(changes) {
+    return summarizeDiff(changes);
   }
 
   /** Restore the working tree to a commit or branch and move head there. */
