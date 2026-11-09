@@ -33,9 +33,19 @@ export function createBuilder({ onOpenCode } = {}) {
   let tab = TABS.some(([id]) => id === recall("tab", "library")) ? recall("tab", "library") : "library";
   let cat = "apps";
 
-  const tabs = h("div.stx-tabs");
+  const tabs = h("div.stx-tabs", {
+    style: {
+      overflowX: "auto",
+      scrollbarWidth: "none",
+      padding: "8px 6px",
+    },
+  });
   const pane = h("div.stx-pane");
-  const el = h("aside.stx-builder", null, tabs, pane);
+  const el = h("aside.stx-builder", {
+    style: {
+      overflow: "hidden",
+    },
+  }, tabs, pane);
 
   const codePane = createCodePane({ onTargetChange: (t) => { if (t) remember("code", `${t.kind}:${t.id}`); } });
   const themeStudio = createThemeStudio();
@@ -662,7 +672,11 @@ export function createBuilder({ onOpenCode } = {}) {
   function render() {
     if (!os.doc) return;
     fill(tabs, ...TABS.map(([id, label]) =>
-      h("button.seg", { class: tab === id ? "on" : "", onclick: () => setTab(id) }, label, id === "code" && codePane.hasDirty() ? h("span.dot") : null)));
+      h("button.seg", {
+        class: tab === id ? "on" : "",
+        style: { padding: "0 8px", fontSize: "11px", flex: "1 1 auto", textAlign: "center", whiteSpace: "nowrap" },
+        onclick: () => setTab(id),
+      }, label, id === "code" && codePane.hasDirty() ? h("span.dot") : null)));
     el.classList.toggle("wide", tab === "code");
     if (tab !== "theme") themeStudio.destroy();
     if (tab !== "motion") motionStudio.destroy();
