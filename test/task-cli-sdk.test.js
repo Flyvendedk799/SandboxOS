@@ -16,6 +16,9 @@ import { fileURLToPath } from "node:url";
 import { openDb, closeDb } from "../packages/control-db/src/db.js";
 import { ensureSeed, mintMachineToken } from "../packages/control-db/src/registry.js";
 import { _resetKernels } from "../packages/kernel/src/kernel.js";
+import { attachSession, killAllSessions } from "../packages/kernel/src/pty-sessions.js";
+import { stopAllProcs } from "../packages/kernel/src/servers/proc.js";
+import { getCell } from "../packages/cell/src/cell.js";
 import { createServer } from "../apps/gateway/src/server.js";
 import { SandboxClient, SandboxError } from "../packages/sdk/src/index.js";
 import { stubProvider } from "./fixtures/stub-provider.js";
@@ -57,6 +60,8 @@ test.before(async () => {
 
 test.after(() => {
   try { fs.unlinkSync(cliConfig); } catch { /* ignore */ }
+  killAllSessions(sandbox.id);
+  stopAllProcs(sandbox.id);
   server.close();
   _resetKernels();
   closeDb();
@@ -213,6 +218,25 @@ test("C1 & C3: sbx login with machine token directly sets up config", async () =
     assert.equal(saved.token, testToken);
     assert.equal(saved.slug, sandbox.slug);
     assert.equal(saved.url, base);
+
+    // Bad token is rejected and exits non-zero without writing config
+    const badConfig = path.join(os.tmpdir(), `sbx-bad-${Date.now()}.json`);
+    try {
+      const badRes = await new Promise((resolve) => {
+        execFile(process.execPath, [SBX, "login", "--url", base, "--slug", sandbox.slug, "--token", "invalid-token-12345"], {
+          env: { ...process.env, SBX_CONFIG: badConfig },
+          timeout: 10_000,
+        }, (err, stdout, stderr) => resolve({
+          code: err && typeof err.code === "number" ? err.code : err ? 1 : 0,
+          stdout: stdout ?? "",
+          stderr: stderr ?? "",
+        }));
+      });
+      assert.notEqual(badRes.code, 0, "login with invalid token must fail");
+      assert.equal(fs.existsSync(badConfig), false, "config file must not be created on failed login");
+    } finally {
+      try { fs.unlinkSync(badConfig); } catch {}
+    }
   } finally {
     try { fs.unlinkSync(customConfig); } catch {}
   }
@@ -223,6 +247,7 @@ test("C1 & C3: sbx token list, mint, and revoke commands", async () => {
   const mintRes = await runSbx(["token", "--patterns", "fs.read,fs.list", "--label", "cli-test-token"]);
   assert.equal(mintRes.code, 0, mintRes.stderr);
   assert.match(mintRes.stderr, /scope: fs\.read, fs\.list/);
+  const mintedTokenString = mintRes.stdout.trim();
 
   // List tokens
   const listRes = await runSbx(["token", "list"]);
@@ -239,6 +264,27 @@ test("C1 & C3: sbx token list, mint, and revoke commands", async () => {
   const revokeRes = await runSbx(["token", "revoke", principalId]);
   assert.equal(revokeRes.code, 0, revokeRes.stderr);
   assert.match(revokeRes.stdout, /revoked token/);
+
+  // Calling the Gateway with the revoked token must be rejected (401 / denied)
+  const revokedClient = new SandboxClient({ url: base, slug: sandbox.slug, token: mintedTokenString });
+  let revokedErr = null;
+  try {
+    await revokedClient.proc.exec("echo should-fail");
+  } catch (err) {
+    revokedErr = err;
+  }
+  assert.ok(revokedErr instanceof SandboxError, "revoked token request must throw SandboxError");
+  assert.equal(revokedErr.status, 401, "revoked token request must be refused with HTTP 401");
+
+  // Ambiguous revoke by shared prefix/label must be refused with non-zero exit and candidates listed
+  const dup1 = await runSbx(["token", "--patterns", "fs.read", "--label", "duplicate-cli-label"]);
+  assert.equal(dup1.code, 0, dup1.stderr);
+  const dup2 = await runSbx(["token", "--patterns", "fs.read", "--label", "duplicate-cli-label"]);
+  assert.equal(dup2.code, 0, dup2.stderr);
+
+  const ambigRes = await runSbx(["token", "revoke", "duplicate-cli-label"]);
+  assert.notEqual(ambigRes.code, 0, "ambiguous token revocation must fail");
+  assert.match(ambigRes.stderr, /ambiguous token "duplicate-cli-label" matches multiple tokens/);
 });
 
 test("C1: sbx fs commands: cp, mv, stat, and binary-safe stdio streaming with -", async () => {
@@ -300,8 +346,19 @@ test("C1: sbx proc commands: start, logs, stop, forget, sessions", async () => {
   assert.equal(forgetRes.code, 0, forgetRes.stderr);
   assert.match(forgetRes.stdout, /forgotten/);
 
-  const sessionsRes = await runSbx(["proc", "sessions"]);
-  assert.equal(sessionsRes.code, 0, sessionsRes.stderr);
+  // Attach a session so proc sessions output displays active session details
+  const cell = getCell(sandbox);
+  const activeSession = attachSession(cell, sandbox.id, { name: "cli-test-session" }, () => {}, () => {});
+  try {
+    const sessionsRes = await runSbx(["proc", "sessions"]);
+    assert.equal(sessionsRes.code, 0, sessionsRes.stderr);
+    assert.match(sessionsRes.stdout, new RegExp(activeSession.id));
+    assert.match(sessionsRes.stdout, /cli-test-session/);
+    assert.match(sessionsRes.stdout, /alive/);
+    assert.match(sessionsRes.stdout, /attached:1/);
+  } finally {
+    activeSession.kill();
+  }
 });
 
 test("C1: sbx port commands: expose, check, scan, close", async () => {

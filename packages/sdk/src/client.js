@@ -99,6 +99,30 @@ export class SandboxError extends Error {
   }
 }
 
+/**
+ * Unwraps an error payload from a response body or error event into a structured SandboxError.
+ * Handles string errors, error objects ({ message, code, remediation }), and status defaults.
+ */
+function buildSandboxError(data, fallbackMessage = "error", { status, server, tool, code: fallbackCode, remediation: fallbackRemediation } = {}) {
+  const err = data?.error !== undefined ? data.error : data;
+  if (err instanceof SandboxError) return err;
+
+  if (typeof err === "object" && err !== null) {
+    const message = err.message ?? err.error ?? fallbackMessage;
+    const code = err.code ?? data?.code ?? fallbackCode;
+    const remediation = err.remediation ?? data?.remediation ?? fallbackRemediation;
+    const s = err.server ?? data?.server ?? server;
+    const t = err.tool ?? data?.tool ?? tool;
+    const st = err.status ?? data?.status ?? status;
+    return new SandboxError(String(message), { status: st, code, server: s, tool: t, remediation });
+  }
+
+  const message = typeof err === "string" && err ? err : fallbackMessage;
+  const code = data?.code ?? fallbackCode;
+  const remediation = data?.remediation ?? fallbackRemediation;
+  return new SandboxError(message, { status, code, server, tool, remediation });
+}
+
 export class SandboxClient {
   /**
    * @param {object} o
@@ -137,23 +161,20 @@ export class SandboxClient {
   }
 
   /** Raw HTTP against the Gateway. Paths starting with "/" are absolute. */
-  async request(path, { method = "GET", body, headers = {}, raw = false } = {}) {
+  async request(path, { method = "GET", body, headers = {}, raw = false, signal } = {}) {
     const target = path.startsWith("/") ? `${this.url}${path}` : `${this.url}/${this.slug}/${path}`;
     const res = await this._fetch(target, {
       method,
       headers: { ...this.headers, ...headers },
       body: body === undefined ? undefined : (typeof body === "string" || body instanceof Uint8Array ? body : JSON.stringify(body)),
+      signal,
     });
     if (raw) return res;
     const text = await res.text();
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
     if (!res.ok) {
-      const errObj = typeof data?.error === "object" && data?.error !== null ? data.error : null;
-      const message = errObj?.message ?? (typeof data?.error === "string" ? data.error : text.slice(0, 200) || res.statusText);
-      const code = errObj?.code ?? data?.code;
-      const remediation = errObj?.remediation ?? data?.remediation;
-      throw new SandboxError(message, { status: res.status, code, remediation });
+      throw buildSandboxError(data, text.slice(0, 200) || res.statusText, { status: res.status });
     }
     return data;
   }
@@ -162,11 +183,7 @@ export class SandboxClient {
   async call(server, tool, args = {}) {
     const env = await this.request("mcp", { method: "POST", body: { server, tool, args } });
     if (!env.ok) {
-      const errObj = typeof env.error === "object" && env.error !== null ? env.error : null;
-      const message = errObj?.message ?? (typeof env.error === "string" ? env.error : `${server}.${tool} failed`);
-      const code = errObj?.code ?? env.code ?? (message.startsWith("denied:") ? "denied" : message.startsWith("unknown tool:") ? "unknown_tool" : "error");
-      const remediation = errObj?.remediation ?? env.remediation;
-      throw new SandboxError(message, { code, server, tool, remediation });
+      throw buildSandboxError(env, `${server}.${tool} failed`, { server, tool });
     }
     return env.result;
   }
@@ -200,7 +217,7 @@ export class SandboxClient {
     const res = await this.request("stream", { method: "POST", body: { cmd }, raw: true });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
-      throw new SandboxError(data.error ?? `stream failed: ${res.status}`, { status: res.status });
+      throw buildSandboxError(data, `stream failed: ${res.status}`, { status: res.status });
     }
     yield* sseEvents(res);
   }
@@ -224,16 +241,43 @@ class FsApi {
   stat(path) { return this.c.call("fs", "stat", { path }); }
   tree(path = ".", opts = {}) { return this.c.call("fs", "tree", { path, ...opts }); }
   search(query, opts = {}) { return this.c.call("fs", "search", { query, ...opts }); }
+
+  /**
+   * Read binary file content as a plain Uint8Array.
+   * @param {string} path Remote file path
+   * @param {object} [opts] Options (e.g. maxBytes)
+   * @returns {Promise<Uint8Array>}
+   */
   async readBytes(path, opts = {}) {
     const res = await this.c.call("fs", "readBytes", { path, ...opts });
-    const buf = Buffer.from(res.base64 || "", "base64");
-    buf.path = res.path;
-    buf.bytes = res.bytes;
-    buf.base64 = res.base64;
-    return buf;
+    const b64 = res.base64 || "";
+    if (typeof Buffer !== "undefined") {
+      const b = Buffer.from(b64, "base64");
+      return new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+    }
+    const bin = atob(b64);
+    const u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return u8;
   }
+
+  /**
+   * Write binary file content.
+   * @param {string} path Remote file path
+   * @param {Uint8Array|Buffer|ArrayBuffer|string} data Binary bytes, or base64-encoded string
+   */
   writeBytes(path, data) {
-    const base64 = typeof data === "string" ? data : Buffer.from(data).toString("base64");
+    let base64;
+    if (typeof data === "string") {
+      base64 = data;
+    } else if (typeof Buffer !== "undefined" && (Buffer.isBuffer(data) || data instanceof Uint8Array)) {
+      base64 = Buffer.from(data).toString("base64");
+    } else {
+      const u8 = data instanceof Uint8Array ? data : new Uint8Array(data);
+      let bin = "";
+      for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+      base64 = btoa(bin);
+    }
     return this.c.call("fs", "writeBytes", { path, base64 });
   }
 
@@ -241,11 +285,9 @@ class FsApi {
   async download(path) {
     const res = await this.c.request(`file?path=${encodeURIComponent(path)}`, { raw: true });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new SandboxError(err.error ?? `download failed: ${res.status}`, {
-        status: res.status,
-        code: res.status === 404 ? "not_found" : res.status === 403 ? "denied" : "download_failed",
-      });
+      const data = await res.json().catch(() => ({}));
+      const code = res.status === 404 ? "not_found" : res.status === 403 ? "denied" : "download_failed";
+      throw buildSandboxError(data, `download failed: ${res.status}`, { status: res.status, code });
     }
     return new Uint8Array(await res.arrayBuffer());
   }
@@ -448,7 +490,7 @@ class AssistantApi {
     const res = await this.c.request(`chats/${id}/send`, { method: "POST", body: { input }, raw: true });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new SandboxError(err.error ?? `assistant failed: ${res.status}`, { status: res.status });
+      throw buildSandboxError(err, `assistant failed: ${res.status}`, { status: res.status });
     }
     for await (const ev of sseEvents(res)) yield { ...ev, chatId: id };
   }
@@ -458,7 +500,7 @@ class AssistantApi {
     let out = "";
     for await (const ev of this.ask(input, opts)) {
       if (ev.type === "text") out += ev.text;
-      if (ev.type === "error") throw new SandboxError(ev.error);
+      if (ev.type === "error") throw buildSandboxError(ev.error, "assistant error");
     }
     return out;
   }
@@ -471,7 +513,7 @@ class TokensApi {
     return this.c.request("tokens", { method: "POST", body: { patterns, label } });
   }
   revoke(principalId) {
-    return this.c.request(`tokens/${principalId}`, { method: "DELETE" });
+    return this.c.request(`tokens/${encodeURIComponent(principalId)}`, { method: "DELETE" });
   }
 }
 
@@ -501,7 +543,7 @@ class AccessApi {
     return this.c.request("access", { method: "POST", body: { username, patterns } });
   }
   revoke(principalId) {
-    return this.c.request(`access/${principalId}`, { method: "DELETE" });
+    return this.c.request(`access/${encodeURIComponent(principalId)}`, { method: "DELETE" });
   }
 }
 

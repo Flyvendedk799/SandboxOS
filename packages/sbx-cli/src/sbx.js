@@ -76,6 +76,23 @@ async function cmdLogin(args) {
 
   if (directToken) {
     if (!slug) die("slug required when logging in with direct machine token (--slug <slug>)");
+    let probeRes;
+    try {
+      probeRes = await fetch(`${url}/${slug}/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${directToken}`,
+        },
+        body: JSON.stringify({ server: "kernel", tool: "whoami", args: {} }),
+      });
+    } catch (err) {
+      die(`connection failed: ${err.message}`);
+    }
+    const probeData = await probeRes.json().catch(() => ({}));
+    if (!probeRes.ok || !probeData.ok) {
+      die(probeData.error || `authentication failed (HTTP ${probeRes.status})`);
+    }
     saveConfig({ url, slug, token: directToken });
     console.log(`logged in → ${url}/${slug}  (token configured)`);
     return;
@@ -175,24 +192,38 @@ async function cmdToken(args) {
   }
 
   if (sub === "revoke" || sub === "rm") {
-    let id = args[1];
+    const id = args[1];
     if (!id) die("usage: sbx token revoke <principalId|label>");
     const listRes = await api(cfg, `/${cfg.slug}/tokens`);
     const listData = await listRes.json().catch(() => ({}));
-    const found = (listData.tokens ?? []).find((t) => (
-      t.principalId === id ||
-      t.principal_id === id ||
-      t.label === id ||
-      (t.principalId && t.principalId.startsWith(id)) ||
-      (t.principal_id && t.principal_id.startsWith(id))
-    ));
-    if (found) {
-      id = found.principalId || found.principal_id;
+    if (!listData.ok) die(listData.error || "failed to list tokens");
+    const tokens = listData.tokens ?? [];
+
+    // 1. Exact match on principalId
+    const exact = tokens.find((t) => (t.principalId || t.principal_id) === id);
+    let target = null;
+    if (exact) {
+      target = exact;
+    } else {
+      // Unique match by exact label, label prefix/substring, or principalId prefix
+      const matches = tokens.filter((t) => {
+        const pid = t.principalId || t.principal_id;
+        return t.label === id || (t.label && t.label.includes(id)) || (pid && pid.startsWith(id));
+      });
+      if (matches.length === 0) {
+        die(`no token matching "${id}" found`);
+      }
+      if (matches.length > 1) {
+        const candidates = matches.map((t) => `  ${t.principalId || t.principal_id} (${t.label || "unlabeled"})`).join("\n");
+        die(`ambiguous token "${id}" matches multiple tokens:\n${candidates}`);
+      }
+      target = matches[0];
     }
-    const res = await api(cfg, `/${cfg.slug}/tokens/${encodeURIComponent(id)}`, { method: "DELETE" });
+    const targetId = target.principalId || target.principal_id;
+    const res = await api(cfg, `/${cfg.slug}/tokens/${encodeURIComponent(targetId)}`, { method: "DELETE" });
     const d = await res.json();
     if (!d.ok) die(d.error);
-    console.log(`revoked token: ${id}`);
+    console.log(`revoked token: ${targetId}`);
     return;
   }
 
@@ -305,6 +336,9 @@ async function cmdApp(args) {
 }
 
 // ── os subcommands ────────────────────────────────────────────────────────
+// The desktop is a document, so the terminal can drive it like anything else:
+// open a window on your machine from a script, restyle it from CI, or package
+// the whole thing as a distro without touching a browser.
 
 async function cmdOs(args) {
   const cfg = loadConfig();
@@ -372,6 +406,7 @@ async function cmdOs(args) {
       break;
     }
     case "tile": {
+      // sbx os tile <id> ratio <0.1-0.9> [with <id2>] · sbx os tile <id> swap <id2> · sbx os tile <id> flip
       if (!args[1] || !args[2]) die("usage: sbx os tile <window-id> ratio <r> [with <id>] | swap <id> | flip");
       const a = { id: args[1] };
       if (args[2] === "ratio") { a.ratio = Number(args[3]); if (args[4] === "with") a.with = args[5]; }
@@ -417,6 +452,7 @@ async function cmdOs(args) {
       }
       break;
     case "tools": {
+      // sbx os tools <app> on|off
       if (!args[1] || !["on", "off"].includes(args[2])) die("usage: sbx os tools <app> on|off");
       const r = await desktop("appDefine", { id: args[1], mcp: { enabled: args[2] === "on" } });
       console.log(r.server?.live ? `${r.server.name}.* is live` : r.server?.problem ?? `${r.server?.name ?? args[1]}.* is off`);
@@ -453,6 +489,7 @@ async function cmdOs(args) {
       break;
     }
     case "publish": {
+      // sbx os publish <name> [--public|--private] [--tags=a,b]
       if (!args[1]) die("usage: sbx os publish <name> [--public|--private] [--tags=a,b]");
       const visibility = args.includes("--public") ? "public" : args.includes("--private") ? "private" : "tenant";
       const tags = (args.find((x) => x.startsWith("--tags=")) ?? "").slice(7).split(",").filter(Boolean);
@@ -811,7 +848,7 @@ async function cmdProc(args) {
     const list = r.sessions ?? [];
     if (!list.length) { console.log("(no terminal sessions)"); return; }
     for (const s of list) {
-      console.log(`${s.id}  ${s.name}  ws:${s.ws ?? "—"}  pid:${s.pid ?? "—"}`);
+      console.log(`${s.id}  ${s.name}  ${s.alive ? "alive" : "exited"}  attached:${s.attached ?? 0}`);
     }
     return;
   }
@@ -1019,7 +1056,7 @@ const HELP = `sbx — drive a SandboxOS machine from anywhere.
 
   desktop     os show · os map · os silhouette [W H] · os open <app> · os close <id>
               os widget <kind> · os theme [key] · os motion <preset>
-              os layout <floating|tiling|master-stack|columns|rows|grid> · os arrange [mode]
+              os layout <floating|tiling|master-stack|columns|rows|grid> · os arrange [preset]
               os tile <id> ratio <r> [with <id>] | swap <id> | flip
               os snap <id> <region> [WxH] · os assoc [.ext] [app]
               os apps · os tools <app> on|off · os history [rev] · os revert <rev>
