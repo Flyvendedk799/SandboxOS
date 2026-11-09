@@ -9,7 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   reachable, exportObjects, readCommit, writeCommit, listTree, buildTreeFromDir,
-  commonAncestor, readFileFromTree,
+  commonAncestor, readFileFromTree, assertSafePath,
 } from "./objects.js";
 import { merge3 } from "./merge.js";
 
@@ -76,11 +76,39 @@ export class TideClient {
       const t = readFileFromTree(store, theirsTree, p);
       const b = readFileFromTree(store, baseTree, p);
       let content;
-      if (o && t && o.equals(t)) content = o;
-      else if (!o) content = t;                  // added on theirs / deleted on ours → keep theirs
-      else if (!t) content = o;                  // added on ours / deleted on theirs → keep ours
-      else content = Buffer.from(merge3(b?.toString() ?? "", o.toString(), t.toString()).merged);
-      const full = path.join(ws.path, p);
+      if (o && t && o.equals(t)) {
+        content = o;
+      } else if (!o && !t) {
+        content = null;
+      } else if (!o && b) {
+        // Ours deleted. If theirs didn't touch it, keep deleted.
+        if (t && b && t.equals(b)) {
+          content = null;
+        } else if (t) {
+          // Theirs modified, ours deleted: take modified
+          content = t;
+        } else {
+          content = null;
+        }
+      } else if (!t && b) {
+        // Theirs deleted. If ours didn't touch it, keep deleted.
+        if (o && b && o.equals(b)) {
+          content = null;
+        } else if (o) {
+          // Ours modified, theirs deleted: take modified
+          content = o;
+        } else {
+          content = null;
+        }
+      } else if (!o) {
+        content = t;                  // added on theirs / deleted on ours → keep theirs
+      } else if (!t) {
+        content = o;                  // added on ours / deleted on theirs → keep ours
+      } else {
+        content = Buffer.from(merge3(b?.toString() ?? "", o.toString(), t.toString()).merged);
+      }
+
+      const full = assertSafePath(ws.path, p);
       if (content == null) { fs.rmSync(full, { force: true }); continue; }
       fs.mkdirSync(path.dirname(full), { recursive: true });
       fs.writeFileSync(full, content);
@@ -89,5 +117,21 @@ export class TideClient {
     const commit = writeCommit(store, { tree, parents: [localHead, remoteHead], message: "merge", author: "tide", ts: Date.now() });
     repo.setHead(workspace, commit);
     return commit;
+  }
+
+  // ---- State objects (remote sync) ----------------------------------------
+
+  async putState(workspace, type, data) {
+    return this.mcp("tide", "putState", { workspace, type, data });
+  }
+
+  async getState(workspace, type) {
+    const res = await this.mcp("tide", "getState", { workspace, type });
+    return res.data;
+  }
+
+  async listStates(workspace) {
+    const res = await this.mcp("tide", "listStates", { workspace });
+    return res.types ?? [];
   }
 }
