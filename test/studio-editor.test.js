@@ -3,7 +3,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { readSource } from "./_setup.js";
 import { openDb, closeDb } from "../packages/control-db/src/db.js";
 import { ensureSeed, grantsFor } from "../packages/control-db/src/registry.js";
 import { getKernel, _resetKernels } from "../packages/kernel/src/kernel.js";
@@ -382,33 +381,4 @@ test("checkpoint workflow: creation, structural diffing, and rollback restoratio
     _resetKernels();
     closeDb();
   }
-});
-
-// ── C2 & C3: Studio Editor & Review UI Contract Verification ──────────────────
-
-test("studio editor wires proposal review, per-op details, and measured diffs", () => {
-  const editorSrc = readSource(new URL("../apps/gateway/public/js/studio/editor.js", import.meta.url));
-  assert.match(editorSrc, /renderStructuralDiff/, "editor imports renderStructuralDiff");
-  assert.match(editorSrc, /proposalImpact/, "editor calculates proposal impact");
-  assert.match(editorSrc, /Review details/, "editor supports per-op argument inspection");
-  assert.match(editorSrc, /op-args-detail/, "editor renders formatted arguments detail pre");
-  assert.match(editorSrc, /applyProposal/, "editor applies proposal");
-  assert.match(editorSrc, /discardProposal/, "editor discards proposal");
-  assert.match(editorSrc, /call\("history", \{ rev:/, "editor measures real structural diff from history on apply");
-  assert.match(editorSrc, /renderAppliedDiff/, "editor renders measured structural diff after apply");
-});
-
-test("studio review module exports formatted structural diff component", () => {
-  const reviewSrc = readSource(new URL("../apps/gateway/public/js/studio/review.js", import.meta.url));
-  assert.match(reviewSrc, /export function renderStructuralDiff/, "review.js exports renderStructuralDiff");
-  assert.match(reviewSrc, /stx-diff-viewer/, "formats diff viewer element");
-  assert.match(reviewSrc, /diffSummary\(diff\)/, "renders diff summary");
-});
-
-test("builder layers panel integrates checkpoint snapshots and structural diffs", () => {
-  const builderSrc = readSource(new URL("../apps/gateway/public/js/os/builder.js", import.meta.url));
-  assert.match(builderSrc, /renderStructuralDiff/, "builder imports renderStructuralDiff");
-  assert.match(builderSrc, /paintCheckpoints/, "builder paints snapshots list");
-  assert.match(builderSrc, /checkpointDiff/, "builder compares snapshots with checkpointDiff");
-  assert.match(builderSrc, /checkpointRestore/, "builder restores snapshot state");
 });

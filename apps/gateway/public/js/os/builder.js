@@ -14,6 +14,7 @@ import { createStudioCodeEditor, renderStructuralDiff } from "../studio/index.js
 import { createThemeStudio } from "./theme-studio.js";
 import { createMotionStudio } from "./motion-studio.js";
 import { silhouetteSvg } from "./lib/summary.js";
+import { diffSummary } from "./lib/diff.js";
 
 const TABS = [["library", "Library"], ["layers", "Layers"], ["theme", "Theme"], ["motion", "Motion"], ["code", "Code"]];
 const remember = (k, v) => { try { localStorage.setItem(`sbx.studio.${k}`, v); } catch { /* private mode */ } };
@@ -533,26 +534,6 @@ export function createBuilder({ onOpenCode } = {}) {
     if (s < 86_400) return `${Math.round(s / 3600)}h`;
     return new Date(ts).toLocaleDateString();
   };
-
-  /** "3 windows · theme · dock" — what a revision changed, in words. */
-  function diffSummary(diff) {
-    const parts = [];
-    const list = (name, d) => {
-      const n = (d?.added ?? 0) + (d?.removed ?? 0) + (d?.changed ?? 0);
-      if (n) parts.push(`${n} ${name}${n > 1 ? "s" : ""}`);
-    };
-    list("window", diff.windows);
-    list("widget", diff.widgets);
-    list("workspace", diff.workspaces);
-    if (diff.theme?.length) parts.push(`theme (${diff.theme.join(", ")})`);
-    if (diff.animation?.length) parts.push("motion");
-    if (diff.wm?.length) parts.push(`layout (${diff.wm.join(", ")})`);
-    if (diff.shell?.length) parts.push(`shell (${diff.shell.join(", ")})`);
-    if (diff.apps?.length) parts.push(`apps (${diff.apps.join(", ")})`);
-    if (diff.widgetKinds?.length) parts.push(`widget kinds (${diff.widgetKinds.join(", ")})`);
-    if (diff.name) parts.push("name");
-    return parts.length ? parts.join(" · ") : "identical to now";
-  }
 
   // What an undo can be aimed at, in the words the diff uses. An agent's change
   // is usually several revisions — it aligned the windows, then added a widget —

@@ -54,14 +54,11 @@ export function ptyWrapper(shellCmd = "/bin/sh -i", tmp = "/tmp") {
   return [
     `M="${tmp}/.sbx-tty-$1"`,
     'if command -v script >/dev/null 2>&1; then',
-    '  exec 9<&0 </dev/null',
     '  if script -qfc true /dev/null >/dev/null 2>&1; then',
-    '    exec 0<&9 9<&-',
     `    exec script -qfc "${inner}" /dev/null`,
     "  else",
     // BSD takes the file first and the command as ordinary argv after it, so the
     // recorder needs a shell of its own to be a single command.
-    '    exec 0<&9 9<&-',
     `    exec script -q /dev/null /bin/sh -c "${inner}"`,
     "  fi",
     "else",
@@ -82,7 +79,7 @@ export function resizeScript(marker, cols, rows, tmp = "/tmp") {
   return `T=$(head -n1 "${markerPath(marker, tmp)}" 2>/dev/null); [ -n "$T" ] || exit 0; stty -F "$T" cols ${c} rows ${r} 2>/dev/null || stty -f "$T" cols ${c} rows ${r} 2>/dev/null || true`;
 }
 
-/** End the session: kill any processes attached to the pty, the shell's
- *  process group, then drop the marker. */
+/** End the session: kill the shell's process group (it is a session leader
+ *  under `script`, so this takes its children too), then drop the marker. */
 export const cleanupScript = (marker, tmp = "/tmp") =>
-  `T=$(head -n1 "${markerPath(marker, tmp)}" 2>/dev/null); if [ -n "$T" ]; then for d in /proc/[0-9]*; do [ -d "$d" ] || continue; p=\${d#/proc/}; [ "$p" = "$$" ] && continue; for x in "$d"/fd/*; do case "$(readlink "$x" 2>/dev/null)" in "$T"*) kill -9 -- -"$p" 2>/dev/null; kill -9 "$p" 2>/dev/null; break;; esac; done; done; fi; P=$(sed -n 2p "${markerPath(marker, tmp)}" 2>/dev/null); if [ -n "$P" ]; then kill -9 -- -"$P" 2>/dev/null; kill -9 "$P" 2>/dev/null; fi; rm -f "${markerPath(marker, tmp)}"`;
+  `P=$(sed -n 2p "${markerPath(marker, tmp)}" 2>/dev/null); if [ -n "$P" ]; then kill -9 -- -"$P" 2>/dev/null; kill -9 "$P" 2>/dev/null; fi; rm -f "${markerPath(marker, tmp)}"`;
