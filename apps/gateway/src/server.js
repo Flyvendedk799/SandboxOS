@@ -49,6 +49,15 @@ import {
 } from "../../../packages/ai-auth/src/oauth.js";
 
 const maxSandboxes = () => Number(process.env.SANDBOXOS_MAX_SANDBOXES ?? 10);
+
+// In test/sandbox environments, strip dummy keys like "openbot-local" so that
+// internal mock fallbacks in MCP servers (e.g. llm) activate as expected.
+if (process.env.ANTHROPIC_API_KEY === "openbot-local") {
+  delete process.env.ANTHROPIC_API_KEY;
+}
+if (process.env.OPENAI_API_KEY === "openbot-local") {
+  delete process.env.OPENAI_API_KEY;
+}
 import { getKernel, _dropKernel } from "../../../packages/kernel/src/kernel.js";
 import { clearJobs as forgetJobs } from "../../../packages/kernel/src/servers/job-store.js";
 import { getCell } from "../../../packages/cell/src/cell.js";
