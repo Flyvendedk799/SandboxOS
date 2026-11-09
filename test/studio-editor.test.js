@@ -412,4 +412,3 @@ test("builder layers panel integrates checkpoint snapshots and structural diffs"
   assert.match(builderSrc, /checkpointDiff/, "builder compares snapshots with checkpointDiff");
   assert.match(builderSrc, /checkpointRestore/, "builder restores snapshot state");
 });
-
