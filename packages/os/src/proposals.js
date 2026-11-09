@@ -135,3 +135,5 @@ export function proposalImpact(proposal) {
     ...(unknown.length ? { unknown } : {}),
   };
 }
+
+export { structuralDiff, diffSummary, changedSections, lineDiff } from "./diff.js";

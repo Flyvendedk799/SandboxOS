@@ -10,7 +10,7 @@ import { h, fill, icon, api, dialog, confirmDialog, menu, toast, toastError, fmt
 import { os, call, select, selected, loadOs, tint, onOs } from "./client.js";
 import { iconName, ICON_NAMES } from "./sprite.js";
 import { dropSession } from "./frames.js";
-import { createCodePane } from "./code.js";
+import { createStudioCodeEditor, renderStructuralDiff } from "../studio/index.js";
 import { createThemeStudio } from "./theme-studio.js";
 import { createMotionStudio } from "./motion-studio.js";
 import { silhouetteSvg } from "./lib/summary.js";
@@ -37,7 +37,7 @@ export function createBuilder({ onOpenCode } = {}) {
   const pane = h("div.stx-pane");
   const el = h("aside.stx-builder", null, tabs, pane);
 
-  const codePane = createCodePane({ onTargetChange: (t) => { if (t) remember("code", `${t.kind}:${t.id}`); } });
+  const codePane = createStudioCodeEditor({ onTargetChange: (t) => { if (t) remember("code", `${t.kind}:${t.id}`); } });
   const themeStudio = createThemeStudio();
   const motionStudio = createMotionStudio();
 
@@ -519,6 +519,8 @@ export function createBuilder({ onOpenCode } = {}) {
       ...(gs.length ? gs.map((g) => row(g.id, "widget", (os.snap.widgetKinds.find((k) => k.kind === g.kind) ?? {}).name ?? g.kind, "widget",
         (os.snap.widgetKinds.find((k) => k.kind === g.kind) ?? {}).icon ?? "apps"))
         : [h("div.dim", { style: { padding: "4px 8px", fontSize: "11px" } }, "No widgets here yet.")]),
+      h("div.section-label.tight", "Snapshots"),
+      h("div", { id: "os-checkpoints" }),
       h("div.section-label.tight", "History"),
       h("div", { id: "os-history" }),
     );
@@ -636,6 +638,77 @@ export function createBuilder({ onOpenCode } = {}) {
     } catch { /* history is a nicety */ }
   }
 
+  async function newCheckpoint() {
+    const got = await dialog({
+      title: "New snapshot",
+      fields: [{ name: "name", label: "Name", placeholder: "Before redesign" }],
+      confirmLabel: "Create",
+    });
+    if (!got?.name) return;
+    try {
+      await call("checkpoint", { name: got.name.trim() });
+      toast(`Created snapshot "${got.name}"`, { kind: "ok" });
+      paintCheckpoints(pane.querySelector("#os-checkpoints"));
+    } catch (e) { toastError("Could not create snapshot", e); }
+  }
+
+  async function restoreCheckpoint(c) {
+    let diff = null;
+    try { diff = (await call("checkpointDiff", { id: c.id })).diff; } catch { /* fine */ }
+    const summary = diff ? diffSummary(diff) : "";
+    const got = await confirmDialog(
+      `Restore snapshot "${c.name}"?`,
+      `${summary ? `Restoring changes: ${summary}. ` : ""}The restore is itself a new revision, so it can be undone.`,
+      { confirmLabel: "Restore" },
+    );
+    if (!got) return;
+    try {
+      await call("checkpointRestore", { id: c.id });
+      await loadOs();
+      toast(`Restored "${c.name}"`, { kind: "ok" });
+    } catch (e) { toastError("Could not restore snapshot", e); }
+  }
+
+  async function paintCheckpoints(host) {
+    if (!host) return;
+    try {
+      const r = await call("checkpoints", {});
+      const list = r.checkpoints ?? [];
+      const openDiff = new Set();
+      const paint = () => fill(host,
+        h("div", { style: { display: "flex", justifyContent: "flex-end", marginBottom: "6px" } },
+          h("button.ghost.sm", { onclick: newCheckpoint }, "+ New snapshot")),
+        ...(list.length ? list.map((c) => {
+          const diffHost = h("div.diff-box", { hidden: !openDiff.has(c.id) });
+          return h("div.hist-item", null,
+            h("button.layer-row", {
+              title: `Restore snapshot "${c.name}"`,
+              onclick: () => restoreCheckpoint(c),
+            }, icon("history", 14), h("span.nm", c.name), h("span.sub", `r${c.rev}${c.ts ? ` · ${new Date(c.ts).toLocaleDateString()}` : ""}`)),
+            h("button.diff-toggle", {
+              title: "What is different between this snapshot and now",
+              onclick: async () => {
+                if (openDiff.has(c.id)) {
+                  openDiff.delete(c.id);
+                  diffHost.hidden = true;
+                } else {
+                  openDiff.add(c.id);
+                  diffHost.hidden = false;
+                  try {
+                    const d = await call("checkpointDiff", { id: c.id });
+                    fill(diffHost, renderStructuralDiff(d.diff));
+                  } catch (err) {
+                    fill(diffHost, h("div.dim", err.message));
+                  }
+                }
+              },
+            }, openDiff.has(c.id) ? "hide" : "diff"),
+            diffHost);
+        }) : [h("div.dim", { style: { padding: "4px 8px", fontSize: "11px" } }, "No snapshots yet. Create one to checkpoint your desktop state.")]));
+      paint();
+    } catch { /* checkpoints are a nicety */ }
+  }
+
   // ── Code tab ──────────────────────────────────────────────────────────────
 
   /** Deep link from the Library, the agent panel or Spotlight: show this file. */
@@ -662,7 +735,11 @@ export function createBuilder({ onOpenCode } = {}) {
   function render() {
     if (!os.doc) return;
     fill(tabs, ...TABS.map(([id, label]) =>
-      h("button.seg", { class: tab === id ? "on" : "", onclick: () => setTab(id) }, label, id === "code" && codePane.hasDirty() ? h("span.dot") : null)));
+      h("button.seg", {
+        "data-tab": id,
+        class: tab === id ? "on" : "",
+        onclick: () => setTab(id)
+      }, label, id === "code" && codePane.hasDirty() ? h("span.dot") : null)));
     el.classList.toggle("wide", tab === "code");
     if (tab !== "theme") themeStudio.destroy();
     if (tab !== "motion") motionStudio.destroy();
@@ -680,6 +757,7 @@ export function createBuilder({ onOpenCode } = {}) {
     } else if (tab === "layers") {
       const body = layers();
       fill(pane, h("div.stx-scroll", { style: { paddingTop: "12px" } }, body));
+      paintCheckpoints(pane.querySelector("#os-checkpoints"));
       paintHistory(pane.querySelector("#os-history"));
     } else if (tab === "theme") {
       themeStudio.render();
@@ -703,6 +781,7 @@ export function createBuilder({ onOpenCode } = {}) {
       { name: "Publish this OS as a distro…", sub: "Distros", icon: "layers", run: publish },
       { name: "Export distro file", sub: "Distros", icon: "save", run: exportFile },
       { name: "Import distro file…", sub: "Distros", icon: "files", run: importFile },
+      { name: "Create snapshot…", sub: "History", icon: "history", run: newCheckpoint },
       ...TABS.map(([id, label]) => ({ name: `Go to ${label}`, sub: "Studio", icon: "layers", run: () => setTab(id) })),
       ...Object.values(os.doc.apps).filter((a) => a.kind === "bundle").map((a) => ({ name: `Edit ${a.name} source`, sub: "Code", icon: "code", run: () => openCode("app", a.id) })),
       { name: "Save all open files", sub: "Code", icon: "save", run: () => codePane.saveAll() },

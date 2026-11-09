@@ -15,6 +15,7 @@ import { createStudioPalette } from "./palette.js";
 import { createAgentPanel, mountAssistantWindow } from "./agent.js";
 import { startBroker } from "./frames.js";
 import { firstRun, needsFirstRun } from "./first-run.js";
+import { DEVICES, deviceOf, computeStageLayout, formatStageBadge } from "../studio/index.js";
 
 mountSprite();
 os.design = true;
@@ -173,12 +174,16 @@ function renderStageBar() {
     }, String(w.n))),
     h("button.ws-add", { title: "New workspace", onclick: () => call("workspaceAdd", {}) }, icon("plus", 12)),
     h("span.stx-div"),
-    h("div.seg-group", null, ...DEVICES.map((dev) => seg(dev.name, device === dev.id, () => {
-      device = dev.id;
-      persist();
-      applyDevice();
-      paint();
-    }))),
+    h("div.seg-group", null, ...DEVICES.map((dev) => h("button.seg", {
+      "data-device": dev.id,
+      class: device === dev.id ? "on" : "",
+      onclick: () => {
+        device = dev.id;
+        persist();
+        applyDevice();
+        paint();
+      },
+    }, dev.name))),
     h("span.spacer"),
     h("button.seg", { title: "Arrange in a grid", onclick: () => call("arrange", { preset: "grid", viewport: screen.viewport() }) }, "Arrange"),
     stageBadge,
@@ -198,31 +203,23 @@ function renderStageBar() {
 // the stage picks a device, renders the screen at that size, and scales the whole
 // thing down to fit. The document does not change; the pixels do.
 
-const DEVICES = [
-  { id: "desktop", name: "Desktop", w: 1440, h: 900 },
-  { id: "tablet", name: "Tablet", w: 1024, h: 768 },
-  { id: "phone", name: "Phone", w: 390, h: 780 },
-  { id: "fit", name: "Fit", w: null, h: null }, // the pane itself, whatever it is
-];
 let device = localStorage.getItem("sbx.studio.device") ?? "desktop";
-const deviceOf = () => DEVICES.find((d) => d.id === device) ?? DEVICES[0];
 let stageScale = 1;
 
 function applyDevice() {
-  const dev = deviceOf();
+  const dev = deviceOf(device);
   const el = screen.el;
-  if (!dev.w) {
+  const pane = viewport.getBoundingClientRect();
+  const layout = computeStageLayout({ paneWidth: pane.width, paneHeight: pane.height, device: dev, pad: 28 });
+  stageScale = layout.scale;
+  if (!layout.staged) {
     el.classList.remove("staged");
     el.style.width = el.style.height = el.style.transform = "";
-    stageScale = 1;
   } else {
-    const pane = viewport.getBoundingClientRect();
-    const pad = 28; // the viewport's own padding, both sides
-    stageScale = Math.min(1, Math.min((pane.width - pad) / dev.w, (pane.height - pad) / dev.h));
     el.classList.add("staged");
-    el.style.width = `${dev.w}px`;
-    el.style.height = `${dev.h}px`;
-    el.style.transform = `translate(-50%, -50%) scale(${stageScale})`;
+    el.style.width = `${layout.width}px`;
+    el.style.height = `${layout.height}px`;
+    el.style.transform = layout.transform;
   }
   if (stageBadge.isConnected) renderStageBar();
 }
@@ -318,9 +315,15 @@ document.addEventListener("keydown", (e) => {
 // does not; leaving the page should ask.
 window.addEventListener("beforeunload", (e) => { if (builder.dirty) { e.preventDefault(); e.returnValue = ""; } });
 
-// A deep link (#code=app:port-monitor/index.html) from Spotlight or a tool card.
+// A deep link (#code=app:port-monitor/index.html or #tab=layers) from Spotlight or a tool card.
 (function deepLink() {
   const m = /^#code=(app|widget):([a-z0-9_-]+)(?:\/(.+))?$/.exec(location.hash);
-  if (!m) return;
-  const off = onOs(() => { if (!os.doc) return; off(); builder.openCode(m[1], m[2], m[3] ?? null); });
+  if (m) {
+    const off = onOs(() => { if (!os.doc) return; off(); builder.openCode(m[1], m[2], m[3] ?? null); });
+    return;
+  }
+  const t = /^#tab=([a-z]+)$/.exec(location.hash);
+  if (t) {
+    const off = onOs(() => { if (!os.doc) return; off(); builder.setTab(t[1]); });
+  }
 })();
