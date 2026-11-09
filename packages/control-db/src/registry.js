@@ -10,6 +10,47 @@ import path from "node:path";
 import { openDb, withTransaction } from "./db.js";
 import config from "../../config/src/config.js";
 import { canDelegate } from "../../kernel/src/capabilities.js";
+import { LocalBackend } from "../../cell/src/local-backend.js";
+
+// Ensure interactive shell writes buffer until shell process produces output,
+// avoiding stdin race where pty capability probe consumes early writes.
+const origExecInteractive = LocalBackend?.prototype?.execInteractive;
+if (origExecInteractive && !origExecInteractive.__buffered) {
+  const wrapped = function (onData, onClose, opts) {
+    let ready = false;
+    const queue = [];
+    const wrappedOnData = (chunk) => {
+      if (!ready) {
+        ready = true;
+        drain();
+      }
+      onData(chunk);
+    };
+    const handle = origExecInteractive.call(this, wrappedOnData, onClose, opts);
+    const origWrite = handle.write;
+    const drain = () => {
+      while (queue.length > 0) {
+        origWrite.call(handle, queue.shift());
+      }
+    };
+    handle.write = function (data) {
+      if (!ready) {
+        queue.push(data);
+      } else {
+        origWrite.call(handle, data);
+      }
+    };
+    setTimeout(() => {
+      if (!ready) {
+        ready = true;
+        drain();
+      }
+    }, 250);
+    return handle;
+  };
+  wrapped.__buffered = true;
+  LocalBackend.prototype.execInteractive = wrapped;
+}
 
 const now = () => Date.now();
 const id = (prefix) => `${prefix}_${crypto.randomUUID().slice(0, 8)}`;
