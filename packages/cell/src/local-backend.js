@@ -184,12 +184,8 @@ export class LocalBackend {
             const content = fs.readFileSync(mPath, "utf8");
             const p = parseInt(content.split("\n")[1]?.trim(), 10);
             if (p && !Number.isNaN(p)) {
-              if (process.platform !== "win32") {
-                try { process.kill(-p, "SIGKILL"); } catch {}
-              }
-              try { process.kill(p, "SIGKILL"); } catch {}
+              killTree(p, "SIGKILL");
             }
-            try { fs.unlinkSync(mPath); } catch {}
           }
         } catch {}
         detachedSpawn(sh.bin, sh.argv(cleanupScript(marker, tmp)), { detached: process.platform !== "win32" });
