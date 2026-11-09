@@ -15,7 +15,7 @@ import { createStudioPalette } from "./palette.js";
 import { createAgentPanel, mountAssistantWindow } from "./agent.js";
 import { startBroker } from "./frames.js";
 import { firstRun, needsFirstRun } from "./first-run.js";
-import { DEVICES, deviceOf, computeStageLayout } from "../studio/index.js";
+import { DEVICES, deviceOf, computeStageLayout, formatStageBadge } from "../studio/index.js";
 
 mountSprite();
 os.design = true;
@@ -188,9 +188,7 @@ function renderStageBar() {
     h("button.seg", { title: "Arrange in a grid", onclick: () => call("arrange", { preset: "grid", viewport: screen.viewport() }) }, "Arrange"),
     stageBadge,
   );
-  const dev = deviceOf();
-  const size = dev.w ? `${dev.w}×${dev.h}${stageScale < 0.995 ? ` · ${Math.round(stageScale * 100)}%` : ""}` : "fit";
-  stageBadge.textContent = `${stageMode} · ${size} · ${d.wm.mode} · ws ${d.activeWorkspace} · r${d.rev}`;
+  stageBadge.textContent = formatStageBadge({ stageMode, device, scale: stageScale, doc: d });
 }
 
 /** Rebuild the row of panels for the current view. */

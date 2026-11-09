@@ -6,8 +6,6 @@
 // and is scaled via CSS transform to fit the stage viewport without prematurely
 // collapsing into the phone/compact layout on desktop or tablet viewports.
 
-export const COMPACT_BREAKPOINT = 720;
-
 export const DEVICES = Object.freeze([
   { id: "desktop", name: "Desktop", w: 1440, h: 900 },
   { id: "tablet", name: "Tablet", w: 1024, h: 768 },
@@ -17,16 +15,6 @@ export const DEVICES = Object.freeze([
 
 export function deviceOf(id) {
   return DEVICES.find((d) => d.id === id) ?? DEVICES[0];
-}
-
-/**
- * Check if a preset or width triggers the mobile compact mode (< 720px).
- */
-export function isCompactPreset(deviceOrWidth) {
-  if (deviceOrWidth == null) return false;
-  if (typeof deviceOrWidth === "number") return deviceOrWidth < COMPACT_BREAKPOINT;
-  if (deviceOrWidth.w == null) return false;
-  return deviceOrWidth.w < COMPACT_BREAKPOINT;
 }
 
 /**
@@ -48,7 +36,6 @@ export function computeStageLayout({ paneWidth, paneHeight, device, pad = 28 }) 
       width: null,
       height: null,
       transform: "",
-      compact: false,
     };
   }
 
@@ -63,7 +50,6 @@ export function computeStageLayout({ paneWidth, paneHeight, device, pad = 28 }) 
     width: dev.w,
     height: dev.h,
     transform: `translate(-50%, -50%) scale(${scale})`,
-    compact: isCompactPreset(dev),
   };
 }
 

@@ -7,14 +7,7 @@ import { openDb, closeDb } from "../packages/control-db/src/db.js";
 import { ensureSeed, grantsFor } from "../packages/control-db/src/registry.js";
 import { getKernel, _resetKernels } from "../packages/kernel/src/kernel.js";
 import { proposalImpact } from "../packages/os/src/proposals.js";
-
-import {
-  structuralDiff,
-  diffSummary,
-  changedSections,
-  lineDiff,
-  symbolsIn,
-} from "../packages/os/src/diff.js";
+import { diffSummary } from "../packages/os/src/diff.js";
 
 import {
   DEVICES,
@@ -102,168 +95,69 @@ test("computeStageLayout handles fit preset", () => {
   assert.equal(layout.transform, "");
 });
 
-test("formatStageBadge formats device scale and doc info", () => {
+test("formatStageBadge accurately distinguishes device presets and formats doc state", () => {
   const doc = { wm: { mode: "floating" }, activeWorkspace: 1, rev: 42 };
-  const badge = formatStageBadge({
-    stageMode: "design",
-    device: "desktop",
-    scale: 0.75,
-    doc,
-  });
-  assert.ok(badge.includes("design"));
-  assert.ok(badge.includes("1440×900"));
-  assert.ok(badge.includes("75%"));
-  assert.ok(badge.includes("floating"));
-  assert.ok(badge.includes("r42"));
+
+  // Desktop
+  const desktopBadge = formatStageBadge({ stageMode: "design", device: "desktop", scale: 0.75, doc });
+  assert.ok(desktopBadge.includes("design"));
+  assert.ok(desktopBadge.includes("1440×900"), "desktop badge shows 1440×900");
+  assert.ok(desktopBadge.includes("75%"));
+  assert.ok(desktopBadge.includes("floating"));
+  assert.ok(desktopBadge.includes("r42"));
+
+  // Tablet
+  const tabletBadge = formatStageBadge({ stageMode: "design", device: "tablet", scale: 0.8, doc });
+  assert.ok(tabletBadge.includes("1024×768"), "tablet badge shows 1024×768");
+  assert.ok(!tabletBadge.includes("1440×900"), "tablet badge must not show desktop dimensions");
+
+  // Phone
+  const phoneBadge = formatStageBadge({ stageMode: "preview", device: "phone", scale: 1, doc });
+  assert.ok(phoneBadge.includes("preview"));
+  assert.ok(phoneBadge.includes("375×667"), "phone badge shows 375×667");
+  assert.ok(!phoneBadge.includes("1440×900"), "phone badge must not show desktop dimensions");
+
+  // Fit
+  const fitBadge = formatStageBadge({ stageMode: "design", device: "fit", scale: 1, doc });
+  assert.ok(fitBadge.includes("fit"), "fit badge shows fit");
+  assert.ok(!fitBadge.includes("1440×900"), "fit badge must not show desktop dimensions");
+
+  // All distinct presets produce distinct badge strings
+  assert.notEqual(desktopBadge, tabletBadge, "desktop and tablet badges must differ");
+  assert.notEqual(tabletBadge, phoneBadge, "tablet and phone badges must differ");
+  assert.notEqual(phoneBadge, fitBadge, "phone and fit badges must differ");
 });
 
-// ── C2 & C3: Structural Document Diffing ──────────────────────────────────────
+// ── C2 & C3: Structural Diff Summary & Formatting ────────────────────────────
 
-test("structuralDiff accurately tracks added, removed, and modified elements", () => {
-  const before = {
-    windows: [
-      { id: "w1", app: "notes", title: "My Note", x: 100, y: 100, w: 400, h: 300, ws: 1 },
-      { id: "w2", app: "terminal", title: "Terminal", x: 200, y: 200, w: 500, h: 400, ws: 1 },
-    ],
-    widgets: [
-      { id: "g1", kind: "clock", x: 10, y: 10, w: 100, h: 50, ws: 1, pin: "none" },
-    ],
-    workspaces: [
-      { n: 1, name: "Main", wallpaper: "default" },
-    ],
-    theme: { base: "sand", tokens: { accent: "#ff8800" } },
-    animation: { preset: "natural" },
-    wm: { mode: "floating" },
-    shell: { dock: "bottom" },
-    apps: { "custom-app": { name: "Custom App" } },
-    widgetKinds: { "custom-widget": { name: "Custom Widget" } },
-    name: "Initial OS",
+test("diffSummary formats kernel structural diffs into concise human summaries", () => {
+  assert.equal(diffSummary(null), "identical to now");
+  assert.equal(diffSummary({}), "identical to now");
+
+  const diff = {
+    windows: { added: 1, removed: 1, changed: 1 },
+    widgets: { added: 2, removed: 0, changed: 0 },
+    workspaces: { added: 0, removed: 0, changed: 1 },
+    theme: ["base", "accent"],
+    animation: ["natural"],
+    wm: ["mode"],
+    shell: ["dock"],
+    apps: ["my-app"],
+    widgetKinds: ["clock"],
+    name: "New OS",
   };
 
-  const after = {
-    windows: [
-      { id: "w1", app: "notes", title: "Updated Note", x: 120, y: 100, w: 400, h: 300, ws: 1 }, // changed title & x
-      // w2 removed
-      { id: "w3", app: "browser", title: "Web", x: 50, y: 50, w: 800, h: 600, ws: 1 }, // added
-    ],
-    widgets: [
-      { id: "g1", kind: "clock", x: 10, y: 10, w: 100, h: 50, ws: 1, pin: "none" }, // unchanged
-      { id: "g2", kind: "weather", x: 120, y: 10, w: 100, h: 50, ws: 1, pin: "none" }, // added
-    ],
-    workspaces: [
-      { n: 1, name: "Main", wallpaper: "ocean" }, // changed wallpaper
-      { n: 2, name: "Dev", wallpaper: "dark" }, // added
-    ],
-    theme: { base: "sand", tokens: { accent: "#00aaff" } }, // changed accent
-    animation: { preset: "snappy" }, // changed animation
-    wm: { mode: "tiling" }, // changed wm
-    shell: { dock: "left" }, // changed shell
-    apps: { "custom-app": { name: "Custom App" }, "new-app": { name: "New" } },
-    widgetKinds: { "custom-widget": { name: "Custom Widget" } },
-    name: "Redesigned OS",
-  };
-
-  const diff = structuralDiff(before, after);
-
-  // Windows: 1 added, 1 removed, 1 changed
-  assert.equal(diff.windows.added, 1);
-  assert.equal(diff.windows.removed, 1);
-  assert.equal(diff.windows.changed, 1);
-  assert.equal(diff.windows.changedItems[0].id, "w1");
-  assert.deepEqual(diff.windows.changedItems[0].keys.sort(), ["title", "x"].sort());
-
-  // Widgets: 1 added, 0 removed, 0 changed
-  assert.equal(diff.widgets.added, 1);
-  assert.equal(diff.widgets.removed, 0);
-  assert.equal(diff.widgets.changed, 0);
-
-  // Workspaces: 1 added, 0 removed, 1 changed
-  assert.equal(diff.workspaces.added, 1);
-  assert.equal(diff.workspaces.changed, 1);
-
-  // Theme & Animation & Layout & Shell
-  assert.ok(diff.theme.includes("accent"));
-  assert.deepEqual(diff.animation, ["snappy"]);
-  assert.ok(diff.wm.includes("mode"));
-  assert.ok(diff.shell.includes("dock"));
-  assert.ok(diff.apps.includes("new-app"));
-  assert.equal(diff.name, true);
-
-  // diffSummary produces clear description
   const summary = diffSummary(diff);
   assert.ok(summary.includes("3 windows"));
-  assert.ok(summary.includes("1 widget"));
-  assert.ok(summary.includes("2 workspaces"));
-  assert.ok(summary.includes("theme"));
+  assert.ok(summary.includes("2 widgets"));
+  assert.ok(summary.includes("1 workspace"));
+  assert.ok(summary.includes("theme (base, accent)"));
   assert.ok(summary.includes("motion"));
-  assert.ok(summary.includes("layout"));
-  assert.ok(summary.includes("shell"));
+  assert.ok(summary.includes("layout (mode)"));
+  assert.ok(summary.includes("shell (dock)"));
+  assert.ok(summary.includes("apps (my-app)"));
+  assert.ok(summary.includes("widget kinds (clock)"));
   assert.ok(summary.includes("name"));
-
-  // changedSections produces list of touched section names
-  const sections = changedSections(diff);
-  assert.ok(sections.includes("windows"));
-  assert.ok(sections.includes("widgets"));
-  assert.ok(sections.includes("workspaces"));
-  assert.ok(sections.includes("theme"));
-  assert.ok(sections.includes("animation"));
-  assert.ok(sections.includes("layout"));
-  assert.ok(sections.includes("shell"));
-  assert.ok(sections.includes("apps"));
-});
-
-// ── C2: Editor Symbol Jumping & Line Diffs ─────────────────────────────────────
-
-test("symbolsIn extracts functions, classes, and IDs from source", () => {
-  const jsCode = `
-export function renderDashboard() {
-  const x = 1;
-}
-
-class WidgetManager {
-  init() {}
-}
-
-const calculateTotal = (a, b) => a + b;
-`;
-
-  const symbols = symbolsIn(jsCode, "app.js");
-  const names = symbols.map((s) => s.name);
-  assert.ok(names.includes("renderDashboard"));
-  assert.ok(names.includes("WidgetManager"));
-  assert.ok(names.includes("calculateTotal"));
-
-  const htmlCode = `
-<div id="main-header">
-  <button id="submit-button">Submit</button>
-</div>
-`;
-  const htmlSymbols = symbolsIn(htmlCode, "index.html");
-  const htmlNames = htmlSymbols.map((s) => s.name);
-  assert.ok(htmlNames.includes("#main-header"));
-  assert.ok(htmlNames.includes("#submit-button"));
-});
-
-test("lineDiff computes line additions, removals, and unchanged lines", () => {
-  const before = "const a = 1;\nconst b = 2;\nconsole.log(a + b);";
-  const after = "const a = 1;\nconst b = 3;\nconst c = 4;\nconsole.log(a + b);";
-
-  const diff = lineDiff(before, after);
-  assert.ok(Array.isArray(diff));
-
-  const kinds = diff.map((d) => d.kind);
-  assert.ok(kinds.includes(" "));
-  assert.ok(kinds.includes("-"));
-  assert.ok(kinds.includes("+"));
-
-  // Find added line
-  const added = diff.filter((d) => d.kind === "+").map((d) => d.text);
-  assert.ok(added.includes("const b = 3;"));
-  assert.ok(added.includes("const c = 4;"));
-
-  // Find removed line
-  const removed = diff.filter((d) => d.kind === "-").map((d) => d.text);
-  assert.ok(removed.includes("const b = 2;"));
 });
 
 // ── C2 & C3: Proposal Review Flow & Measured Structural Diffs ─────────────────

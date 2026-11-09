@@ -10,10 +10,7 @@ import { h, fill, icon, toast, toastError } from "../core.js";
 import { os, call, onOs } from "../os/client.js";
 import { createCodePane } from "../os/code.js";
 import { proposalImpact } from "../os/lib/proposals.js";
-import { lineDiff, symbolsIn, SYMBOL_RULES } from "../os/lib/diff.js";
 import { renderStructuralDiff } from "./review.js";
-
-export { symbolsIn, SYMBOL_RULES, lineDiff };
 
 export function createStudioCodeEditor({ onTargetChange } = {}) {
   const pane = createCodePane({ onTargetChange });
@@ -28,9 +25,9 @@ export function createStudioCodeEditor({ onTargetChange } = {}) {
 
   const head = pane.el.querySelector(".code-head");
   if (head) {
-    const buttons = head.querySelectorAll("button.rail-btn.sm");
-    if (buttons.length >= 4) {
-      buttons[3].before(proposalBtn);
+    const consoleBtn = head.querySelector('button[title*="console"]');
+    if (consoleBtn) {
+      consoleBtn.before(proposalBtn);
     } else {
       head.appendChild(proposalBtn);
     }
