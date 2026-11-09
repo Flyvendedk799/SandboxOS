@@ -52,14 +52,11 @@ export function ptyWrapper(shellCmd = "/bin/sh -i", tmp = "/tmp") {
   // closed terminal left a live shell behind in the Cell.
   const inner = `tty > \\"$M\\" 2>/dev/null; echo $$ >> \\"$M\\" 2>/dev/null; exec ${shellCmd}`;
   return [
-    `M="${tmp}/.sbx-tty-$1"; export SBX_TTY="$M"`,
+    `M="${tmp}/.sbx-tty-$1"`,
     'if command -v script >/dev/null 2>&1; then',
-    '  exec 9<&0 </dev/null',
     '  if script -qfc true /dev/null >/dev/null 2>&1; then',
-    '    exec 0<&9 9<&-',
     `    exec script -qfc "${inner}" /dev/null`,
     "  else",
-    '    exec 0<&9 9<&-',
     // BSD takes the file first and the command as ordinary argv after it, so the
     // recorder needs a shell of its own to be a single command.
     `    exec script -q /dev/null /bin/sh -c "${inner}"`,
@@ -85,4 +82,4 @@ export function resizeScript(marker, cols, rows, tmp = "/tmp") {
 /** End the session: kill the shell's process group (it is a session leader
  *  under `script`, so this takes its children too), then drop the marker. */
 export const cleanupScript = (marker, tmp = "/tmp") =>
-  `M="${markerPath(marker, tmp)}"; T=$(head -n1 "$M" 2>/dev/null); [ -n "$T" ] && pkill -9 -t "\${T#/dev/}" 2>/dev/null; P=$(sed -n 2p "$M" 2>/dev/null); if [ -n "$P" ]; then kill -9 -"$P" 2>/dev/null; kill -9 -- -"$P" 2>/dev/null; kill -9 "$P" 2>/dev/null; fi; for p in /proc/[0-9]*; do q=\${p#/proc/}; [ "$q" = "$$" ] && continue; if grep -q -s -F "SBX_TTY=$M" "/proc/$q/environ" 2>/dev/null; then kill -9 -"$q" 2>/dev/null; kill -9 "$q" 2>/dev/null; fi; done; rm -f "$M"`;
+  `P=$(sed -n 2p "${markerPath(marker, tmp)}" 2>/dev/null); if [ -n "$P" ]; then kill -9 -- -"$P" 2>/dev/null; kill -9 "$P" 2>/dev/null; fi; rm -f "${markerPath(marker, tmp)}"`;
