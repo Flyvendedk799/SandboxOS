@@ -10,8 +10,7 @@ import { h, fill, icon, dialog, confirmDialog, menu, toast, toastError, fmtBytes
 import { os, call, onOs } from "../os/client.js";
 import { createEditor, languageFor } from "../editor.js";
 import { frameLogs, clearFrameLogs, onFrameLog } from "../os/frames.js";
-import { proposalImpact, structuralDiff, diffSummary, lineDiff } from "/static/js/os/lib/proposals.js";
-import { renderStructuralDiff } from "./review.js";
+import { proposalImpact, lineDiff } from "/static/js/os/lib/proposals.js";
 
 const STARTERS = {
   ".html": "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\" />\n<link rel=\"stylesheet\" href=\"./app.css\" />\n</head>\n<body>\n\n<script type=\"module\" src=\"./app.js\"></script>\n</body>\n</html>\n",

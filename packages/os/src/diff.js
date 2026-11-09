@@ -164,4 +164,3 @@ export function symbolsIn(text, langOrPath = "js") {
   }
   return out;
 }
-

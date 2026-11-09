@@ -15,7 +15,7 @@ import { createStudioPalette } from "./palette.js";
 import { createAgentPanel, mountAssistantWindow } from "./agent.js";
 import { startBroker } from "./frames.js";
 import { firstRun, needsFirstRun } from "./first-run.js";
-import { DEVICES, deviceOf, computeStageLayout, formatStageBadge } from "../studio/index.js";
+import { DEVICES, deviceOf, computeStageLayout } from "../studio/index.js";
 
 mountSprite();
 os.design = true;

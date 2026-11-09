@@ -6,7 +6,7 @@
 
 import { h, fill, icon, dialog, confirmDialog, toast, toastError } from "../core.js";
 import { os, call, loadOs, onOs } from "../os/client.js";
-import { proposalImpact, structuralDiff, diffSummary, changedSections } from "/static/js/os/lib/proposals.js";
+import { proposalImpact, diffSummary } from "/static/js/os/lib/proposals.js";
 
 /**
  * Render a structural diff object as a formatted DOM element.
@@ -183,7 +183,7 @@ export function createReviewWorkflow({ onApplied } = {}) {
                   onclick: () => restoreCheckpoint(c),
                 }, icon("history", 14),
                   h("span.nm", c.name),
-                  h("span.sub", `r${c.rev} · ${new Date(c.createdAt).toLocaleDateString()}`)),
+                  h("span.sub", `r${c.rev}${c.ts ? ` · ${new Date(c.ts).toLocaleDateString()}` : ""}`)),
                 h("button.diff-toggle", {
                   title: "Compare snapshot against current document",
                   onclick: async () => {
