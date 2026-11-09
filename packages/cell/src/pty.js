@@ -54,11 +54,14 @@ export function ptyWrapper(shellCmd = "/bin/sh -i", tmp = "/tmp") {
   return [
     `M="${tmp}/.sbx-tty-$1"`,
     'if command -v script >/dev/null 2>&1; then',
-    '  if script --help </dev/null >/dev/null 2>&1; then',
+    '  exec 9<&0 </dev/null',
+    '  if script -qfc true /dev/null >/dev/null 2>&1; then',
+    '    exec 0<&9 9<&-',
     `    exec script -qfc "${inner}" /dev/null`,
     "  else",
     // BSD takes the file first and the command as ordinary argv after it, so the
     // recorder needs a shell of its own to be a single command.
+    '    exec 0<&9 9<&-',
     `    exec script -q /dev/null /bin/sh -c "${inner}"`,
     "  fi",
     "else",
