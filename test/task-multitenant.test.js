@@ -8,9 +8,10 @@ import { ensureSeed } from "../packages/control-db/src/registry.js";
 import { createServer } from "../apps/gateway/src/server.js";
 
 let srv, baseUrl;
+let _ipSeq = 1;
+const nextIp = () => `10.99.0.${(_ipSeq++ % 200) + 1}`;
 
 test.before(async () => {
-  process.env.SANDBOXOS_AUTH_RATE = "0";
   openDb();
   ensureSeed("local");
   srv = createServer();
@@ -27,7 +28,7 @@ test.after(() => {
 async function postJson(path, body, headers = {}) {
   const res = await fetch(`${baseUrl}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...headers },
+    headers: { "Content-Type": "application/json", "X-Forwarded-For": nextIp(), ...headers },
     body: JSON.stringify(body),
   });
   return { status: res.status, data: await res.json(), headers: res.headers };
@@ -36,7 +37,7 @@ async function postJson(path, body, headers = {}) {
 async function getJson(path, headers = {}) {
   const res = await fetch(`${baseUrl}${path}`, {
     method: "GET",
-    headers: { "Content-Type": "application/json", ...headers },
+    headers: { "Content-Type": "application/json", "X-Forwarded-For": nextIp(), ...headers },
   });
   return { status: res.status, data: await res.json(), headers: res.headers };
 }
@@ -44,7 +45,7 @@ async function getJson(path, headers = {}) {
 async function deleteJson(path, headers = {}) {
   const res = await fetch(`${baseUrl}${path}`, {
     method: "DELETE",
-    headers: { "Content-Type": "application/json", ...headers },
+    headers: { "Content-Type": "application/json", "X-Forwarded-For": nextIp(), ...headers },
   });
   return { status: res.status, data: await res.json(), headers: res.headers };
 }

@@ -401,12 +401,11 @@ function clientIp(req) {
   return (req.headers["x-forwarded-for"]?.split(",")[0]?.trim()) || req.socket?.remoteAddress || "unknown";
 }
 function authRateLimited(req) {
-  const rate = Number(process.env.SANDBOXOS_AUTH_RATE ?? 10);
-  if (!rate || rate <= 0) return false;
+  if (!AUTH_RATE || AUTH_RATE <= 0) return false;
   const ip = clientIp(req);
   const tnow = Date.now();
   const hits = (_authHits.get(ip) ?? []).filter((t) => tnow - t < AUTH_WINDOW_MS);
-  if (hits.length >= rate) { _authHits.set(ip, hits); return true; }
+  if (hits.length >= AUTH_RATE) { _authHits.set(ip, hits); return true; }
   hits.push(tnow);
   _authHits.set(ip, hits);
   return false;
