@@ -3,6 +3,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { readSource } from "./_setup.js";
+import { openDb, closeDb } from "../packages/control-db/src/db.js";
+import { ensureSeed, grantsFor } from "../packages/control-db/src/registry.js";
+import { getKernel, _resetKernels } from "../packages/kernel/src/kernel.js";
+import { proposalImpact } from "../packages/os/src/proposals.js";
+
 import {
   structuralDiff,
   diffSummary,
@@ -260,3 +266,150 @@ test("lineDiff computes line additions, removals, and unchanged lines", () => {
   const removed = diff.filter((d) => d.kind === "-").map((d) => d.text);
   assert.ok(removed.includes("const b = 2;"));
 });
+
+// ── C2 & C3: Proposal Review Flow & Measured Structural Diffs ─────────────────
+
+test("proposal review flow: impact prediction, op argument inspection, and measured history diff", async () => {
+  openDb();
+  const { owner, sandbox } = ensureSeed("local");
+  const held = grantsFor(owner.id, sandbox.id);
+  const kernel = await getKernel(sandbox);
+  const call = (server, tool, args = {}) => kernel.call({ principalId: owner.id, heldPatterns: held, server, tool, args });
+  const ok = async (server, tool, args) => {
+    const r = await call(server, tool, args);
+    assert.ok(r.ok, `${server}.${tool}: ${r.error}`);
+    return r.result;
+  };
+
+  try {
+    await ok("desktop", "reset", {});
+
+    // Propose changes: theme change and adding a clock widget
+    const makeProposal = await ok("desktop", "propose", {
+      label: "Studio Theme & Clock",
+      ops: [
+        { tool: "themeSet", args: { theme: "aurora" } },
+        { tool: "widgetAdd", args: { kind: "clock" } },
+      ],
+    });
+    assert.ok(makeProposal.proposal?.id, "proposal created");
+
+    // Retrieve pending proposals (as studio/editor.js does in paintProposals)
+    const { proposals } = await ok("desktop", "proposals", {});
+    const p = proposals.find((x) => x.id === makeProposal.proposal.id);
+    assert.ok(p, "proposal in list");
+
+    // 1. Before apply: check impact calculation and op details
+    const impact = proposalImpact(p);
+    assert.deepEqual(impact.sections.sort(), ["theme", "widgets"].sort());
+    assert.equal(p.ops.length, 2);
+    assert.equal(p.ops[0].tool, "themeSet");
+    assert.deepEqual(p.ops[0].args, { theme: "aurora" });
+    assert.equal(p.ops[1].tool, "widgetAdd");
+    assert.deepEqual(p.ops[1].args, { kind: "clock" });
+
+    // 2. Track revision before apply (as studio/editor.js does)
+    const beforeState = await ok("desktop", "state", {});
+    const beforeRev = beforeState.doc.rev;
+
+    // 3. Apply proposal
+    const applied = await ok("desktop", "applyProposal", { id: p.id });
+    assert.ok(applied.ok, "applied successfully");
+    assert.deepEqual(applied.applied, ["themeSet", "widgetAdd"]);
+
+    // 4. Query desktop.history from beforeRev to measure exact structural diff
+    const historyRes = await ok("desktop", "history", { rev: Math.max(0, beforeRev) });
+    assert.ok(historyRes.diff, "history provides structural diff");
+    assert.ok(historyRes.diff.theme?.includes("base") || historyRes.diff.theme?.length);
+    assert.equal(historyRes.diff.widgets?.added, 1);
+
+    const summary = diffSummary(historyRes.diff);
+    assert.ok(summary.includes("theme") || summary.includes("widget"));
+  } finally {
+    _resetKernels();
+    closeDb();
+  }
+});
+
+// ── C3: Checkpoint Snapshot Creation, Comparison & Restoration ────────────────
+
+test("checkpoint workflow: creation, structural diffing, and rollback restoration", async () => {
+  openDb();
+  const { owner, sandbox } = ensureSeed("local");
+  const held = grantsFor(owner.id, sandbox.id);
+  const kernel = await getKernel(sandbox);
+  const call = (server, tool, args = {}) => kernel.call({ principalId: owner.id, heldPatterns: held, server, tool, args });
+  const ok = async (server, tool, args) => {
+    const r = await call(server, tool, args);
+    assert.ok(r.ok, `${server}.${tool}: ${r.error}`);
+    return r.result;
+  };
+
+  try {
+    await ok("desktop", "reset", {});
+    const initialDoc = (await ok("desktop", "state", {})).doc;
+
+    // 1. Create a named checkpoint snapshot
+    const cp = await ok("desktop", "checkpoint", { name: "baseline-snapshot" });
+    assert.ok(cp.checkpoint?.id, "checkpoint created");
+
+    // 2. List checkpoints
+    const { checkpoints } = await ok("desktop", "checkpoints", {});
+    const saved = checkpoints.find((c) => c.name === "baseline-snapshot");
+    assert.ok(saved, "checkpoint found in list");
+
+    // 3. Mutate desktop document
+    await ok("desktop", "themeSet", { theme: "aurora" });
+    await ok("desktop", "widgetAdd", { kind: "clock" });
+    const mutatedDoc = (await ok("desktop", "state", {})).doc;
+    assert.notEqual(mutatedDoc.theme.base, initialDoc.theme.base);
+    assert.equal(mutatedDoc.widgets.length, initialDoc.widgets.length + 1);
+
+    // 4. Compare snapshot against current doc via checkpointDiff
+    const diffRes = await ok("desktop", "checkpointDiff", { id: saved.id });
+    assert.ok(diffRes.diff, "checkpointDiff returns structural diff");
+    assert.ok(diffRes.diff.widgets?.added === 1 || diffRes.diff.widgets?.removed === 1 || diffRes.diff.theme);
+
+    // 5. Restore checkpoint
+    const restored = await ok("desktop", "checkpointRestore", { id: saved.id });
+    assert.ok(restored.ok, "checkpoint restored");
+
+    const finalDoc = (await ok("desktop", "state", {})).doc;
+    assert.equal(finalDoc.theme.base, initialDoc.theme.base, "theme restored to snapshot baseline");
+    assert.equal(finalDoc.widgets.length, initialDoc.widgets.length, "widget list restored to snapshot baseline");
+    assert.ok(finalDoc.rev > mutatedDoc.rev, "restoring is recorded as a new forward revision");
+  } finally {
+    _resetKernels();
+    closeDb();
+  }
+});
+
+// ── C2 & C3: Studio Editor & Review UI Contract Verification ──────────────────
+
+test("studio editor wires proposal review, per-op details, and measured diffs", () => {
+  const editorSrc = readSource(new URL("../apps/gateway/public/js/studio/editor.js", import.meta.url));
+  assert.match(editorSrc, /renderStructuralDiff/, "editor imports renderStructuralDiff");
+  assert.match(editorSrc, /proposalImpact/, "editor calculates proposal impact");
+  assert.match(editorSrc, /Review details/, "editor supports per-op argument inspection");
+  assert.match(editorSrc, /op-args-detail/, "editor renders formatted arguments detail pre");
+  assert.match(editorSrc, /applyProposal/, "editor applies proposal");
+  assert.match(editorSrc, /discardProposal/, "editor discards proposal");
+  assert.match(editorSrc, /call\("history", \{ rev:/, "editor measures real structural diff from history on apply");
+  assert.match(editorSrc, /renderAppliedDiff/, "editor renders measured structural diff after apply");
+});
+
+test("studio review module exports formatted structural diff component", () => {
+  const reviewSrc = readSource(new URL("../apps/gateway/public/js/studio/review.js", import.meta.url));
+  assert.match(reviewSrc, /export function renderStructuralDiff/, "review.js exports renderStructuralDiff");
+  assert.match(reviewSrc, /stx-diff-viewer/, "formats diff viewer element");
+  assert.match(reviewSrc, /diffSummary\(diff\)/, "renders diff summary");
+});
+
+test("builder layers panel integrates checkpoint snapshots and structural diffs", () => {
+  const builderSrc = readSource(new URL("../apps/gateway/public/js/os/builder.js", import.meta.url));
+  assert.match(builderSrc, /renderStructuralDiff/, "builder imports renderStructuralDiff");
+  assert.match(builderSrc, /paintCheckpoints/, "builder paints snapshots list");
+  assert.match(builderSrc, /checkpointDiff/, "builder compares snapshots with checkpointDiff");
+  assert.match(builderSrc, /checkpointRestore/, "builder restores snapshot state");
+});
+

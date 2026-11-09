@@ -8,4 +8,3 @@
 export * from "./presets.js";
 export * from "./review.js";
 export * from "./editor.js";
-export * from "./stage.js";

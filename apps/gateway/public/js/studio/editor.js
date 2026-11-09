@@ -12,6 +12,7 @@ import { createEditor, languageFor } from "../editor.js";
 import { frameLogs, clearFrameLogs, onFrameLog } from "../os/frames.js";
 import { proposalImpact } from "../os/lib/proposals.js";
 import { lineDiff, symbolsIn, SYMBOL_RULES } from "../os/lib/diff.js";
+import { renderStructuralDiff } from "./review.js";
 
 export { symbolsIn, SYMBOL_RULES };
 
@@ -436,6 +437,9 @@ export function createStudioCodeEditor({ onTargetChange } = {}) {
 
   // ── Structural Diff Review for Agent Proposals (C2) ───────────────────────
 
+  let lastApplied = null;
+  const expandedDetails = new Set(); // proposalId
+
   function toggleProposals(want) {
     const show = want ?? proposalsEl.hidden;
     proposalsEl.hidden = !show;
@@ -451,10 +455,30 @@ export function createStudioCodeEditor({ onTargetChange } = {}) {
     proposalBadge.textContent = String(count);
   }
 
+  function renderAppliedDiff() {
+    if (!lastApplied) return null;
+    return h("div.proposal.applied.stx-applied-diff", null,
+      h("div.hd", null,
+        h("b", lastApplied.label),
+        h("span.dim", `applied · r${lastApplied.rev}`)),
+      h("div.touches", { style: { padding: "6px 10px 0", fontSize: "11px", fontWeight: "600", color: "var(--stx-text-2)" } },
+        h("span", "Structural diff (measured from history):")),
+      h("div.diff-box", { style: { margin: "6px 10px 8px" } },
+        renderStructuralDiff(lastApplied.diff)),
+      h("div.act", null,
+        h("button.app-btn", {
+          onclick: () => {
+            lastApplied = null;
+            paintProposals();
+          },
+        }, "Dismiss")),
+    );
+  }
+
   function paintProposals() {
     const list = os.doc?.proposals ?? [];
     updateProposalBadge();
-    if (!list.length) {
+    if (!list.length && !lastApplied) {
       fill(proposalsEl,
         h("div.row", null, icon("play", 13), h("b", "Agent Proposals Review"), h("span.spacer"),
           h("button.rail-btn.sm", { title: "Close", onclick: () => toggleProposals(false) }, icon("x", 12))),
@@ -469,38 +493,82 @@ export function createStudioCodeEditor({ onTargetChange } = {}) {
         h("span.dim", "Structural diff review"),
         h("span.spacer"),
         h("button.rail-btn.sm", { title: "Close", onclick: () => toggleProposals(false) }, icon("x", 12))),
-      h("div.proposals-body", null, ...list.map((p) => {
-        const impact = proposalImpact(p);
-        return h("div.proposal.stx-editor-proposal", null,
-          h("div.hd", null,
-            h("b", p.label || "Agent Proposal"),
-            h("span.dim", `${p.ops?.length ?? 0} ops`)),
-          h("div.touches", null,
-            h("span.dim", "Touches:"),
-            ...impact.sections.map((s) => h("span.chip-tag", s))),
-          h("div.ops", null, ...(p.ops ?? []).map((op) => h("div.op", null,
-            h("code", `desktop.${op.tool}`),
-            h("span.dim", typeof op.args === "object" ? JSON.stringify(op.args).slice(0, 60) : String(op.args))))),
-          h("div.act", null,
-            h("button.app-btn.primary", {
-              onclick: async () => {
-                try {
-                  const r = await call("applyProposal", { id: p.id });
-                  toast("Applied proposal", { body: `${r.applied?.length ?? 0} ops applied`, kind: "ok" });
+      h("div.proposals-body", null,
+        ...list.map((p) => {
+          const impact = proposalImpact(p);
+          const showDetails = expandedDetails.has(p.id);
+          return h("div.proposal.stx-editor-proposal", null,
+            h("div.hd", null,
+              h("b", p.label || "Agent Proposal"),
+              h("span.dim", `${p.ops?.length ?? 0} op${p.ops?.length === 1 ? "" : "s"}`)),
+            h("div.touches", null,
+              h("span.dim", "would change:"),
+              ...impact.sections.map((s) => h("span.chip-tag", s)),
+              ...(impact.unknown ? [h("span.chip-tag.warn", `unknown: ${impact.unknown.join(", ")}`)] : [])),
+            h("div.ops", null, ...(p.ops ?? []).map((op) => {
+              const argsPretty = typeof op.args === "object" && op.args ? JSON.stringify(op.args, null, 2) : String(op.args ?? "");
+              const argsSummary = typeof op.args === "object" && op.args ? JSON.stringify(op.args) : String(op.args ?? "");
+              return h("div.op-item", { style: { padding: "3px 0", borderBottom: showDetails ? "1px solid var(--stx-line)" : "none" } },
+                h("div.op", null,
+                  h("code", `desktop.${op.tool}`),
+                  !showDetails ? h("span.dim", argsSummary.slice(0, 60)) : null),
+                showDetails ? h("pre.op-args-detail", {
+                  style: {
+                    margin: "4px 0 2px",
+                    padding: "6px 8px",
+                    background: "var(--stx-bg-1)",
+                    borderRadius: "6px",
+                    fontSize: "10px",
+                    fontFamily: "var(--mono)",
+                    overflowX: "auto",
+                    whiteSpace: "pre-wrap",
+                    color: "var(--stx-text-2)",
+                  },
+                }, argsPretty) : null);
+            })),
+            h("div.act", null,
+              h("button.app-btn.primary", {
+                onclick: async () => {
+                  try {
+                    const beforeRev = os.doc?.rev ?? 0;
+                    const r = await call("applyProposal", { id: p.id });
+                    let diff = null;
+                    try {
+                      const hist = await call("history", { rev: Math.max(0, beforeRev) });
+                      diff = hist?.diff ?? null;
+                    } catch { /* history lookup */ }
+                    lastApplied = {
+                      label: p.label || "Agent Proposal",
+                      rev: r.rev,
+                      diff,
+                    };
+                    expandedDetails.delete(p.id);
+                    toast("Applied proposal", { body: `${r.applied?.length ?? 0} ops applied`, kind: "ok" });
+                    paintProposals();
+                  } catch (e) { toastError("Could not apply", e); }
+                },
+              }, "Apply"),
+              h("button.app-btn", {
+                onclick: async () => {
+                  try {
+                    await call("discardProposal", { id: p.id });
+                    expandedDetails.delete(p.id);
+                    toast("Discarded proposal", { kind: "ok" });
+                    paintProposals();
+                  } catch (e) { toastError("Could not discard", e); }
+                },
+              }, "Discard"),
+              h("button.app-btn.ghost", {
+                onclick: () => {
+                  if (expandedDetails.has(p.id)) expandedDetails.delete(p.id);
+                  else expandedDetails.add(p.id);
                   paintProposals();
-                } catch (e) { toastError("Could not apply", e); }
-              },
-            }, "Apply"),
-            h("button.app-btn", {
-              onclick: async () => {
-                try {
-                  await call("discardProposal", { id: p.id });
-                  toast("Discarded proposal", { kind: "ok" });
-                  paintProposals();
-                } catch (e) { toastError("Could not discard", e); }
-              },
-            }, "Discard")));
-      })));
+                },
+              }, showDetails ? "Hide details" : "Review details")),
+          );
+        }),
+        ...(lastApplied ? [renderAppliedDiff()] : []),
+      ));
   }
 
   // ── Console & Error Surfacing (C2) ────────────────────────────────────────
@@ -616,6 +684,7 @@ export function createStudioCodeEditor({ onTargetChange } = {}) {
     find: (show = true) => toggleFind(show),
     console: (show = true) => toggleConsole(show),
     proposals: (show = true) => toggleProposals(show),
+    get lastApplied() { return lastApplied; },
     destroy() {
       bundleOff?.();
       logOff?.();
