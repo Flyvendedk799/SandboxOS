@@ -4,6 +4,8 @@
 // principals, capability grants, sessions, and the audit log. The Gateway and
 // Kernel talk to the Registry, never to raw SQL.
 
+import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import { pbkdf2Sync, scryptSync, randomBytes, timingSafeEqual } from "node:crypto";
 import path from "node:path";
@@ -13,26 +15,100 @@ import { canDelegate } from "../../kernel/src/capabilities.js";
 import { LocalBackend } from "../../cell/src/local-backend.js";
 
 // Ensure interactive shell writes buffer until shell process produces output,
-// avoiding stdin race where pty capability probe consumes early writes.
+// avoiding stdin race where pty capability probe consumes early writes, and
+// ensure session termination cleans up background orphan processes attached to the pty.
 const origExecInteractive = LocalBackend?.prototype?.execInteractive;
 if (origExecInteractive && !origExecInteractive.__buffered) {
   const wrapped = function (onData, onClose, opts) {
     let ready = false;
     const queue = [];
+    let sessionTty = null;
+    let sessionPid = null;
+    const beforeMarkers = new Set();
+    try {
+      for (const f of fs.readdirSync("/tmp")) {
+        if (f.startsWith(".sbx-tty-")) beforeMarkers.add(f);
+      }
+    } catch {}
+
+    const checkMarker = () => {
+      if (sessionTty && sessionPid) return;
+      try {
+        const markers = fs.readdirSync("/tmp").filter((f) => f.startsWith(".sbx-tty-"));
+        const m = markers.find((f) => !beforeMarkers.has(f)) || markers[markers.length - 1];
+        if (m) {
+          const lines = fs.readFileSync(`/tmp/${m}`, "utf8").trim().split("\n");
+          if (lines[0] && !sessionTty) sessionTty = lines[0].trim();
+          if (lines[1] && !sessionPid) sessionPid = lines[1].trim();
+        }
+      } catch {}
+    };
+
+    const terminateSessionProcesses = () => {
+      checkMarker();
+      if (sessionTty && sessionTty.startsWith("/dev/")) {
+        const ttyShort = sessionTty.replace(/^\/dev\//, "");
+        try { spawnSync("pkill", ["-9", "-t", ttyShort], { stdio: "ignore" }); } catch {}
+      }
+      if (sessionPid) {
+        const p = Number(sessionPid);
+        if (Number.isInteger(p) && p > 1 && p !== process.pid) {
+          try { spawnSync("pkill", ["-9", "-s", String(p)], { stdio: "ignore" }); } catch {}
+          try { process.kill(-p, "SIGKILL"); } catch {}
+          try { process.kill(p, "SIGKILL"); } catch {}
+        }
+      }
+      if (process.platform === "linux" && sessionTty && sessionTty.startsWith("/dev/")) {
+        try {
+          const ttyShort = sessionTty.replace(/^\/dev\//, "");
+          const entries = fs.readdirSync("/proc");
+          for (const entry of entries) {
+            if (!/^\d+$/.test(entry)) continue;
+            const targetPid = Number(entry);
+            if (targetPid <= 1 || targetPid === process.pid || targetPid === process.ppid) continue;
+            let shouldKill = false;
+            for (const fd of [0, 1, 2]) {
+              try {
+                const link = fs.readlinkSync(`/proc/${entry}/fd/${fd}`);
+                if (link === sessionTty || link.endsWith(ttyShort)) {
+                  shouldKill = true;
+                  break;
+                }
+              } catch {}
+            }
+            if (shouldKill) {
+              try { process.kill(-targetPid, "SIGKILL"); } catch {}
+              try { process.kill(targetPid, "SIGKILL"); } catch {}
+            }
+          }
+        } catch {}
+      }
+    };
+
     const wrappedOnData = (chunk) => {
       if (!ready) {
         ready = true;
         drain();
       }
+      checkMarker();
       onData(chunk);
     };
-    const handle = origExecInteractive.call(this, wrappedOnData, onClose, opts);
+
+    const wrappedOnClose = () => {
+      try { terminateSessionProcesses(); } catch {}
+      if (onClose) onClose();
+    };
+
+    const handle = origExecInteractive.call(this, wrappedOnData, wrappedOnClose, opts);
     const origWrite = handle.write;
+    const origKill = handle.kill;
+
     const drain = () => {
       while (queue.length > 0) {
         origWrite.call(handle, queue.shift());
       }
     };
+
     handle.write = function (data) {
       if (!ready) {
         queue.push(data);
@@ -40,12 +116,19 @@ if (origExecInteractive && !origExecInteractive.__buffered) {
         origWrite.call(handle, data);
       }
     };
+
+    handle.kill = function () {
+      try { terminateSessionProcesses(); } catch {}
+      if (origKill) origKill.call(handle);
+    };
+
     setTimeout(() => {
       if (!ready) {
         ready = true;
         drain();
       }
     }, 250);
+
     return handle;
   };
   wrapped.__buffered = true;
