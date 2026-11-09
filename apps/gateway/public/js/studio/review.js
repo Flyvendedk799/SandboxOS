@@ -6,7 +6,8 @@
 
 import { h, fill, icon, dialog, confirmDialog, toast, toastError } from "../core.js";
 import { os, call, loadOs, onOs } from "../os/client.js";
-import { proposalImpact, diffSummary } from "/static/js/os/lib/proposals.js";
+import { proposalImpact } from "../os/lib/proposals.js";
+import { diffSummary } from "../os/lib/diff.js";
 
 /**
  * Render a structural diff object as a formatted DOM element.
@@ -219,7 +220,7 @@ export function createReviewWorkflow({ onApplied } = {}) {
   async function createCheckpointPrompt() {
     const got = await dialog({
       title: "Create checkpoint snapshot",
-      fields: [{ name: "name", label: "Snapshot name", placeholder: "e.g. Before redesign", required: true }],
+      fields: [{ name: "name", label: "Snapshot name", required: true }],
       confirmLabel: "Snapshot",
     });
     if (!got?.name) return;

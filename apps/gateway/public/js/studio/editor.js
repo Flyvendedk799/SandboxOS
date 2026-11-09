@@ -10,7 +10,10 @@ import { h, fill, icon, dialog, confirmDialog, menu, toast, toastError, fmtBytes
 import { os, call, onOs } from "../os/client.js";
 import { createEditor, languageFor } from "../editor.js";
 import { frameLogs, clearFrameLogs, onFrameLog } from "../os/frames.js";
-import { proposalImpact, lineDiff } from "/static/js/os/lib/proposals.js";
+import { proposalImpact } from "../os/lib/proposals.js";
+import { lineDiff, symbolsIn, SYMBOL_RULES } from "../os/lib/diff.js";
+
+export { symbolsIn, SYMBOL_RULES };
 
 const STARTERS = {
   ".html": "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\" />\n<link rel=\"stylesheet\" href=\"./app.css\" />\n</head>\n<body>\n\n<script type=\"module\" src=\"./app.js\"></script>\n</body>\n</html>\n",
@@ -19,38 +22,6 @@ const STARTERS = {
   ".json": "{\n}\n",
   ".md": "# Notes\n",
 };
-
-export const SYMBOL_RULES = [
-  [/^\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/, "fn"],
-  [/^\s*(?:export\s+)?class\s+([A-Za-z_$][\w$]*)/, "class"],
-  [/^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/, "fn"],
-  [/^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/, "const"],
-  [/^\s*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/, "method"],
-  [/^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?([A-Za-z_$][\w$]*)\s*:\s*(?:async\s*)?(?:function|\([^)]*\)\s*=>)/, "method"],
-  [/^\s*(#[\w-]+|\.[\w-]+(?:[\s,][^{]*)?)\s*\{/, "css"],
-  [/<[a-z][\w-]*[^>]*\sid=["']([\w-]+)["']/i, "id"],
-];
-
-export function symbolsIn(text, langOrPath = "js") {
-  const lang = langOrPath?.endsWith(".html") ? "html"
-    : langOrPath?.endsWith(".css") ? "css"
-    : langOrPath?.endsWith(".js") || langOrPath?.endsWith(".mjs") || langOrPath?.endsWith(".ts") ? "js"
-    : langOrPath ?? "js";
-  const out = [];
-  const lines = String(text ?? "").split("\n");
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i];
-    if (!line.trim() || /^\s*(\/\/|\*|\/\*)/.test(line)) continue;
-    for (const [re, kind] of SYMBOL_RULES) {
-      if ((kind === "css" && lang !== "css") || (kind === "id" && lang !== "html")) continue;
-      const m = re.exec(line);
-      if (!m) continue;
-      out.push({ name: kind === "id" && !m[1].startsWith("#") ? `#${m[1].trim()}` : m[1].trim(), kind, line: i + 1 });
-      break;
-    }
-  }
-  return out;
-}
 
 export function createStudioCodeEditor({ onTargetChange } = {}) {
   let target = null;      // { kind: 'app'|'widget', id }
@@ -197,7 +168,7 @@ export function createStudioCodeEditor({ onTargetChange } = {}) {
 
   async function addFile() {
     if (!target) return;
-    const got = await dialog({ title: "New file", fields: [{ name: "path", label: "Path", placeholder: "ui/panel.js" }], confirmLabel: "Create" });
+    const got = await dialog({ title: "New file", fields: [{ name: "path", label: "Path" }], confirmLabel: "Create" });
     if (!got?.path) return;
     const p = got.path.trim().replace(/^\.\//, "");
     const ext = p.slice(p.lastIndexOf("."));
@@ -329,7 +300,7 @@ export function createStudioCodeEditor({ onTargetChange } = {}) {
     const tab = open.find((t) => t.path === active);
     if (!tab) { fill(symbolsEl, h("div.dim", { style: { padding: "8px 10px", fontSize: "11px" } }, "Open a file first")); return; }
     const found = symbolsIn(tab.editor.getValue(), tab.editor.language);
-    const filter = h("input", { placeholder: `Filter ${found.length} definitions`, autofocus: true });
+    const filter = h("input", { placeholder: "Filter by name", autofocus: true });
     const list = h("div.hits");
     const paint = () => {
       const q = filter.value.trim().toLowerCase();

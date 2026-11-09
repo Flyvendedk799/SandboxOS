@@ -641,7 +641,7 @@ export function createBuilder({ onOpenCode } = {}) {
   async function newCheckpoint() {
     const got = await dialog({
       title: "New snapshot",
-      fields: [{ name: "name", label: "Name", placeholder: "Before redesign" }],
+      fields: [{ name: "name", label: "Name" }],
       confirmLabel: "Create",
     });
     if (!got?.name) return;

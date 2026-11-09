@@ -54,7 +54,7 @@ export function ptyWrapper(shellCmd = "/bin/sh -i", tmp = "/tmp") {
   return [
     `M="${tmp}/.sbx-tty-$1"`,
     'if command -v script >/dev/null 2>&1; then',
-    '  if script -qfc true /dev/null >/dev/null 2>&1; then',
+    '  if script --help </dev/null >/dev/null 2>&1; then',
     `    exec script -qfc "${inner}" /dev/null`,
     "  else",
     // BSD takes the file first and the command as ordinary argv after it, so the
