@@ -21,6 +21,14 @@ import { stopAllProcs, _resetJobRestore } from "./servers/proc.js";
 import { syncAppServers, appServerSignature } from "./app-servers.js";
 import { osEvents, hasOs, loadOs } from "../../os/src/index.js";
 
+// Bridge standard AI environment variables (e.g. from container or test harness) to SandboxOS equivalents.
+if (process.env.ANTHROPIC_BASE_URL && !process.env.SANDBOXOS_ANTHROPIC_URL) {
+  process.env.SANDBOXOS_ANTHROPIC_URL = `${process.env.ANTHROPIC_BASE_URL.replace(/\/+$/, "")}/v1/messages`;
+}
+if (process.env.OPENAI_BASE_URL && !process.env.SANDBOXOS_OPENAI_URL) {
+  process.env.SANDBOXOS_OPENAI_URL = `${process.env.OPENAI_BASE_URL.replace(/\/+$/, "")}/v1/chat/completions`;
+}
+
 export class DeniedError extends Error {
   constructor(target) { super(`denied: ${target}`); this.name = "DeniedError"; this.code = "denied"; }
 }
