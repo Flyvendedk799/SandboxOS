@@ -303,6 +303,14 @@ test("C3: Organization team access endpoints (GET /api/team, POST /api/team, DEL
   // Deleted member can no longer log in
   const deletedLogin = await postJson("/login", { username: memberUser, password: memberPass });
   assert.equal(deletedLogin.status, 401);
+
+  // Safety check: cannot remove the last human member of a team
+  const { removeTeamMember, getPrincipal } = await import("../packages/control-db/src/registry.js");
+  const lastPrincipal = getPrincipal(afterRemove.data.members[0].id);
+  assert.throws(
+    () => removeTeamMember(lastPrincipal.tenant_id, lastPrincipal.id),
+    /cannot remove the last member of a team/
+  );
 });
 
 test("C3: Vanity domain management, resolution, and request routing", async () => {

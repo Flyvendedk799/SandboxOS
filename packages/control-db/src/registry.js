@@ -1179,6 +1179,8 @@ export function removeTeamMember(tenantId, principalId) {
   const db = openDb();
   const p = db.prepare("SELECT * FROM principals WHERE id=? AND tenant_id=?").get(principalId, tenantId);
   if (!p) throw new Error("team member not found");
+  const remaining = db.prepare("SELECT COUNT(*) as n FROM principals WHERE tenant_id=? AND kind='human' AND id<>?").get(tenantId, principalId)?.n ?? 0;
+  if (remaining === 0) throw new Error("cannot remove the last member of a team");
 
   return withTransaction((db) => {
     db.prepare("DELETE FROM grants WHERE principal_id=?").run(principalId);
