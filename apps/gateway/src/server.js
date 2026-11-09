@@ -27,6 +27,7 @@ import {
   createConversation, getConversation, listConversations, renameConversation,
   deleteConversation, appendConversationMessages, conversationMessages,
   updatePrincipalName, updateTenantName, setSandboxVanityDomain, getSandboxByVanityDomain,
+  validateVanityDomain,
   listTeamMembers, createTeamMember, removeTeamMember,
   runningCountForTenant, runningAgentCountForTenant, modelUsage,
 } from "../../../packages/control-db/src/registry.js";
@@ -570,7 +571,7 @@ async function handle(req, res) {
     const principal = authenticate(req);
     if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
     if (req.method === "GET") return sendJson(res, 200, await profileResponse(principal));
-    if (req.method === "POST") {
+    if (req.method === "POST" || req.method === "PUT") {
       const body = await readBody(req);
       const { llmProvider, apiKey, clearApiKey, completeOnboarding, onboardingCompleted, name, tenantName } = body ?? {};
       const current = getTenantProfile(principal.tenant_id);
@@ -591,7 +592,11 @@ async function handle(req, res) {
       }
       if (tenantName != null) {
         if (typeof tenantName !== "string") return sendJson(res, 400, { ok: false, error: "tenantName must be a string" });
-        updateTenantName(principal.tenant_id, tenantName.trim());
+        try {
+          updateTenantName(principal.tenant_id, tenantName.trim());
+        } catch (err) {
+          return sendJson(res, err.statusCode ?? 409, { ok: false, error: err.message });
+        }
       }
 
       // A subscription provider has no key to store: its credential is an OAuth login
@@ -735,15 +740,19 @@ async function handle(req, res) {
       if (targetTenant !== principal.tenant_id && !requireOperator(principal)) {
         return sendJson(res, 403, { ok: false, error: "operator authority required to modify another tenant's quota" });
       }
-      const updated = setQuota(targetTenant, { maxSandboxes, maxAgents, maxRunning, memMb, cpuShares, maxDiskMb, networkEgress });
-      const usage = {
-        sandboxes: sandboxCountForTenant(targetTenant),
-        runningSandboxes: runningCountForTenant(targetTenant),
-        runningAgents: runningAgentCountForTenant(targetTenant),
-        agentStats: tenantAgentStats(targetTenant),
-        tokensUsed: modelUsage(targetTenant).total,
-      };
-      return sendJson(res, 200, { ok: true, quota: updated, usage });
+      try {
+        const updated = setQuota(targetTenant, { maxSandboxes, maxAgents, maxRunning, memMb, cpuShares, maxDiskMb, networkEgress });
+        const usage = {
+          sandboxes: sandboxCountForTenant(targetTenant),
+          runningSandboxes: runningCountForTenant(targetTenant),
+          runningAgents: runningAgentCountForTenant(targetTenant),
+          agentStats: tenantAgentStats(targetTenant),
+          tokensUsed: modelUsage(targetTenant).total,
+        };
+        return sendJson(res, 200, { ok: true, quota: updated, usage });
+      } catch (err) {
+        return sendJson(res, err.statusCode ?? 400, { ok: false, error: err.message });
+      }
     }
   }
 
@@ -802,8 +811,6 @@ async function handle(req, res) {
       return sendJson(res, 200, {
         ok: true,
         slug: sb.slug,
-        sandboxId: sb.id,
-        tenantId: sb.tenant_id,
         domain: configuredDomain ? `${sb.slug}.${configuredDomain}` : null,
         vanityDomain: sb.vanity_domain ?? null,
       });
@@ -815,8 +822,6 @@ async function handle(req, res) {
       return sendJson(res, 200, {
         ok: true,
         slug: sb.slug,
-        sandboxId: sb.id,
-        tenantId: sb.tenant_id,
         domain: configuredDomain ? `${sb.slug}.${configuredDomain}` : null,
         vanityDomain: sb.vanity_domain ?? null,
       });
@@ -889,7 +894,8 @@ async function handle(req, res) {
       const result = setSandboxVanityDomain(sb.id, targetDomain ?? null);
       return sendJson(res, 200, { ok: true, slug: sb.slug, vanityDomain: result.vanityDomain });
     } catch (e) {
-      return sendJson(res, 409, { ok: false, error: e.message });
+      const code = e.statusCode ?? (e.message.includes("already in use") ? 409 : 400);
+      return sendJson(res, code, { ok: false, error: e.message });
     }
   }
 
@@ -917,6 +923,19 @@ async function handle(req, res) {
     if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
     const { slug: newSlug, name, distro: distroName, seed, vanityDomain, domain } = await readBody(req);
     if (!SLUG_RE.test(newSlug ?? "") || RESERVED.has(newSlug)) return sendJson(res, 400, { ok: false, error: "invalid slug" });
+    const targetDomain = vanityDomain || domain;
+    if (targetDomain) {
+      try {
+        const cleanDomain = validateVanityDomain(targetDomain);
+        const existing = getSandboxByVanityDomain(cleanDomain);
+        if (existing) {
+          return sendJson(res, 409, { ok: false, error: `vanity domain already in use: ${cleanDomain}` });
+        }
+      } catch (domErr) {
+        const code = domErr.statusCode ?? 400;
+        return sendJson(res, code, { ok: false, error: domErr.message });
+      }
+    }
     // Backlog #7: fail safe — never create a Cell on the unisolated local backend
     // when isolation is required (production multi-tenant posture).
     if (requireIsolation() && cellBackend() === "local")
@@ -928,13 +947,14 @@ async function handle(req, res) {
       return sendJson(res, 429, { ok: false, error: `sandbox quota exceeded (max ${effectiveMaxSb})` });
     try {
       const sb = createSandboxForTenant(principal.tenant_id, principal.id, { slug: newSlug, name, cellBackend: cellBackend() });
-      if (vanityDomain || domain) {
+      if (targetDomain) {
         try {
-          setSandboxVanityDomain(sb.id, vanityDomain || domain);
-          sb.vanity_domain = (vanityDomain || domain).trim().toLowerCase();
+          const resDomain = setSandboxVanityDomain(sb.id, targetDomain);
+          sb.vanity_domain = resDomain.vanityDomain;
         } catch (domErr) {
           deleteSandbox(sb.id);
-          return sendJson(res, 409, { ok: false, error: domErr.message });
+          const code = domErr.statusCode ?? (domErr.message.includes("already in use") ? 409 : 400);
+          return sendJson(res, code, { ok: false, error: domErr.message });
         }
       }
       seedVolume(sb);

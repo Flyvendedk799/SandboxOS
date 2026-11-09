@@ -7,6 +7,7 @@
 import crypto from "node:crypto";
 import { pbkdf2Sync, scryptSync, randomBytes, timingSafeEqual } from "node:crypto";
 import path from "node:path";
+import net from "node:net";
 import { openDb, withTransaction } from "./db.js";
 import config from "../../config/src/config.js";
 import { canDelegate } from "../../kernel/src/capabilities.js";
@@ -81,10 +82,25 @@ export function updatePrincipalName(principalId, name) {
 }
 
 export function updateTenantName(tenantId, name) {
-  if (typeof tenantId !== "string" || !tenantId || typeof name !== "string" || !name.trim()) return;
+  if (typeof tenantId !== "string" || !tenantId) throw new Error("tenantId required");
+  if (typeof name !== "string" || !name.trim()) throw new Error("tenant name required");
+  const clean = name.trim();
+  const existing = openDb().prepare("SELECT id FROM tenants WHERE name=? AND id<>?").get(clean, tenantId);
+  if (existing) {
+    const err = new Error(`tenant name already in use: ${clean}`);
+    err.statusCode = 409;
+    throw err;
+  }
   try {
-    openDb().prepare("UPDATE tenants SET name=? WHERE id=?").run(name.trim(), tenantId);
-  } catch { /* unique constraint or invalid */ }
+    openDb().prepare("UPDATE tenants SET name=? WHERE id=?").run(clean, tenantId);
+  } catch (err) {
+    if (err.message?.includes("UNIQUE") || err.code === "SQLITE_CONSTRAINT") {
+      const e = new Error(`tenant name already in use: ${clean}`);
+      e.statusCode = 409;
+      throw e;
+    }
+    throw err;
+  }
 }
 
 export function createPrincipal(tenantId, kind, name) {
@@ -160,12 +176,66 @@ export function setSandboxState(sandboxId, state) {
     .run(String(state), now(), sandboxId);
 }
 
+export function validateVanityDomain(domain) {
+  if (domain == null || domain === "") return null;
+  if (typeof domain !== "string") {
+    const err = new Error("invalid domain: must be a string");
+    err.statusCode = 400;
+    throw err;
+  }
+  const d = domain.trim().toLowerCase();
+  if (d.length === 0 || d.length > 253) {
+    const err = new Error("invalid domain: length must be between 1 and 253 characters");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (d === "localhost" || d.endsWith(".localhost")) {
+    const err = new Error("invalid domain: localhost is not allowed");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (net.isIP(d) !== 0 || d.includes(":") || d.includes("[") || d.includes("]") || /^\d+(\.\d+)*$/.test(d)) {
+    const err = new Error("invalid domain: IP literals are not allowed");
+    err.statusCode = 400;
+    throw err;
+  }
+  const configuredDomain = (process.env.SANDBOXOS_DOMAIN ?? "").trim().toLowerCase();
+  if (configuredDomain && (d === configuredDomain || d.endsWith(`.${configuredDomain}`))) {
+    const err = new Error(`invalid domain: cannot collide with configured SANDBOXOS_DOMAIN (${configuredDomain})`);
+    err.statusCode = 400;
+    throw err;
+  }
+  const labels = d.split(".");
+  if (labels.length < 2) {
+    const err = new Error("invalid domain: must contain at least one dot");
+    err.statusCode = 400;
+    throw err;
+  }
+  for (const label of labels) {
+    if (!label || label.length > 63 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)) {
+      const err = new Error("invalid domain: invalid hostname format");
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+  if (/^\d+$/.test(labels[labels.length - 1])) {
+    const err = new Error("invalid domain: TLD cannot be numeric");
+    err.statusCode = 400;
+    throw err;
+  }
+  return d;
+}
+
 export function setSandboxVanityDomain(sandboxId, domain) {
   if (typeof sandboxId !== "string" || !sandboxId) throw new Error("sandboxId required");
-  const cleanDomain = domain ? String(domain).trim().toLowerCase() : null;
+  const cleanDomain = validateVanityDomain(domain);
   if (cleanDomain) {
     const existing = openDb().prepare("SELECT id FROM sandboxes WHERE vanity_domain=? AND id<>?").get(cleanDomain, sandboxId);
-    if (existing) throw new Error(`vanity domain already in use: ${cleanDomain}`);
+    if (existing) {
+      const err = new Error(`vanity domain already in use: ${cleanDomain}`);
+      err.statusCode = 409;
+      throw err;
+    }
   }
   openDb().prepare("UPDATE sandboxes SET vanity_domain=? WHERE id=?").run(cleanDomain, sandboxId);
   return { sandboxId, vanityDomain: cleanDomain };
@@ -849,9 +919,45 @@ export function getQuota(tenantId) {
   return row ?? { tenant_id: tenantId, ...QUOTA_DEFAULTS };
 }
 
+export function validateNonNegativeInt(val, fieldName) {
+  if (val === undefined) return;
+  if (typeof val !== "number" || !Number.isInteger(val) || val < 0) {
+    const err = new Error(`invalid ${fieldName}: must be a finite non-negative integer`);
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
+export function validateNonNegativeNumber(val, fieldName) {
+  if (val === undefined) return;
+  if (typeof val !== "number" || !Number.isFinite(val) || val < 0) {
+    const err = new Error(`invalid ${fieldName}: must be a finite non-negative number`);
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
+export function validateNetworkEgress(val, fieldName) {
+  if (val === undefined) return;
+  if (typeof val !== "string" || !["allow", "deny"].includes(val.trim().toLowerCase())) {
+    const err = new Error(`invalid ${fieldName}: must be 'allow' or 'deny'`);
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
 /** Upsert per-tenant quota limits. Only provided fields are written. */
 export function setQuota(tenantId, { maxSandboxes, maxAgents, maxRunning, memMb, cpuShares, maxDiskMb, networkEgress } = {}) {
   if (typeof tenantId !== "string" || !tenantId) throw new Error("tenantId required");
+
+  validateNonNegativeInt(maxSandboxes, "maxSandboxes");
+  validateNonNegativeInt(maxAgents, "maxAgents");
+  validateNonNegativeInt(maxRunning, "maxRunning");
+  validateNonNegativeInt(memMb, "memMb");
+  validateNonNegativeNumber(cpuShares, "cpuShares");
+  validateNonNegativeInt(maxDiskMb, "maxDiskMb");
+  validateNetworkEgress(networkEgress, "networkEgress");
+
   const current = getQuota(tenantId);
   const vals = {
     max_sandboxes: maxSandboxes ?? current.max_sandboxes,
@@ -860,7 +966,7 @@ export function setQuota(tenantId, { maxSandboxes, maxAgents, maxRunning, memMb,
     mem_mb:        memMb        ?? current.mem_mb,
     cpu_shares:    cpuShares    ?? current.cpu_shares,
     max_disk_mb:   maxDiskMb   ?? current.max_disk_mb ?? QUOTA_DEFAULTS.max_disk_mb,
-    network_egress: networkEgress ?? current.network_egress ?? QUOTA_DEFAULTS.network_egress,
+    network_egress: (networkEgress != null ? networkEgress.trim().toLowerCase() : null) ?? current.network_egress ?? QUOTA_DEFAULTS.network_egress,
   };
   openDb().prepare(`INSERT INTO tenant_quotas
     (tenant_id, max_sandboxes, max_agents, max_running, mem_mb, cpu_shares, max_disk_mb, network_egress)

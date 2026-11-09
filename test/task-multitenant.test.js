@@ -350,6 +350,9 @@ test("C3: Vanity domain management, resolution, and request routing", async () =
   assert.equal(resolveHit.status, 200);
   assert.equal(resolveHit.data.ok, true);
   assert.equal(resolveHit.data.slug, userSlug);
+  // Unauthenticated resolve must not leak internal database IDs
+  assert.equal(resolveHit.data.sandboxId, undefined);
+  assert.equal(resolveHit.data.tenantId, undefined);
 
   const resolveMiss = await getJson(`/api/resolve?domain=unknown-non-existent.example.com`);
   assert.equal(resolveMiss.status, 404);
@@ -402,4 +405,136 @@ test("C3: Live usage reporting in GET /api/stats and GET /api/quota", async () =
   assert.ok(typeof statsRes.data.quota === "object");
   assert.equal(statsRes.data.quota.maxSandboxes, 3);
   assert.equal(statsRes.data.quota.maxAgents, 10);
+});
+
+test("C2: Quota door validation rejects invalid parameter values with 400 naming the invalid field", async () => {
+  const username = `quota_val_user_${Date.now()}`;
+  const password = "ValidPassword123!";
+  const signup = await postJson("/signup", { username, password });
+  const authHeader = { Authorization: `Bearer ${signup.data.token}` };
+
+  const badCases = [
+    { payload: { maxSandboxes: -1 }, field: "maxSandboxes" },
+    { payload: { maxSandboxes: "five" }, field: "maxSandboxes" },
+    { payload: { maxSandboxes: 2.5 }, field: "maxSandboxes" },
+    { payload: { maxAgents: -1 }, field: "maxAgents" },
+    { payload: { maxAgents: "ten" }, field: "maxAgents" },
+    { payload: { maxAgents: 1.2 }, field: "maxAgents" },
+    { payload: { maxRunning: -3 }, field: "maxRunning" },
+    { payload: { maxRunning: "three" }, field: "maxRunning" },
+    { payload: { memMb: -512 }, field: "memMb" },
+    { payload: { memMb: "2048mb" }, field: "memMb" },
+    { payload: { memMb: 1024.5 }, field: "memMb" },
+    { payload: { cpuShares: -0.5 }, field: "cpuShares" },
+    { payload: { cpuShares: "high" }, field: "cpuShares" },
+    { payload: { maxDiskMb: -100 }, field: "maxDiskMb" },
+    { payload: { maxDiskMb: "5gb" }, field: "maxDiskMb" },
+    { payload: { networkEgress: "unrestricted" }, field: "networkEgress" },
+    { payload: { networkEgress: 123 }, field: "networkEgress" },
+  ];
+
+  for (const { payload, field } of badCases) {
+    const res = await postJson("/api/quota", payload, authHeader);
+    assert.equal(res.status, 400, `Expected 400 for bad ${field}: ${JSON.stringify(payload)}`);
+    assert.equal(res.data.ok, false);
+    assert.ok(
+      res.data.error.toLowerCase().includes(field.toLowerCase()),
+      `Expected error message to mention '${field}', got: '${res.data.error}'`
+    );
+  }
+
+  // Valid inputs should succeed
+  const validRes = await postJson(
+    "/api/quota",
+    { maxSandboxes: 4, maxAgents: 2, maxRunning: 1, memMb: 1024, cpuShares: 0.5, maxDiskMb: 4096, networkEgress: "deny" },
+    authHeader
+  );
+  assert.equal(validRes.status, 200);
+  assert.equal(validRes.data.ok, true);
+  assert.equal(validRes.data.quota.max_sandboxes, 4);
+  assert.equal(validRes.data.quota.cpu_shares, 0.5);
+  assert.equal(validRes.data.quota.network_egress, "deny");
+});
+
+test("C3: Vanity domain door validation rejects invalid domains with 400 and duplicate domains with 409", async () => {
+  const username = `domain_val_user_${Date.now()}`;
+  const password = "ValidPassword123!";
+  const signup = await postJson("/signup", { username, password });
+  const authHeader = { Authorization: `Bearer ${signup.data.token}` };
+  const userSlug = signup.data.slug;
+
+  process.env.SANDBOXOS_DOMAIN = "sbx.test";
+
+  const invalidDomains = [
+    "localhost",
+    "sub.localhost",
+    "127.0.0.1",
+    "::1",
+    "2001:db8::1",
+    "sbx.test",           // Collision with configured domain
+    "foo.sbx.test",       // Subdomain of configured domain
+    "no-dot",             // Missing dot
+    "-start-hyphen.com",  // Label starts with hyphen
+    "end-hyphen-.com",    // Label ends with hyphen
+    "bad..dot.com",       // Consecutive dots
+    "invalid_char.com",   // Underscore not allowed in hostname
+    "a".repeat(250) + ".com", // Exceeds 253 characters
+  ];
+
+  // Test invalid domains via POST /api/sandboxes/:slug/domain
+  for (const domain of invalidDomains) {
+    const res = await postJson(`/api/sandboxes/${userSlug}/domain`, { domain }, authHeader);
+    assert.equal(res.status, 400, `Expected 400 for invalid domain '${domain}', got ${res.status}`);
+    assert.equal(res.data.ok, false);
+    assert.ok(res.data.error.includes("invalid domain"));
+  }
+
+  // Test invalid domain via POST /api/sandboxes on creation
+  const createInvalidRes = await postJson(
+    "/api/sandboxes",
+    { slug: `sb-inv-${Date.now().toString(36)}`, vanityDomain: "invalid_domain.org" },
+    authHeader
+  );
+  assert.equal(createInvalidRes.status, 400);
+  assert.equal(createInvalidRes.data.ok, false);
+
+  // Set a valid vanity domain
+  const validDomain = `good-app-${Date.now().toString(36)}.example.com`;
+  const setValidRes = await postJson(`/api/sandboxes/${userSlug}/domain`, { domain: validDomain }, authHeader);
+  assert.equal(setValidRes.status, 200);
+  assert.equal(setValidRes.data.ok, true);
+
+  // Attempting to create a new sandbox with the same vanity domain returns 409
+  const createDupeRes = await postJson(
+    "/api/sandboxes",
+    { slug: `sb-dupe-${Date.now().toString(36)}`, vanityDomain: validDomain },
+    authHeader
+  );
+  assert.equal(createDupeRes.status, 409);
+  assert.equal(createDupeRes.data.ok, false);
+  assert.ok(createDupeRes.data.error.includes("already in use"));
+
+  delete process.env.SANDBOXOS_DOMAIN;
+});
+
+test("C1: Profile update rejects duplicate tenant name with 409", async () => {
+  const user1 = `tenant_one_${Date.now()}`;
+  const pass = "ValidPassword123!";
+  const signup1 = await postJson("/signup", { username: user1, password: pass });
+  assert.equal(signup1.status, 200);
+
+  const user2 = `tenant_two_${Date.now()}`;
+  const signup2 = await postJson("/signup", { username: user2, password: pass });
+  assert.equal(signup2.status, 200);
+  const auth2 = { Authorization: `Bearer ${signup2.data.token}` };
+
+  // User 2 attempts to rename their tenant to User 1's tenant name
+  const renameRes = await postJson(
+    "/api/profile",
+    { tenantName: user1 },
+    auth2
+  );
+  assert.equal(renameRes.status, 409, `Expected 409 on duplicate tenant name, got ${renameRes.status}`);
+  assert.equal(renameRes.data.ok, false);
+  assert.ok(renameRes.data.error.includes("already in use"));
 });
