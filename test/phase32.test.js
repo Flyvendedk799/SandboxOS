@@ -44,8 +44,6 @@ async function until(fn, what, ms = 8000) {
 test("a session outlives the window that opened it, scrollback and all", async () => {
   let seen = "";
   const first = attachSession(kernel.cell, sandbox.id, { name: "work" }, (d) => { seen += d.toString(); }, () => {});
-  // Wait until the interactive shell prompt is ready before sending input
-  await until(() => seen.length > 0, "the shell prompt to arrive");
   first.write("echo phase32-alpha\n");
   await until(() => seen.includes("phase32-alpha"), "the shell to answer");
 
@@ -95,9 +93,7 @@ test("sessions are named, listed and endable as tools, so an agent sees them too
 
 test("a session that dies tells the people watching it", async () => {
   let closed = false;
-  let seen = "";
-  const s = attachSession(kernel.cell, sandbox.id, { name: "exits" }, (d) => { seen += d.toString(); }, () => { closed = true; });
-  await until(() => seen.length > 0, "the shell prompt to arrive");
+  const s = attachSession(kernel.cell, sandbox.id, { name: "exits" }, () => {}, () => { closed = true; });
   s.write("exit\n");
   await until(() => closed, "the close callback");
   assert.equal(getSession(sandbox.id, s.id)?.alive ?? false, false);
