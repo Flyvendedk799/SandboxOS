@@ -82,7 +82,7 @@ export function resizeScript(marker, cols, rows, tmp = "/tmp") {
   return `T=$(head -n1 "${markerPath(marker, tmp)}" 2>/dev/null); [ -n "$T" ] || exit 0; stty -F "$T" cols ${c} rows ${r} 2>/dev/null || stty -f "$T" cols ${c} rows ${r} 2>/dev/null || true`;
 }
 
-/** End the session: kill the shell's process group (it is a session leader
- *  under `script`, so this takes its children too), then drop the marker. */
+/** End the session: kill any processes attached to the pty, the shell's
+ *  process group, then drop the marker. */
 export const cleanupScript = (marker, tmp = "/tmp") =>
-  `P=$(sed -n 2p "${markerPath(marker, tmp)}" 2>/dev/null); if [ -n "$P" ]; then kill -9 -- -"$P" 2>/dev/null; kill -9 "$P" 2>/dev/null; fi; rm -f "${markerPath(marker, tmp)}"`;
+  `T=$(head -n1 "${markerPath(marker, tmp)}" 2>/dev/null); if [ -n "$T" ]; then for d in /proc/[0-9]*; do [ -d "$d" ] || continue; p=\${d#/proc/}; [ "$p" = "$$" ] && continue; for x in "$d"/fd/*; do case "$(readlink "$x" 2>/dev/null)" in "$T"*) kill -9 -- -"$p" 2>/dev/null; kill -9 "$p" 2>/dev/null; break;; esac; done; done; fi; P=$(sed -n 2p "${markerPath(marker, tmp)}" 2>/dev/null); if [ -n "$P" ]; then kill -9 -- -"$P" 2>/dev/null; kill -9 "$P" 2>/dev/null; fi; rm -f "${markerPath(marker, tmp)}"`;
