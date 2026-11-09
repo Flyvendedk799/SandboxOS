@@ -174,7 +174,7 @@ function getDescendants(rootPid) {
 export function killTree(pid, signal = "SIGTERM", child = null) {
   if (!pid) return false;
   const numPid = typeof pid === "number" ? pid : parseInt(String(pid), 10);
-  if (!numPid || Number.isNaN(numPid)) return false;
+  if (!Number.isInteger(numPid) || numPid <= 1) return false;
 
   if (process.platform === "win32") {
     const force = signal === "SIGKILL" || signal === "SIGTERM";

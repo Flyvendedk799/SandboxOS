@@ -187,8 +187,10 @@ export class FirecrackerBackend {
     if (fs.existsSync(this.pidFile) && fs.existsSync(this.socketPath)) {
       const pid = parseInt(fs.readFileSync(this.pidFile, "utf8").trim(), 10);
       try {
-        process.kill(pid, 0);
-        return { state: "running", reaped: await this._reap() };
+        if (Number.isInteger(pid) && pid > 1) {
+          process.kill(pid, 0);
+          return { state: "running", reaped: await this._reap() };
+        }
       } catch { /* stale pidfile */ }
     }
 
@@ -360,7 +362,9 @@ export class FirecrackerBackend {
     try {
       if (fs.existsSync(this.pidFile)) {
         const pid = parseInt(fs.readFileSync(this.pidFile, "utf8").trim(), 10);
-        process.kill(pid, "SIGTERM");
+        if (Number.isInteger(pid) && pid > 1) {
+          process.kill(pid, "SIGTERM");
+        }
       }
     } catch {}
     for (const f of [this.socketPath, this.pidFile]) {
@@ -375,7 +379,9 @@ export class FirecrackerBackend {
     try {
       if (fs.existsSync(this.pidFile)) {
         const pid = parseInt(fs.readFileSync(this.pidFile, "utf8").trim(), 10);
-        process.kill(pid, "SIGTERM");
+        if (Number.isInteger(pid) && pid > 1) {
+          process.kill(pid, "SIGTERM");
+        }
       }
     } catch {}
     return { state: "stopped" };
@@ -386,7 +392,9 @@ export class FirecrackerBackend {
     try {
       if (fs.existsSync(this.pidFile)) {
         const pid = parseInt(fs.readFileSync(this.pidFile, "utf8").trim(), 10);
-        process.kill(pid, "SIGKILL");
+        if (Number.isInteger(pid) && pid > 1) {
+          process.kill(pid, "SIGKILL");
+        }
       }
     } catch {}
     for (const f of [this.socketPath, this.pidFile]) {

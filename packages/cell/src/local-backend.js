@@ -151,6 +151,9 @@ export class LocalBackend {
       ));
     }
 
+    // PTY input buffering: script(1) sets up the pty slave asynchronously during startup.
+    // Keystrokes sent before the pty is attached are discarded, so queue input until the
+    // first stdout/stderr chunk arrives (or a 200ms fallback timer fires).
     let ready = !sh.pty;
     const pending = [];
     const flushPending = () => {
@@ -183,7 +186,7 @@ export class LocalBackend {
           if (fs.existsSync(mPath)) {
             const content = fs.readFileSync(mPath, "utf8");
             const p = parseInt(content.split("\n")[1]?.trim(), 10);
-            if (p && !Number.isNaN(p)) {
+            if (Number.isInteger(p) && p > 1) {
               killTree(p, "SIGKILL");
             }
           }

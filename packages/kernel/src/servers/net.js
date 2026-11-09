@@ -123,6 +123,11 @@ function isBlockedV6(ip) {
     const v4 = `${(words[1] >> 8) & 0xff}.${words[1] & 0xff}.${(words[2] >> 8) & 0xff}.${words[2] & 0xff}`;
     return isBlockedV4(v4);
   }
+  // NAT64 prefix (64:ff9b::/96)
+  if (words[0] === 0x0064 && words[1] === 0xff9b && words.slice(2, 6).every((w) => w === 0)) {
+    const v4 = `${(words[6] >> 8) & 0xff}.${words[6] & 0xff}.${(words[7] >> 8) & 0xff}.${words[7] & 0xff}`;
+    return isBlockedV4(v4);
+  }
   // IPv4-mapped (::ffff:0:0/96) or IPv4-compatible (::0:0/96)
   if (words.slice(0, 5).every((w) => w === 0) && (words[5] === 0xffff || words[5] === 0)) {
     const v4 = `${(words[6] >> 8) & 0xff}.${words[6] & 0xff}.${(words[7] >> 8) & 0xff}.${words[7] & 0xff}`;

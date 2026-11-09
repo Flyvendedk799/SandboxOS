@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { openDb, closeDb } from "../packages/control-db/src/db.js";
 import { ensureSeed, grantsFor } from "../packages/control-db/src/registry.js";
 import { getKernel, _resetKernels } from "../packages/kernel/src/kernel.js";
-import { safeSpawn } from "../packages/cell/src/spawn.js";
+import { safeSpawn, killTree } from "../packages/cell/src/spawn.js";
 import { LocalBackend } from "../packages/cell/src/local-backend.js";
 import { DockerBackend } from "../packages/cell/src/docker-backend.js";
 import { HardenedDockerBackend } from "../packages/cell/src/hardened-docker-backend.js";
@@ -134,6 +134,16 @@ test("C1: backend detection helpers handle missing CLI tools safely", async () =
   const tier = await resolveBackend();
   assert.ok(["firecracker", "hardened-docker", "docker", "local"].includes(tier),
     `resolveBackend returned valid tier: ${tier}`);
+});
+
+test("C1: killTree safely rejects non-positive integer PIDs and invalid inputs", () => {
+  assert.equal(killTree(-1), false);
+  assert.equal(killTree(0), false);
+  assert.equal(killTree(1), false);
+  assert.equal(killTree(null), false);
+  assert.equal(killTree(undefined), false);
+  assert.equal(killTree("not-a-pid"), false);
+  assert.equal(killTree("-1"), false);
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -293,6 +303,10 @@ test("C3: egress security blocks IPv6 loopback, link-local, unique-local, multic
     "2002:7f00:0001::",                 // 127.0.0.1
     "2002:0a00:0001::",                 // 10.0.0.1
     "2002:a9fe:a9fe::",                 // 169.254.169.254
+    // NAT64 prefix embedding private IPv4
+    "64:ff9b::127.0.0.1",
+    "64:ff9b::10.0.0.1",
+    "64:ff9b::169.254.169.254",
   ];
 
   for (const ip of blockedV6) {
