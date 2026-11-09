@@ -437,7 +437,7 @@ try {
   await studio.click(".stx-stage-bar .seg:has-text('Desktop')");
   await studio.waitForTimeout(600);
 
-  await studio.click(".stx-tabs .seg:has-text('Code')");
+  await studio.click(".stx-tabs .seg:has-text('Code')", { position: { x: 10, y: 10 } });
   await studio.waitForSelector(".code-pane .ed-input", { timeout: 8_000 });
   check((await studio.$$(".code-file")).length >= 3, "the Code tab lists the starter's files");
   await studio.click(".code-file:has-text('app.css')");
