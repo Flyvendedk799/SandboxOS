@@ -229,16 +229,16 @@ test("C1 & C3: sbx token list, mint, and revoke commands", async () => {
   assert.equal(listRes.code, 0, listRes.stderr);
   assert.match(listRes.stdout, /cli-test-token/);
 
-  // Revoke token via access list principalId
-  const accessRes = await runSbx(["access", "list"]);
-  assert.equal(accessRes.code, 0);
-  const match = accessRes.stdout.split("\n").find((l) => l.includes("cli-test-token"));
-  if (match) {
-    const principalId = match.trim().split(/\s+/)[0];
-    const revokeRes = await runSbx(["token", "revoke", principalId]);
-    assert.equal(revokeRes.code, 0, revokeRes.stderr);
-    assert.match(revokeRes.stdout, /revoked token/);
-  }
+  // Extract principalId directly from token list output
+  const tokenLine = listRes.stdout.split("\n").find((l) => l.includes("cli-test-token"));
+  assert.ok(tokenLine, "token must appear in token list");
+  const principalId = tokenLine.trim().split(/\s+/)[0];
+  assert.ok(principalId, "token list must output principalId in first column");
+
+  // Revoke token via principalId
+  const revokeRes = await runSbx(["token", "revoke", principalId]);
+  assert.equal(revokeRes.code, 0, revokeRes.stderr);
+  assert.match(revokeRes.stdout, /revoked token/);
 });
 
 test("C1: sbx fs commands: cp, mv, stat, and binary-safe stdio streaming with -", async () => {

@@ -75,14 +75,6 @@ async function cmdLogin(args) {
   let slug = flag(args, "slug", process.env.SBX_SLUG);
 
   if (directToken) {
-    if (!slug) {
-      // Best-effort auto-detect slug via whoami if possible
-      try {
-        const testRes = await fetch(url + "/api/me", { headers: { Authorization: `Bearer ${directToken}` } });
-        const testData = await testRes.json().catch(() => ({}));
-        if (testData.slug) slug = testData.slug;
-      } catch {}
-    }
     if (!slug) die("slug required when logging in with direct machine token (--slug <slug>)");
     saveConfig({ url, slug, token: directToken });
     console.log(`logged in → ${url}/${slug}  (token configured)`);
@@ -374,9 +366,9 @@ async function cmdOs(args) {
       break;
     }
     case "arrange": {
-      const mode = args[1] || "auto";
-      const r = await desktop("arrange", { mode });
-      console.log(`arranged: ${mode} (${r.windows?.length ?? 0} windows)`);
+      const preset = args[1] || "grid";
+      const r = await desktop("arrange", { preset });
+      console.log(`arranged: ${preset} (${r.windows?.length ?? 0} windows)`);
       break;
     }
     case "tile": {
