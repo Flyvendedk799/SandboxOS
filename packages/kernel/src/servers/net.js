@@ -18,7 +18,7 @@ function hostMatches(pattern, host) {
   if (p === h) return true;
   if (p.startsWith("*.")) {
     const suffix = p.slice(1); // ".example.com"
-    return h.endsWith(suffix) || h === p.slice(2);
+    return h.endsWith(suffix);
   }
   return false;
 }

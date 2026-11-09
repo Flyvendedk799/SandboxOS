@@ -151,21 +151,8 @@ export class LocalBackend {
       ));
     }
 
-    let ready = !sh.pty;
-    const pending = [];
-    const flushPending = () => {
-      if (!ready) {
-        ready = true;
-        clearTimeout(readyTimer);
-        for (const data of pending.splice(0)) {
-          try { proc.stdin?.write(data); } catch { /* shell exiting */ }
-        }
-      }
-    };
-    const readyTimer = sh.pty ? setTimeout(flushPending, 200) : null;
-
-    proc.stdout?.on("data", (d) => { flushPending(); onData(d); });
-    proc.stderr?.on("data", (d) => { flushPending(); onData(d); });
+    proc.stdout?.on("data", onData);
+    proc.stderr?.on("data", onData);
 
     const resize = sh.pty
       ? (c, r) => detachedSpawn(sh.bin, sh.argv(resizeScript(marker, c, r, tmp)), { env: fullEnv })
@@ -176,7 +163,6 @@ export class LocalBackend {
     const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
-      clearTimeout(readyTimer);
       if (sh.pty) {
         try {
           const mPath = markerPath(marker, tmp);
@@ -193,13 +179,9 @@ export class LocalBackend {
       killTree(proc.pid, "SIGKILL", proc);
     };
     proc.on("error", close);
-    proc.on("exit", () => { clearTimeout(first); clearTimeout(readyTimer); cleanup(); close(); });
+    proc.on("exit", () => { clearTimeout(first); cleanup(); close(); });
     return {
       write(data) {
-        if (!ready) {
-          pending.push(data);
-          return;
-        }
         try { proc.stdin?.write(data); } catch { /* the session is going away */ }
       },
       // Ending a session ends what the session started. `cleanup` is the whole
