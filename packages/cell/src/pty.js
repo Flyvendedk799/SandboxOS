@@ -85,4 +85,4 @@ export function resizeScript(marker, cols, rows, tmp = "/tmp") {
 /** End the session: kill the shell's process group (it is a session leader
  *  under `script`, so this takes its children too), then drop the marker. */
 export const cleanupScript = (marker, tmp = "/tmp") =>
-  `P=$(sed -n 2p "${markerPath(marker, tmp)}" 2>/dev/null); if [ -n "$P" ]; then kill -9 -- -"$P" 2>/dev/null; kill -9 "$P" 2>/dev/null; fi; rm -f "${markerPath(marker, tmp)}"`;
+  `T=$(head -n1 "${markerPath(marker, tmp)}" 2>/dev/null); [ -n "$T" ] && pkill -9 -t "\${T#/dev/}" 2>/dev/null; P=$(sed -n 2p "${markerPath(marker, tmp)}" 2>/dev/null); if [ -n "$P" ]; then kill -9 -"$P" 2>/dev/null; kill -9 -- -"$P" 2>/dev/null; kill -9 "$P" 2>/dev/null; fi; rm -f "${markerPath(marker, tmp)}"`;
