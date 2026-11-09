@@ -335,3 +335,21 @@ test("C3: egress policy enforcement and resolveAndGuard pin validated IP", async
   assert.equal(explicitlyAllowed.ip, "127.0.0.1");
   assert.equal(explicitlyAllowed.family, 4);
 });
+
+test("C3: packages/kernel/src/servers/net.js - net.fetch blocks private IP and SSRF attempts through kernel", async () => {
+  // SSRF attempts via net.fetch tool through kernel must be blocked
+  const res1 = await call("net", "fetch", { url: "http://169.254.169.254/latest/meta-data" });
+  assert.equal(res1.ok, false);
+  assert.match(res1.error, /egress blocked/);
+
+  // Hexadecimal IPv4-mapped IPv6 literal via net.fetch must be blocked
+  const res2 = await call("net", "fetch", { url: "http://[::ffff:7f00:1]:8080" });
+  assert.equal(res2.ok, false);
+  assert.match(res2.error, /egress blocked/);
+
+  // CGNAT range via net.fetch must be blocked
+  const res3 = await call("net", "fetch", { url: "http://100.64.0.1:8080" });
+  assert.equal(res3.ok, false);
+  assert.match(res3.error, /egress blocked/);
+});
+
