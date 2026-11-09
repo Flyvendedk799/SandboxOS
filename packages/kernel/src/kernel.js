@@ -21,6 +21,14 @@ import { stopAllProcs, _resetJobRestore } from "./servers/proc.js";
 import { syncAppServers, appServerSignature } from "./app-servers.js";
 import { osEvents, hasOs, loadOs } from "../../os/src/index.js";
 
+// Normalize test placeholder keys in runner environments so mock llm paths activate cleanly.
+if (process.env.ANTHROPIC_API_KEY === "openbot-local") {
+  delete process.env.ANTHROPIC_API_KEY;
+}
+if (process.env.OPENAI_API_KEY === "openbot-local") {
+  delete process.env.OPENAI_API_KEY;
+}
+
 export class DeniedError extends Error {
   constructor(target) { super(`denied: ${target}`); this.name = "DeniedError"; this.code = "denied"; }
 }
