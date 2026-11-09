@@ -9,7 +9,7 @@
 //   sbx call <server.tool> <json>         raw MCP call
 //   sbx audit [n]                         recent audit events
 //   sbx watch                             live-tail the audit stream
-//   sbx token [--patterns a,b]            mint another (optionally narrower) token
+//   sbx token [list|mint|revoke]          manage machine tokens
 //
 // Zero dependencies (global fetch + node built-ins).
 
@@ -31,13 +31,34 @@ function flag(args, name, def) {
   const i = args.indexOf(`--${name}`);
   return i > -1 ? args[i + 1] : def;
 }
-function die(msg) { console.error("sbx: " + msg); process.exit(1); }
 
-async function ask(question, { hidden = false } = {}) {
-  if (process.env.SBX_PASSWORD) return process.env.SBX_PASSWORD;
+function formatErrorMessage(err) {
+  if (!err) return "unknown error";
+  if (typeof err === "string") return err;
+  let msg = err.message || err.error || "unknown error";
+  if (err.code) msg = `[${err.code}] ${msg}`;
+  if (err.remediation) msg += ` (Remediation: ${err.remediation})`;
+  return msg;
+}
+
+function die(msg) {
+  const text = typeof msg === "object" ? formatErrorMessage(msg) : String(msg);
+  console.error("sbx: " + text);
+  process.exit(1);
+}
+
+async function askPrompt(question, { hidden = false } = {}) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
   if (hidden) rl.output.write = () => {}; // best-effort no-echo
   return new Promise((res) => rl.question(question, (a) => { rl.close(); console.log(); res(a); }));
+}
+
+async function readAllStdin() {
+  const chunks = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 async function api(cfg, p, { method = "GET", body, headers = {} } = {}) {
@@ -49,22 +70,55 @@ async function api(cfg, p, { method = "GET", body, headers = {} } = {}) {
 }
 
 async function cmdLogin(args) {
-  const url = (flag(args, "url", "http://127.0.0.1:3939")).replace(/\/$/, "");
-  const password = await ask("password: ", { hidden: true });
-  const login = await fetch(url + "/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }) });
+  const url = (flag(args, "url", process.env.SBX_URL || "http://127.0.0.1:3939")).replace(/\/$/, "");
+  const directToken = flag(args, "token", process.env.SBX_TOKEN);
+  let slug = flag(args, "slug", process.env.SBX_SLUG);
+
+  if (directToken) {
+    if (!slug) {
+      // Best-effort auto-detect slug via whoami if possible
+      try {
+        const testRes = await fetch(url + "/api/me", { headers: { Authorization: `Bearer ${directToken}` } });
+        const testData = await testRes.json().catch(() => ({}));
+        if (testData.slug) slug = testData.slug;
+      } catch {}
+    }
+    if (!slug) die("slug required when logging in with direct machine token (--slug <slug>)");
+    saveConfig({ url, slug, token: directToken });
+    console.log(`logged in → ${url}/${slug}  (token configured)`);
+    return;
+  }
+
+  const username = flag(args, "user") || flag(args, "username") || process.env.SBX_USER;
+  let password = flag(args, "password") || process.env.SBX_PASSWORD;
+  if (!password) {
+    password = await askPrompt("password: ", { hidden: true });
+  }
+
+  const loginBody = username ? { username, password } : { password };
+  const login = await fetch(url + "/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(loginBody),
+  });
   const data = await login.json();
   if (!data.ok) die(data.error || "login failed");
-  const slug = flag(args, "slug", data.slug);
-  const cookie = login.headers.getSetCookie()[0].split(";")[0];
+  slug = slug || data.slug;
+  if (!slug) die("no sandbox slug associated with login");
+
+  const rawCookie = login.headers.getSetCookie?.()?.[0] || login.headers.get("set-cookie") || "";
+  const cookie = rawCookie.split(";")[0];
   const patterns = flag(args, "patterns");
+
   const mint = await fetch(`${url}/${slug}/tokens`, {
-    method: "POST", headers: { "Content-Type": "application/json", Cookie: cookie },
-    body: JSON.stringify({ label: os.hostname(), patterns: patterns ? patterns.split(",") : undefined }),
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: cookie },
+    body: JSON.stringify({ label: os.hostname(), patterns: patterns ? patterns.split(",").map((p) => p.trim()) : undefined }),
   });
   const m = await mint.json();
   if (!m.ok) die(m.error || "could not mint token");
   saveConfig({ url, slug, token: m.token });
-  console.log(`logged in → ${url}/${slug}  (token scope: ${m.patterns.join(", ")})`);
+  console.log(`logged in → ${url}/${slug}  (token scope: ${(m.patterns || []).join(", ")})`);
 }
 
 async function cmdRun(line) {
@@ -114,13 +168,53 @@ async function cmdWatch() {
 async function cmdToken(args) {
   const cfg = loadConfig();
   if (!cfg.token) die("not logged in");
+
+  const sub = args[0];
+  if (sub === "list") {
+    const res = await api(cfg, `/${cfg.slug}/tokens`);
+    const d = await res.json();
+    if (!d.ok) die(d.error);
+    for (const t of d.tokens ?? []) {
+      const id = t.principalId || t.principal_id || "";
+      const label = t.label ? ` (${t.label})` : "";
+      console.log(`${id}  ${(t.patterns || []).join(", ") || "*"}${label}`);
+    }
+    return;
+  }
+
+  if (sub === "revoke" || sub === "rm") {
+    let id = args[1];
+    if (!id) die("usage: sbx token revoke <principalId|label>");
+    const listRes = await api(cfg, `/${cfg.slug}/tokens`);
+    const listData = await listRes.json().catch(() => ({}));
+    const found = (listData.tokens ?? []).find((t) => (
+      t.principalId === id ||
+      t.principal_id === id ||
+      t.label === id ||
+      (t.principalId && t.principalId.startsWith(id)) ||
+      (t.principal_id && t.principal_id.startsWith(id))
+    ));
+    if (found) {
+      id = found.principalId || found.principal_id;
+    }
+    const res = await api(cfg, `/${cfg.slug}/tokens/${encodeURIComponent(id)}`, { method: "DELETE" });
+    const d = await res.json();
+    if (!d.ok) die(d.error);
+    console.log(`revoked token: ${id}`);
+    return;
+  }
+
+  // default / mint
   const patterns = flag(args, "patterns");
-  // re-mint from the current (already attenuated) token
-  const res = await api(cfg, `/${cfg.slug}/tokens`, { method: "POST", body: { patterns: patterns ? patterns.split(",") : undefined, label: "minted" } });
+  const label = flag(args, "label", "minted");
+  const res = await api(cfg, `/${cfg.slug}/tokens`, {
+    method: "POST",
+    body: { patterns: patterns ? patterns.split(",").map((p) => p.trim()) : undefined, label },
+  });
   const m = await res.json();
   if (!m.ok) die(m.error);
   console.log(m.token);
-  console.error(`scope: ${m.patterns.join(", ")}`);
+  console.error(`scope: ${(m.patterns || []).join(", ")}`);
 }
 
 // ── agent subcommands ─────────────────────────────────────────────────────
@@ -219,9 +313,6 @@ async function cmdApp(args) {
 }
 
 // ── os subcommands ────────────────────────────────────────────────────────
-// The desktop is a document, so the terminal can drive it like anything else:
-// open a window on your machine from a script, restyle it from CI, or package
-// the whole thing as a distro without touching a browser.
 
 async function cmdOs(args) {
   const cfg = loadConfig();
@@ -282,8 +373,13 @@ async function cmdOs(args) {
       console.log(`layout → ${args[1]}${r.tree ? `  ${r.tree}` : ""}`);
       break;
     }
+    case "arrange": {
+      const mode = args[1] || "auto";
+      const r = await desktop("arrange", { mode });
+      console.log(`arranged: ${mode} (${r.windows?.length ?? 0} windows)`);
+      break;
+    }
     case "tile": {
-      // sbx os tile <id> ratio <0.1-0.9> [with <id2>] · sbx os tile <id> swap <id2> · sbx os tile <id> flip
       if (!args[1] || !args[2]) die("usage: sbx os tile <window-id> ratio <r> [with <id>] | swap <id> | flip");
       const a = { id: args[1] };
       if (args[2] === "ratio") { a.ratio = Number(args[3]); if (args[4] === "with") a.with = args[5]; }
@@ -329,7 +425,6 @@ async function cmdOs(args) {
       }
       break;
     case "tools": {
-      // sbx os tools <app> on|off
       if (!args[1] || !["on", "off"].includes(args[2])) die("usage: sbx os tools <app> on|off");
       const r = await desktop("appDefine", { id: args[1], mcp: { enabled: args[2] === "on" } });
       console.log(r.server?.live ? `${r.server.name}.* is live` : r.server?.problem ?? `${r.server?.name ?? args[1]}.* is off`);
@@ -350,8 +445,22 @@ async function cmdOs(args) {
       if (!args[1]) die("usage: sbx os revert <rev>");
       console.log(`now at r${(await desktop("revert", { rev: Number(args[1]) })).rev}`);
       break;
+    case "checkpoint": {
+      const name = args[1] || `CLI checkpoint ${new Date().toISOString()}`;
+      const r = await desktop("checkpoint", { name });
+      console.log(`checkpoint created: r${r.checkpoint?.rev ?? "?"} - ${r.checkpoint?.name ?? r.checkpoint?.label ?? name}`);
+      break;
+    }
+    case "checkpoints": {
+      const r = await desktop("checkpoints");
+      const list = r.checkpoints ?? [];
+      if (!list.length) { console.log("(no checkpoints)"); break; }
+      for (const cp of list) {
+        console.log(`r${String(cp.rev).padEnd(5)} ${new Date(cp.ts).toISOString()}  ${cp.name ?? cp.label ?? ""}`);
+      }
+      break;
+    }
     case "publish": {
-      // sbx os publish <name> [--public|--private] [--tags=a,b]
       if (!args[1]) die("usage: sbx os publish <name> [--public|--private] [--tags=a,b]");
       const visibility = args.includes("--public") ? "public" : args.includes("--private") ? "private" : "tenant";
       const tags = (args.find((x) => x.startsWith("--tags=")) ?? "").slice(7).split(",").filter(Boolean);
@@ -571,6 +680,24 @@ async function cmdFs(args) {
     process.stdout.write((await mcp(cfg, "fs", "read", { path: args[1] })).content ?? "");
     return;
   }
+  if (sub === "stat") {
+    if (!args[1]) die("usage: sbx fs stat <path>");
+    const r = await mcp(cfg, "fs", "stat", { path: args[1] });
+    console.log(`${r.path}: ${r.type} (${human(r.size)}) mtime=${new Date(r.mtime).toISOString()}`);
+    return;
+  }
+  if (sub === "cp" || sub === "copy") {
+    if (!args[1] || !args[2]) die("usage: sbx fs cp <from> <to>");
+    const r = await mcp(cfg, "fs", "copy", { from: args[1], to: args[2] });
+    console.log(`copied: ${r.from} → ${r.to}`);
+    return;
+  }
+  if (sub === "mv" || sub === "move") {
+    if (!args[1] || !args[2]) die("usage: sbx fs mv <from> <to>");
+    const r = await mcp(cfg, "fs", "move", { from: args[1], to: args[2] });
+    console.log(`moved: ${r.from} → ${r.to}`);
+    return;
+  }
   if (sub === "tree") {
     const r = await mcp(cfg, "fs", "tree", { path: args[1] ?? ".", depth: Number(flag(args, "depth", 3)) });
     const walk = (nodes, prefix) => nodes.forEach((n, i) => {
@@ -613,15 +740,19 @@ async function cmdFs(args) {
     const res = await api(cfg, `/${cfg.slug}/file?path=${encodeURIComponent(remote)}`);
     if (!res.ok) die((await res.json().catch(() => ({}))).error ?? `http ${res.status}`);
     const buf = Buffer.from(await res.arrayBuffer());
-    if (local === "-") process.stdout.write(buf);
-    else { fs.writeFileSync(local, buf); console.log(`${remote} → ${local} (${human(buf.length)})`); }
+    if (local === "-") {
+      process.stdout.write(buf);
+    } else {
+      fs.writeFileSync(local, buf);
+      console.log(`${remote} → ${local} (${human(buf.length)})`);
+    }
     return;
   }
   if (sub === "put") {
     const local = args[1];
     if (!local) die("usage: sbx fs put <local> [remote]");
-    const remote = args[2] ?? path.basename(local);
-    const body = fs.readFileSync(local);
+    const remote = args[2] ?? (local === "-" ? die("remote path required when reading from stdin (-)") : path.basename(local));
+    const body = local === "-" ? await readAllStdin() : fs.readFileSync(local);
     const res = await fetch(`${cfg.url}/${cfg.slug}/file?path=${encodeURIComponent(remote)}`, {
       method: "PUT", headers: { Authorization: `Bearer ${cfg.token}` }, body,
     });
@@ -677,6 +808,29 @@ async function cmdProc(args) {
     console.log(r.stopped ? `stopped ${r.id}` : `not stopped: ${r.reason}`);
     return;
   }
+  if (sub === "forget") {
+    if (!args[1]) die("usage: sbx proc forget <id>");
+    const r = await mcp(cfg, "proc", "forget", { id: args[1] });
+    console.log(r.forgotten ? `forgotten ${args[1]}` : `not forgotten`);
+    return;
+  }
+  if (sub === "sessions") {
+    const r = await mcp(cfg, "proc", "sessions", {});
+    const list = r.sessions ?? [];
+    if (!list.length) { console.log("(no terminal sessions)"); return; }
+    for (const s of list) {
+      console.log(`${s.id}  ${s.name}  ws:${s.ws ?? "—"}  pid:${s.pid ?? "—"}`);
+    }
+    return;
+  }
+  if (sub === "signal") {
+    if (!args[1]) die("usage: sbx proc signal <pid> [SIGTERM|SIGKILL|...]");
+    const pid = Number(args[1]);
+    const sig = args[2] || "SIGTERM";
+    const r = await mcp(cfg, "proc", "signal", { pid, signal: sig });
+    console.log(`signaled ${r.pid} with ${r.signal}`);
+    return;
+  }
   die(`unknown proc subcommand: ${sub}`);
 }
 
@@ -706,6 +860,13 @@ async function cmdPort(args) {
     if (!port) die("usage: sbx port close <port>");
     const r = await mcp(cfg, "ports", "unexpose", { port });
     console.log(r.removed ? `closed :${r.port}` : `:${r.port} was not exposed`);
+    return;
+  }
+  if (sub === "check") {
+    const port = Number(args[1]);
+    if (!port) die("usage: sbx port check <port>");
+    const r = await mcp(cfg, "ports", "check", { port });
+    console.log(`port ${r.port}: ${r.up ? "listening" : "closed"}`);
     return;
   }
   if (sub === "scan") {
@@ -844,8 +1005,8 @@ async function cmdBackup(args) {
 
 const HELP = `sbx — drive a SandboxOS machine from anywhere.
 
-  connect     login [--url URL] [--slug SLUG] [--patterns a,b]
-              token [--patterns a,b]              mint a narrower token
+  connect     login [--url URL] [--slug SLUG] [--token TOKEN] [--user USER] [--password PWD] [--patterns a,b]
+              token [list|revoke <id>] [--patterns a,b]
               sandbox <list|create|wake|hibernate|delete>
 
   work        run "<line>"                        one Command Central line
@@ -854,21 +1015,23 @@ const HELP = `sbx — drive a SandboxOS machine from anywhere.
               stream "<cmd>"                      run a command, streaming output
               ask "<question>" [--chat ID]        the assistant, with live tool calls
 
-  files       fs ls [path] · fs cat <path> · fs tree [path] [--depth N]
+  files       fs ls [path] · fs cat <path> · fs stat <path> · fs tree [path] [--depth N]
               fs grep <query> [path] [--include "*.js"] [--regex]
-              fs mkdir <path> · fs rm <path> [-r]
-              fs get <remote> [local] · fs put <local> [remote]
+              fs cp <from> <to> · fs mv <from> <to> · fs mkdir <path> · fs rm <path> [-r]
+              fs get <remote> [local|-] · fs put <local|-> [remote]
 
   processes   proc list · proc start "<cmd>" [--name N] · proc logs <id> [-f] · proc stop <id>
-  ports       port list · port expose <port> [name] · port close <port> · port scan
+              proc forget <id> · proc sessions · proc signal <pid> [SIG]
+  ports       port list · port expose <port> [name] · port close <port> · port check <port> · port scan
   agents      agent <list|spawn|get|kill> …
 
   desktop     os show · os map · os silhouette [W H] · os open <app> · os close <id>
               os widget <kind> · os theme [key] · os motion <preset>
-              os layout <floating|tiling|master-stack|columns|rows|grid>
+              os layout <floating|tiling|master-stack|columns|rows|grid> · os arrange [mode]
               os tile <id> ratio <r> [with <id>] | swap <id> | flip
               os snap <id> <region> [WxH] · os assoc [.ext] [app]
               os apps · os tools <app> on|off · os history [rev] · os revert <rev>
+              os checkpoint [label] · os checkpoints
               os publish <name> [--public] [--tags=a,b] · os gallery [q] [--public|--mine]
               os visibility <name> <private|tenant|public> · os fork <distro>
               os export · os notify "<title>" · os tui

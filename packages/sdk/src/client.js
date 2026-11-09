@@ -14,12 +14,88 @@
 //
 // Zero dependencies: global fetch and nothing else.
 
+/**
+ * Meaningful remediation hints for common SandboxOS failure modes.
+ */
+function resolveRemediation({ code, message = "", server, tool, status }) {
+  if (code === "denied" || message.includes("denied")) {
+    if (server && tool) return `Grant the '${server}.${tool}' capability pattern to your machine token or request access.`;
+    return "Check capability patterns on your token or request required permissions.";
+  }
+  if (code === "unknown_tool" || message.includes("unknown tool")) {
+    if (server && tool) return `Verify that tool '${tool}' exists on server '${server}' and that '${server}' is enabled in the manifest (see tools catalog).`;
+    return "Verify the server and tool name in the Kernel tools catalog.";
+  }
+  if (code === "not_found" || status === 404 || message.includes("not found")) {
+    return "Check that the requested path, resource, or identifier exists in the sandbox.";
+  }
+  if (code === "unauthorized" || status === 401) {
+    return "Authenticate with valid credentials or mint a new machine token via 'sbx login'.";
+  }
+  if (code === "quota_exceeded" || status === 429 || message.includes("quota")) {
+    return "Request a quota increase or terminate unused sandboxes/agents.";
+  }
+  if (code === "bad_request" || status === 400 || message.includes("bad_request") || message.includes("malformed")) {
+    return "Check request arguments against the tool's input schema.";
+  }
+  if (code === "unsupported_host") {
+    return "Switch to a supported cell execution backend or check host environment configuration.";
+  }
+  if (code === "stale_rev") {
+    return "Refresh desktop state and retry the update with the latest revision.";
+  }
+  if (code === "timeout") {
+    return "The operation exceeded its deadline; check process/agent logs or increase timeoutMs.";
+  }
+  return "Review server logs or audit events via 'sbx audit' to diagnose the issue.";
+}
+
 export class SandboxError extends Error {
-  constructor(message, { status, code } = {}) {
+  /**
+   * @param {string} message
+   * @param {object} [options]
+   * @param {number} [options.status] HTTP status code
+   * @param {string} [options.code] Error code (e.g. 'denied', 'unknown_tool', 'not_found')
+   * @param {string} [options.server] MCP server name
+   * @param {string} [options.tool] MCP tool name
+   * @param {string} [options.remediation] Practical guidance for resolving the error
+   */
+  constructor(message, { status, code, server, tool, remediation } = {}) {
     super(message);
     this.name = "SandboxError";
     this.status = status;
-    this.code = code;
+    this.server = server;
+    this.tool = tool;
+
+    this.code = code || (
+      status === 401 ? "unauthorized" :
+      status === 403 ? "denied" :
+      status === 404 ? "not_found" :
+      status === 429 ? "quota_exceeded" :
+      message?.startsWith("denied:") ? "denied" :
+      message?.startsWith("unknown tool:") ? "unknown_tool" :
+      "error"
+    );
+
+    this.remediation = remediation || resolveRemediation({
+      code: this.code,
+      message,
+      server,
+      tool,
+      status,
+    });
+  }
+
+  toJSON() {
+    return {
+      name: this.name,
+      message: this.message,
+      code: this.code,
+      ...(this.status ? { status: this.status } : {}),
+      ...(this.server ? { server: this.server } : {}),
+      ...(this.tool ? { tool: this.tool } : {}),
+      ...(this.remediation ? { remediation: this.remediation } : {}),
+    };
   }
 }
 
@@ -28,12 +104,12 @@ export class SandboxClient {
    * @param {object} o
    * @param {string} o.url    Gateway origin, e.g. https://sandboxos.dev
    * @param {string} o.slug   the machine to drive
-   * @param {string} o.token  a machine token (see `sbx token`)
+   * @param {string} [o.token]  a machine token (see `sbx token`)
    * @param {typeof fetch} [o.fetch] injectable for tests
    */
-  constructor({ url, slug, token, fetch: f = globalThis.fetch }) {
-    if (!url) throw new SandboxError("url is required");
-    if (!slug) throw new SandboxError("slug is required");
+  constructor({ url, slug, token, fetch: f = globalThis.fetch } = {}) {
+    if (!url) throw new SandboxError("url is required", { code: "invalid_argument", remediation: "Provide a Gateway origin URL (e.g. http://127.0.0.1:3939)" });
+    if (!slug) throw new SandboxError("slug is required", { code: "invalid_argument", remediation: "Provide a sandbox slug to connect to" });
     this.url = String(url).replace(/\/$/, "");
     this.slug = slug;
     this.token = token;
@@ -46,6 +122,11 @@ export class SandboxClient {
     this.secrets = new SecretsApi(this);
     this.desktop = new DesktopApi(this);
     this.assistant = new AssistantApi(this);
+    this.tokens = new TokensApi(this);
+    this.tide = new TideApi(this);
+    this.access = new AccessApi(this);
+    this.sandboxes = new SandboxesApi(this);
+    this.quota = new QuotaApi(this);
   }
 
   get headers() {
@@ -67,14 +148,26 @@ export class SandboxClient {
     const text = await res.text();
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
-    if (!res.ok) throw new SandboxError(data?.error ?? text.slice(0, 200) ?? res.statusText, { status: res.status });
+    if (!res.ok) {
+      const errObj = typeof data?.error === "object" && data?.error !== null ? data.error : null;
+      const message = errObj?.message ?? (typeof data?.error === "string" ? data.error : text.slice(0, 200) || res.statusText);
+      const code = errObj?.code ?? data?.code;
+      const remediation = errObj?.remediation ?? data?.remediation;
+      throw new SandboxError(message, { status: res.status, code, remediation });
+    }
     return data;
   }
 
   /** One MCP call. Throws on denial or tool error; returns the result. */
   async call(server, tool, args = {}) {
     const env = await this.request("mcp", { method: "POST", body: { server, tool, args } });
-    if (!env.ok) throw new SandboxError(env.error ?? `${server}.${tool} failed`, { code: env.code });
+    if (!env.ok) {
+      const errObj = typeof env.error === "object" && env.error !== null ? env.error : null;
+      const message = errObj?.message ?? (typeof env.error === "string" ? env.error : `${server}.${tool} failed`);
+      const code = errObj?.code ?? env.code ?? (message.startsWith("denied:") ? "denied" : message.startsWith("unknown tool:") ? "unknown_tool" : "error");
+      const remediation = errObj?.remediation ?? env.remediation;
+      throw new SandboxError(message, { code, server, tool, remediation });
+    }
     return env.result;
   }
 
@@ -105,7 +198,10 @@ export class SandboxClient {
   /** Stream a command's output. Yields {type:"stdout"|"stderr"|"done", …}. */
   async *stream(cmd) {
     const res = await this.request("stream", { method: "POST", body: { cmd }, raw: true });
-    if (!res.ok) throw new SandboxError(`stream failed: ${res.status}`, { status: res.status });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new SandboxError(data.error ?? `stream failed: ${res.status}`, { status: res.status });
+    }
     yield* sseEvents(res);
   }
 }
@@ -120,20 +216,41 @@ class FsApi {
   append(path, content) { return this.c.call("fs", "append", { path, content }); }
   mkdir(path) { return this.c.call("fs", "mkdir", { path }); }
   remove(path, { recursive = false } = {}) { return this.c.call("fs", "remove", { path, recursive }); }
+  rm(path, opts) { return this.remove(path, opts); }
   move(from, to) { return this.c.call("fs", "move", { from, to }); }
+  mv(from, to) { return this.move(from, to); }
   copy(from, to) { return this.c.call("fs", "copy", { from, to }); }
+  cp(from, to) { return this.copy(from, to); }
   stat(path) { return this.c.call("fs", "stat", { path }); }
   tree(path = ".", opts = {}) { return this.c.call("fs", "tree", { path, ...opts }); }
   search(query, opts = {}) { return this.c.call("fs", "search", { query, ...opts }); }
+  async readBytes(path, opts = {}) {
+    const res = await this.c.call("fs", "readBytes", { path, ...opts });
+    const buf = Buffer.from(res.base64 || "", "base64");
+    buf.path = res.path;
+    buf.bytes = res.bytes;
+    buf.base64 = res.base64;
+    return buf;
+  }
+  writeBytes(path, data) {
+    const base64 = typeof data === "string" ? data : Buffer.from(data).toString("base64");
+    return this.c.call("fs", "writeBytes", { path, base64 });
+  }
 
   /** Stream a file's bytes out of the Cell (binary-safe, any size). */
   async download(path) {
     const res = await this.c.request(`file?path=${encodeURIComponent(path)}`, { raw: true });
-    if (!res.ok) throw new SandboxError(`download failed: ${res.status}`, { status: res.status });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new SandboxError(err.error ?? `download failed: ${res.status}`, {
+        status: res.status,
+        code: res.status === 404 ? "not_found" : res.status === 403 ? "denied" : "download_failed",
+      });
+    }
     return new Uint8Array(await res.arrayBuffer());
   }
 
-  /** Stream bytes into the Cell. Accepts a string, Uint8Array or Blob. */
+  /** Stream bytes into the Cell. Accepts a string, Uint8Array or Buffer. */
   upload(path, data) {
     return this.c.request(`file?path=${encodeURIComponent(path)}`, {
       method: "PUT", body: data, headers: { "Content-Type": "application/octet-stream" },
@@ -150,6 +267,10 @@ class ProcApi {
   logs(id, opts = {}) { return this.c.call("proc", "logs", { id, ...opts }); }
   stop(id, opts = {}) { return this.c.call("proc", "stop", { id, ...opts }); }
   forget(id) { return this.c.call("proc", "forget", { id }); }
+  sessions() { return this.c.call("proc", "sessions", {}).then((r) => r.sessions); }
+  sessionRename(id, name) { return this.c.call("proc", "sessionRename", { id, name }).then((r) => r.session); }
+  sessionKill(id) { return this.c.call("proc", "sessionKill", { id }); }
+  signal(pid, signal = "TERM") { return this.c.call("proc", "signal", { pid: Number(pid), signal }); }
 
   /** Poll a supervised process until it leaves the running state. */
   async wait(id, { intervalMs = 500, timeoutMs = 300_000 } = {}) {
@@ -157,7 +278,11 @@ class ProcApi {
     for (;;) {
       const r = await this.logs(id, { tail: 1 });
       if (r.state !== "running") return r;
-      if (Date.now() > deadline) throw new SandboxError(`timed out waiting for ${id}`);
+      if (Date.now() > deadline) {
+        throw new SandboxError(`timed out waiting for process ${id}`, {
+          code: "timeout", remediation: "Check process logs using sbx.proc.logs(id) or increase timeoutMs.",
+        });
+      }
       await new Promise((res) => setTimeout(res, intervalMs));
     }
   }
@@ -166,9 +291,14 @@ class ProcApi {
 class PortsApi {
   constructor(c) { this.c = c; }
   list(opts = {}) { return this.c.call("ports", "list", opts).then((r) => r.ports); }
-  expose(port, name) { return this.c.call("ports", "expose", { port, name }); }
-  unexpose(port) { return this.c.call("ports", "unexpose", { port }); }
-  check(port, opts = {}) { return this.c.call("ports", "check", { port, ...opts }); }
+  expose(port, nameOrOpts) {
+    const args = typeof nameOrOpts === "string"
+      ? { port: Number(port), name: nameOrOpts }
+      : { port: Number(port), ...nameOrOpts };
+    return this.c.call("ports", "expose", args);
+  }
+  unexpose(port) { return this.c.call("ports", "unexpose", { port: Number(port) }); }
+  check(port, opts = {}) { return this.c.call("ports", "check", { port: Number(port), ...opts }); }
   scan() { return this.c.call("ports", "scan", {}).then((r) => r.listening); }
   /** The public URL a browser would use for an exposed port. */
   url(port) { return `${this.c.url}/${this.c.slug}/p/${port}/`; }
@@ -176,21 +306,32 @@ class PortsApi {
 
 class AgentsApi {
   constructor(c) { this.c = c; }
-  list() { return this.c.call("agents", "list", {}).then((r) => r.agents); }
+  list(opts = {}) { return this.c.call("agents", "list", opts).then((r) => r.agents); }
   get(id) { return this.c.call("agents", "get", { id }); }
   kill(id) { return this.c.call("agents", "kill", { id }); }
   spawn(name, { cmd, prompt, kind = cmd ? "shell" : "ai", patterns = ["proc.exec"], system } = {}) {
     return this.c.call("agents", "spawn", { name, kind, patterns, cmd, prompt, system });
   }
+
   /** Poll an agent until it finishes. */
   async wait(id, { intervalMs = 700, timeoutMs = 300_000 } = {}) {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const a = await this.get(id);
       if (a.state !== "queued" && a.state !== "running") return a;
-      if (Date.now() > deadline) throw new SandboxError(`timed out waiting for agent ${id}`);
+      if (Date.now() > deadline) {
+        throw new SandboxError(`timed out waiting for agent ${id}`, {
+          code: "timeout", remediation: "Inspect agent details via sbx.agents.get(id) or terminate it.",
+        });
+      }
       await new Promise((res) => setTimeout(res, intervalMs));
     }
+  }
+
+  /** Live audit events of an agent as an async iterator. */
+  async *events(id, { signal } = {}) {
+    const res = await this.c.request(`agents/${id}/events`, { raw: true, headers: { Accept: "text/event-stream" }, signal });
+    yield* sseEvents(res);
   }
 }
 
@@ -216,11 +357,15 @@ class DesktopApi {
   get() { return this.c.call("desktop", "get", {}); }
   state() { return this.c.call("desktop", "state", {}).then((r) => r.doc); }
   patch(patch, opts = {}) { return this.c.call("desktop", "patch", { patch, ...opts }); }
+  set(doc, opts = {}) { return this.c.call("desktop", "set", { doc, ...opts }); }
+  rename(name) { return this.c.call("desktop", "rename", { name }); }
 
   open(app, opts = {}) { return this.c.call("desktop", "open", { app, ...opts }).then((r) => r.window); }
   close(id) { return this.c.call("desktop", "close", { id }); }
+  focus(id) { return this.c.call("desktop", "focus", { id }); }
   move(id, x, y) { return this.c.call("desktop", "move", { id, x, y }); }
   resize(id, w, h) { return this.c.call("desktop", "resize", { id, w, h }); }
+  windowSet(id, opts = {}) { return this.c.call("desktop", "windowSet", { id, ...opts }); }
   arrange(preset, opts = {}) { return this.c.call("desktop", "arrange", { preset, ...opts }); }
   layout(mode, opts = {}) { return this.c.call("desktop", "layoutSet", { mode, ...opts }); }
   /** Tiling: rebuild a workspace's tree from a preset (master-stack, columns, rows, grid). */
@@ -236,12 +381,16 @@ class DesktopApi {
   showDesktop(restore = false) { return this.c.call("desktop", "minimizeAll", { restore }); }
   /** Which app opens a file extension. Pass app=null to clear. */
   associate(ext, app) { return this.c.call("desktop", "associate", { ext, app }); }
+  workspaceSwitch(n) { return this.c.call("desktop", "workspaceSwitch", { n: Number(n) }); }
 
   widgets() { return this.c.call("desktop", "widgetList", {}).then((r) => r.widgets); }
   addWidget(kind, opts = {}) { return this.c.call("desktop", "widgetAdd", { kind, ...opts }).then((r) => r.widget); }
   removeWidget(id) { return this.c.call("desktop", "widgetRemove", { id }); }
 
   theme(theme, tokens) { return this.c.call("desktop", "themeSet", { theme, ...(tokens ? { tokens } : {}) }); }
+  themeDefine(def) { return this.c.call("desktop", "themeDefine", def); }
+  themeRemove(key) { return this.c.call("desktop", "themeRemove", { key }); }
+  wallpaperSet(opts = {}) { return this.c.call("desktop", "wallpaperSet", opts); }
   animation(preset) { return this.c.call("desktop", "animationSet", { preset }); }
   notify(title, body, kind = "info") { return this.c.call("desktop", "notify", { title, body, kind }); }
 
@@ -256,10 +405,10 @@ class DesktopApi {
   writeApp(id, path, content) { return this.c.call("desktop", "appWrite", { id, path, content }); }
 
   /** Undo. Every desktop change is a revision. */
-  history() { return this.c.call("desktop", "history", {}).then((r) => r.revisions); }
+  history(opts = {}) { return this.c.call("desktop", "history", opts).then((r) => r.revisions); }
   /** What a revision changed against the current document. */
   diff(rev) { return this.c.call("desktop", "history", { rev }).then((r) => r.diff); }
-  revert(rev) { return this.c.call("desktop", "revert", { rev }); }
+  revert(rev, opts = {}) { return this.c.call("desktop", "revert", { rev, ...opts }); }
 
   /** The gallery: seeds, your tenant's distros, and every public one. */
   distros(opts = {}) { return this.c.call("desktop", "distroList", opts).then((r) => r.distros); }
@@ -269,6 +418,17 @@ class DesktopApi {
   fork(idOrName, opts = {}) { return this.c.call("desktop", "distroFork", { id: idOrName, ...opts }); }
   export() { return this.c.call("desktop", "distroExport", {}).then((r) => r.payload); }
   import(payload, name) { return this.c.call("desktop", "distroImport", { payload, ...(name ? { name } : {}) }); }
+
+  /** Checkpoints: durable named desktop snapshots. */
+  checkpoint(name, opts = {}) { return this.c.call("desktop", "checkpoint", { name, ...opts }); }
+  checkpoints() { return this.c.call("desktop", "checkpoints", {}); }
+  checkpointRestore(id) { return this.c.call("desktop", "checkpointRestore", { id }); }
+  checkpointRemove(id) { return this.c.call("desktop", "checkpointRemove", { id }); }
+
+  /** Proposals: propose desktop changes for review instead of applying immediately. */
+  propose(ops, opts = {}) { return this.c.call("desktop", "propose", { ops, ...opts }).then((r) => r.proposal); }
+  applyProposal(id) { return this.c.call("desktop", "applyProposal", { id }); }
+  discardProposal(id) { return this.c.call("desktop", "discardProposal", { id }); }
 }
 
 class AssistantApi {
@@ -302,6 +462,65 @@ class AssistantApi {
     }
     return out;
   }
+}
+
+class TokensApi {
+  constructor(c) { this.c = c; }
+  list() { return this.c.request("tokens").then((r) => r.tokens); }
+  mint(patterns, { label = "sdk" } = {}) {
+    return this.c.request("tokens", { method: "POST", body: { patterns, label } });
+  }
+  revoke(principalId) {
+    return this.c.request(`tokens/${principalId}`, { method: "DELETE" });
+  }
+}
+
+class TideApi {
+  constructor(c) { this.c = c; }
+  init(workspace, path) { return this.c.call("tide", "init", { workspace, path }); }
+  listWorkspaces() { return this.c.call("tide", "listWorkspaces", {}).then((r) => r.workspaces); }
+  status(workspace) { return this.c.call("tide", "status", { workspace }).then((r) => r.changes); }
+  mark(workspace, opts = {}) { return this.c.call("tide", "mark", { workspace, ...opts }); }
+  log(workspace, limit = 50) { return this.c.call("tide", "log", { workspace, limit }).then((r) => r.marks); }
+  diff(workspace, from, to) { return this.c.call("tide", "diff", { workspace, from, to }).then((r) => r.changes); }
+  checkout(workspace, ref) { return this.c.call("tide", "checkout", { workspace, ref }); }
+  refs(workspace) { return this.c.call("tide", "refs", { workspace }).then((r) => r.head); }
+  putState(workspace, type, data) { return this.c.call("tide", "putState", { workspace, type, data }); }
+  getState(workspace, type) { return this.c.call("tide", "getState", { workspace, type }).then((r) => r.data); }
+  listStates(workspace) { return this.c.call("tide", "listStates", { workspace }).then((r) => r.types); }
+  fetchObjects(workspace, have = []) { return this.c.call("tide", "fetchObjects", { workspace, have }); }
+  receiveObjects(workspace, head, objects, path) {
+    return this.c.call("tide", "receiveObjects", { workspace, head, objects, ...(path ? { path } : {}) });
+  }
+}
+
+class AccessApi {
+  constructor(c) { this.c = c; }
+  list() { return this.c.request("access").then((r) => r.access); }
+  share(username, patterns = ["*"]) {
+    return this.c.request("access", { method: "POST", body: { username, patterns } });
+  }
+  revoke(principalId) {
+    return this.c.request(`access/${principalId}`, { method: "DELETE" });
+  }
+}
+
+class SandboxesApi {
+  constructor(c) { this.c = c; }
+  list() { return this.c.request("/api/sandboxes").then((r) => r.sandboxes); }
+  create(slug, opts = {}) {
+    return this.c.request("/api/sandboxes", { method: "POST", body: { slug, name: opts.name ?? slug, ...opts } });
+  }
+  delete(slug) { return this.c.request(`/api/sandboxes/${slug}`, { method: "DELETE" }); }
+  snapshot(slug, name) {
+    return this.c.request(`/api/sandboxes/${slug}/snapshot`, { method: "POST", body: { name } });
+  }
+}
+
+class QuotaApi {
+  constructor(c) { this.c = c; }
+  get() { return this.c.request("/api/quota").then((r) => r.quota); }
+  set(limits) { return this.c.request("/api/quota", { method: "POST", body: limits }).then((r) => r.quota); }
 }
 
 // ── SSE ──────────────────────────────────────────────────────────────────────
