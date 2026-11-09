@@ -352,4 +352,3 @@ test("C3: packages/kernel/src/servers/net.js - net.fetch blocks private IP and S
   assert.equal(res3.ok, false);
   assert.match(res3.error, /egress blocked/);
 });
-
