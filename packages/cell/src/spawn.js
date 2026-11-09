@@ -10,13 +10,33 @@
 // listener is attached before the event loop can turn.
 
 import { spawn, spawnSync, execFile } from "node:child_process";
+import { EventEmitter } from "node:events";
 
 /**
  * Spawn with an `'error'` listener attached at birth. The error is also stashed
  * on the child as `spawnError`, so a late caller can ask what went wrong.
  */
 export function safeSpawn(bin, args = [], opts = {}, onError) {
-  const child = spawn(bin, args, opts);
+  let child;
+  try {
+    child = spawn(bin, args, opts);
+  } catch (err) {
+    const emitter = new EventEmitter();
+    emitter.spawnError = err;
+    emitter.pid = null;
+    emitter.kill = () => false;
+    emitter.stdout = new EventEmitter();
+    emitter.stderr = new EventEmitter();
+    emitter.stdin = { write() {}, end() {}, on() {} };
+    emitter.on("error", (e) => {
+      try { onError?.(e); } catch {}
+    });
+    queueMicrotask(() => {
+      try { onError?.(err); } catch {}
+      emitter.emit("error", err);
+    });
+    return emitter;
+  }
   child.on("error", (err) => {
     child.spawnError = err;
     try { onError?.(err); } catch { /* a failing error handler must not be fatal either */ }

@@ -95,6 +95,7 @@ export class LocalBackend {
     const timer = setTimeout(() => handle.kill("SIGKILL"), timeoutMs);
     proc.stdout?.on("data", (d) => callback({ type: "stdout", chunk: d.toString() }));
     proc.stderr?.on("data", (d) => callback({ type: "stderr", chunk: d.toString() }));
+    proc.on("error", () => finish(127, { code: "spawn_failed", message: "child process error" }));
     proc.on("close", (code) => finish(code ?? 1));
     return handle;
   }
@@ -150,8 +151,21 @@ export class LocalBackend {
       ));
     }
 
-    proc.stdout?.on("data", onData);
-    proc.stderr?.on("data", onData);
+    let ready = !sh.pty;
+    const pending = [];
+    const flushPending = () => {
+      if (!ready) {
+        ready = true;
+        clearTimeout(readyTimer);
+        for (const data of pending.splice(0)) {
+          try { proc.stdin?.write(data); } catch { /* shell exiting */ }
+        }
+      }
+    };
+    const readyTimer = sh.pty ? setTimeout(flushPending, 200) : null;
+
+    proc.stdout?.on("data", (d) => { flushPending(); onData(d); });
+    proc.stderr?.on("data", (d) => { flushPending(); onData(d); });
 
     const resize = sh.pty
       ? (c, r) => detachedSpawn(sh.bin, sh.argv(resizeScript(marker, c, r, tmp)), { env: fullEnv })
@@ -159,12 +173,20 @@ export class LocalBackend {
     // The pty starts unsized (our stdin is a pipe): size it once the shell is up.
     const first = sh.pty ? setTimeout(() => resize(cols, rows), 250) : null;
     const cleanup = () => {
+      clearTimeout(readyTimer);
       if (sh.pty) detachedSpawn(sh.bin, sh.argv(cleanupScript(marker, tmp)), { detached: process.platform !== "win32" });
       killTree(proc.pid, "SIGKILL", proc);
     };
-    proc.on("exit", () => { clearTimeout(first); cleanup(); close(); });
+    proc.on("error", close);
+    proc.on("exit", () => { clearTimeout(first); clearTimeout(readyTimer); cleanup(); close(); });
     return {
-      write(data) { try { proc.stdin?.write(data); } catch { /* the session is going away */ } },
+      write(data) {
+        if (!ready) {
+          pending.push(data);
+          return;
+        }
+        try { proc.stdin?.write(data); } catch { /* the session is going away */ }
+      },
       // Ending a session ends what the session started. `cleanup` is the whole
       // of it: killTree walks the tree down from the wrapper, and killing our own
       // child alongside it would race that walk — on Windows `taskkill /T` reads
@@ -180,6 +202,10 @@ export class LocalBackend {
    *  loopback, so an in-Cell listener is simply a localhost port. */
   async endpoint(port) {
     return { host: "127.0.0.1", port: Number(port) };
+  }
+
+  async cleanup() {
+    try { await this.stop(); } catch {}
   }
 
   async stop() { return { state: "stopped" }; }

@@ -209,7 +209,8 @@ export class Kernel {
       // and retries (`stale_rev`), a host that cannot run commands is not a
       // transient error (`unsupported_host`), and neither is "error".
       const code = typeof err?.code === "string" && /^[a-z][a-z0-9_]{2,31}$/.test(err.code) ? err.code : "error";
-      return { ok: false, code, error: message };
+      const remediation = typeof err?.remediation === "string" ? err.remediation : undefined;
+      return { ok: false, code, error: message, ...(remediation ? { remediation } : {}) };
     }
   }
 
