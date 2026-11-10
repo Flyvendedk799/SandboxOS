@@ -12,8 +12,8 @@ import crypto from "node:crypto";
 import {
   buildTreeFromDir, checkoutTree, diffTrees, summarizeDiff, writeCommit, readCommit,
   reachable, exportObjects, importObjects, isAncestor, writeState, readState,
-  hasObject, assertSafePath, assertSafeEntryName, buildVolumeManifest,
-  exportVolume, restoreVolume,
+  hasObject, readObject, assertSafePath, assertSafeEntryName, buildVolumeManifest,
+  exportVolume, restoreVolume, IGNORE,
 } from "./objects.js";
 
 export class Repo {
@@ -93,9 +93,19 @@ export class Repo {
   branch(name, branchName, targetRef = null) {
     assertSafeEntryName(branchName);
     const ws = this.get(name);
-    const targetHash = targetRef
-      ? this._resolveCommit(name, targetRef)
-      : ws.head;
+    let targetHash = null;
+    if (targetRef) {
+      targetHash = this._resolveCommit(name, targetRef);
+      if (!targetHash || !hasObject(this.store, targetHash)) {
+        throw new Error(`cannot branch from "${targetRef}": commit does not exist`);
+      }
+      const obj = readObject(this.store, targetHash);
+      if (obj.type !== "commit") {
+        throw new Error(`cannot branch from "${targetRef}": object is a ${obj.type}, not a commit`);
+      }
+    } else {
+      targetHash = ws.head;
+    }
     const branches = { ...(ws.branches ?? {}), [branchName]: targetHash };
     const reg = this.registry();
     reg[name] = { ...ws, branches };
@@ -160,10 +170,15 @@ export class Repo {
     return commit;
   }
 
-  log(name, { limit = 50, from = null } = {}) {
-    // If limit was passed directly as a number (backward compat)
-    const max = typeof limit === "number" ? limit : 50;
-    const fromRef = typeof limit === "object" && limit !== null ? limit.from ?? null : from;
+  log(name, opts = 50, fromArg = null) {
+    let max = 50;
+    let fromRef = fromArg;
+    if (typeof opts === "number") {
+      max = opts;
+    } else if (typeof opts === "object" && opts !== null) {
+      max = typeof opts.limit === "number" ? opts.limit : 50;
+      fromRef = opts.from ?? fromArg;
+    }
 
     const out = [];
     let h = fromRef ? this._resolveCommit(name, fromRef) : this.get(name).head;
@@ -363,6 +378,18 @@ export class Repo {
 
     // Verify target directory containment (preventing traversal)
     assertSafePath(path.dirname(targetWorkdir), path.basename(targetWorkdir));
+
+    if (!overwrite) {
+      if (this.has(name)) {
+        throw new Error(`cannot restore workspace "${name}": workspace already exists (use overwrite: true)`);
+      }
+      if (fs.existsSync(targetWorkdir)) {
+        const entries = fs.readdirSync(targetWorkdir).filter((e) => !IGNORE.has(e));
+        if (entries.length > 0) {
+          throw new Error(`cannot restore into non-empty directory "${targetWorkdir}" (use overwrite: true)`);
+        }
+      }
+    }
 
     // 1. Ingest all objects into store (validates hashes and prevents corruption)
     this.ingest(snapshot.objects ?? []);

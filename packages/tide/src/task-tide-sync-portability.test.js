@@ -81,6 +81,15 @@ test("[C1] working tree changes are detected, marked, and track revisions", () =
   assert.equal(log[0].message, "Update app config");
   assert.equal(log[1].hash, rev1);
   assert.deepEqual(log[1].parents, []);
+
+  // Numeric limit and object options are both honored
+  const logLimitNum = repo.log("dev", 1);
+  assert.equal(logLimitNum.length, 1);
+  assert.equal(logLimitNum[0].hash, rev2);
+
+  const logLimitObj = repo.log("dev", { limit: 1 });
+  assert.equal(logLimitObj.length, 1);
+  assert.equal(logLimitObj[0].hash, rev2);
 });
 
 test("[C1] structural diffs accurately report added, modified, deleted and type conversions", () => {
@@ -527,6 +536,82 @@ test("[C3] full machine workspace export and restore preserves files, DAG, branc
   assert.deepEqual(repoDest.getState("mysandbox", "env"), { PORT: 8080, HOST: "0.0.0.0" });
   assert.deepEqual(repoDest.getState("mysandbox", "manifest"), { servers: { fs: {}, proc: {}, tide: {} } });
   assert.deepEqual(repoDest.getState("mysandbox", "servers"), { active: ["http", "ws"] });
+});
+
+test("[C3] branch validates target refs against object store", () => {
+  const store = tmp("branch-ref-store");
+  const workdir = tmp("branch-ref-work");
+  const repo = new Repo(store);
+  repo.init("ref-ws", workdir);
+
+  write(workdir, "a.txt", "initial");
+  const c1 = repo.mark("ref-ws", { message: "c1" });
+
+  // 1. Valid branch pointing to existing commit succeeds
+  const bValid = repo.branch("ref-ws", "valid-b", c1);
+  assert.equal(bValid.head, c1);
+
+  // 2. Non-existent commit ref throws clear error
+  assert.throws(
+    () => repo.branch("ref-ws", "bad-ref", "0000000000000000000000000000000000000000"),
+    /cannot branch from "0000000000000000000000000000000000000000": commit does not exist/,
+  );
+
+  // 3. Object ref pointing to a blob (not a commit) throws clear error
+  const blobHash = writeBlob(store, Buffer.from("just a blob"));
+  assert.throws(
+    () => repo.branch("ref-ws", "blob-ref", blobHash),
+    /cannot branch from ".*": object is a blob, not a commit/,
+  );
+});
+
+test("[C3] workspace restore enforces overwrite protection and integrity verification", () => {
+  const store = tmp("protect-store");
+  const workdir = tmp("protect-work");
+  const repo = new Repo(store);
+  repo.init("protect-ws", workdir);
+
+  write(workdir, "file.txt", "v1 content");
+  repo.mark("protect-ws", { message: "mark 1" });
+  repo.putState("protect-ws", "env", { ENV: "prod" });
+
+  const snapshot = repo.exportWorkspace("protect-ws");
+
+  // 1. Rejects tampered snapshot payload (integrity mismatch)
+  const tampered = JSON.parse(JSON.stringify(snapshot));
+  tampered.states.env = { ENV: "hacked" };
+  const destStoreTampered = tmp("dest-store-tampered");
+  const repoTampered = new Repo(destStoreTampered);
+  assert.throws(
+    () => repoTampered.restoreWorkspace("protect-ws", tampered),
+    /snapshot corrupted: integrity check failed/i,
+  );
+
+  // 2. Refuses to restore over an existing workspace without overwrite: true
+  assert.throws(
+    () => repo.restoreWorkspace("protect-ws", snapshot),
+    /cannot restore workspace "protect-ws": workspace already exists \(use overwrite: true\)/,
+  );
+
+  // 3. Refuses to restore into a non-empty directory without overwrite: true
+  const destStore2 = tmp("dest-store-2");
+  const destWork2 = tmp("dest-work-2");
+  const repo2 = new Repo(destStore2);
+  write(destWork2, "uncommitted.txt", "should not be deleted silently");
+  assert.throws(
+    () => repo2.restoreWorkspace("fresh-ws", snapshot, { workdir: destWork2, overwrite: false }),
+    /cannot restore into non-empty directory ".*" \(use overwrite: true\)/,
+  );
+  assert.equal(fs.existsSync(path.join(destWork2, "uncommitted.txt")), true);
+
+  // 4. Overwrite: true successfully replaces existing workspace
+  const resOverwriteWs = repo.restoreWorkspace("protect-ws", snapshot, { overwrite: true });
+  assert.equal(resOverwriteWs.restored, true);
+
+  // 5. Overwrite: true successfully restores into non-empty directory
+  const resOverwriteDir = repo2.restoreWorkspace("fresh-ws", snapshot, { workdir: destWork2, overwrite: true });
+  assert.equal(resOverwriteDir.restored, true);
+  assert.equal(fs.existsSync(path.join(destWork2, "file.txt")), true);
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

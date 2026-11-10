@@ -132,12 +132,14 @@ async function cmdExport(args) {
 }
 
 async function cmdRestore(args) {
-  if (!args[0]) die("usage: tide restore <snapshotFile> [workspace] [dir]");
-  const snap = JSON.parse(fs.readFileSync(args[0], "utf8"));
-  const wsName = args[1] || snap.workspace;
-  const dir = args[2] ? path.resolve(args[2]) : path.resolve(wsName);
+  if (!args[0]) die("usage: tide restore <snapshotFile> [workspace] [dir] [--overwrite]");
+  const overwrite = args.includes("--overwrite") || args.includes("-f");
+  const filtered = args.filter((a) => a !== "--overwrite" && a !== "-f");
+  const snap = JSON.parse(fs.readFileSync(filtered[0], "utf8"));
+  const wsName = filtered[1] || snap.workspace;
+  const dir = filtered[2] ? path.resolve(filtered[2]) : path.resolve(wsName);
   const repo = new Repo(path.join(dir, ".tide", "store"));
-  repo.restoreWorkspace(wsName, snap, { workdir: dir });
+  repo.restoreWorkspace(wsName, snap, { workdir: dir, overwrite });
   fs.mkdirSync(path.join(dir, ".tide"), { recursive: true });
   fs.writeFileSync(path.join(dir, ".tide", "config.json"), JSON.stringify({ workspace: wsName }, null, 2));
   console.log(`restored ${wsName} → ${dir}`);
