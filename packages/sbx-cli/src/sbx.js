@@ -78,7 +78,7 @@ async function cmdLogin(args) {
     if (!slug) die("slug required when logging in with direct machine token (--slug <slug>)");
     let probeRes;
     try {
-      probeRes = await fetch(`${url}/${slug}/mcp`, {
+      probeRes = await fetch(`${url}/${encodeURIComponent(slug)}/mcp`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -119,7 +119,7 @@ async function cmdLogin(args) {
   const cookie = rawCookie.split(";")[0];
   const patterns = flag(args, "patterns");
 
-  const mint = await fetch(`${url}/${slug}/tokens`, {
+  const mint = await fetch(`${url}/${encodeURIComponent(slug)}/tokens`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Cookie: cookie },
     body: JSON.stringify({ label: os.hostname(), patterns: patterns ? patterns.split(",").map((p) => p.trim()) : undefined }),
@@ -213,10 +213,10 @@ async function cmdToken(args) {
         const candidates = exactLabels.map((t) => `  ${t.principalId || t.principal_id} (${t.label || "unlabeled"})`).join("\n");
         die(`ambiguous token "${id}" matches multiple tokens:\n${candidates}`);
       } else {
-        // 3. Prefix/substring match by label or principalId
+        // 3. Prefix match by label or principalId
         const matches = tokens.filter((t) => {
           const pid = t.principalId || t.principal_id;
-          return (t.label && (t.label.startsWith(`${id}-`) || t.label.includes(id))) || (pid && pid.startsWith(id));
+          return (t.label && t.label.startsWith(id)) || (pid && pid.startsWith(id));
         });
         if (matches.length === 0) {
           die(`no token matching "${id}" found`);
