@@ -372,7 +372,7 @@ class AgentsApi {
 
   /** Live audit events of an agent as an async iterator. */
   async *events(id, { signal } = {}) {
-    const res = await this.c.request(`agents/${id}/events`, { raw: true, headers: { Accept: "text/event-stream" }, signal });
+    const res = await this.c.request(`agents/${encodeURIComponent(id)}/events`, { raw: true, headers: { Accept: "text/event-stream" }, signal });
     yield* sseEvents(res);
   }
 }
@@ -477,8 +477,8 @@ class AssistantApi {
   constructor(c) { this.c = c; }
   chats() { return this.c.request("chats").then((r) => r.chats); }
   create(title) { return this.c.request("chats", { method: "POST", body: { title } }).then((r) => r.chat); }
-  transcript(id) { return this.c.request(`chats/${id}`); }
-  remove(id) { return this.c.request(`chats/${id}`, { method: "DELETE" }); }
+  transcript(id) { return this.c.request(`chats/${encodeURIComponent(id)}`); }
+  remove(id) { return this.c.request(`chats/${encodeURIComponent(id)}`, { method: "DELETE" }); }
 
   /**
    * Ask a question and iterate the turn's events as they arrive:
@@ -487,7 +487,7 @@ class AssistantApi {
    */
   async *ask(input, { chatId } = {}) {
     const id = chatId ?? (await this.create()).id;
-    const res = await this.c.request(`chats/${id}/send`, { method: "POST", body: { input }, raw: true });
+    const res = await this.c.request(`chats/${encodeURIComponent(id)}/send`, { method: "POST", body: { input }, raw: true });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw buildSandboxError(err, `assistant failed: ${res.status}`, { status: res.status });
@@ -553,9 +553,9 @@ class SandboxesApi {
   create(slug, opts = {}) {
     return this.c.request("/api/sandboxes", { method: "POST", body: { slug, name: opts.name ?? slug, ...opts } });
   }
-  delete(slug) { return this.c.request(`/api/sandboxes/${slug}`, { method: "DELETE" }); }
+  delete(slug) { return this.c.request(`/api/sandboxes/${encodeURIComponent(slug)}`, { method: "DELETE" }); }
   snapshot(slug, name) {
-    return this.c.request(`/api/sandboxes/${slug}/snapshot`, { method: "POST", body: { name } });
+    return this.c.request(`/api/sandboxes/${encodeURIComponent(slug)}/snapshot`, { method: "POST", body: { name } });
   }
 }
 

@@ -200,24 +200,33 @@ async function cmdToken(args) {
     const tokens = listData.tokens ?? [];
 
     // 1. Exact match on principalId
-    const exact = tokens.find((t) => (t.principalId || t.principal_id) === id);
+    const exactPid = tokens.find((t) => (t.principalId || t.principal_id) === id);
     let target = null;
-    if (exact) {
-      target = exact;
+    if (exactPid) {
+      target = exactPid;
     } else {
-      // Unique match by exact label, label prefix/substring, or principalId prefix
-      const matches = tokens.filter((t) => {
-        const pid = t.principalId || t.principal_id;
-        return t.label === id || (t.label && t.label.includes(id)) || (pid && pid.startsWith(id));
-      });
-      if (matches.length === 0) {
-        die(`no token matching "${id}" found`);
-      }
-      if (matches.length > 1) {
-        const candidates = matches.map((t) => `  ${t.principalId || t.principal_id} (${t.label || "unlabeled"})`).join("\n");
+      // 2. Exact match on label
+      const exactLabels = tokens.filter((t) => t.label === id);
+      if (exactLabels.length === 1) {
+        target = exactLabels[0];
+      } else if (exactLabels.length > 1) {
+        const candidates = exactLabels.map((t) => `  ${t.principalId || t.principal_id} (${t.label || "unlabeled"})`).join("\n");
         die(`ambiguous token "${id}" matches multiple tokens:\n${candidates}`);
+      } else {
+        // 3. Prefix/substring match by label or principalId
+        const matches = tokens.filter((t) => {
+          const pid = t.principalId || t.principal_id;
+          return (t.label && (t.label.startsWith(`${id}-`) || t.label.includes(id))) || (pid && pid.startsWith(id));
+        });
+        if (matches.length === 0) {
+          die(`no token matching "${id}" found`);
+        }
+        if (matches.length > 1) {
+          const candidates = matches.map((t) => `  ${t.principalId || t.principal_id} (${t.label || "unlabeled"})`).join("\n");
+          die(`ambiguous token "${id}" matches multiple tokens:\n${candidates}`);
+        }
+        target = matches[0];
       }
-      target = matches[0];
     }
     const targetId = target.principalId || target.principal_id;
     const res = await api(cfg, `/${cfg.slug}/tokens/${encodeURIComponent(targetId)}`, { method: "DELETE" });
@@ -257,7 +266,8 @@ async function cmdAgent(args) {
     const d = await res.json();
     for (const a of d.agents ?? []) console.log(`${a.id.slice(0, 8)}  ${String(a.state).padEnd(8)}  ${a.name}  ${a.cmd ?? ""}`);
   } else if (sub === "get") {
-    const res = await api(cfg, `/${cfg.slug}/agents/${args[1]}`);
+    if (!args[1]) die("usage: sbx agent get <id>");
+    const res = await api(cfg, `/${cfg.slug}/agents/${encodeURIComponent(args[1])}`);
     const d = await res.json();
     if (!d.ok) die(d.error);
     const a = d.agent;
@@ -265,7 +275,8 @@ async function cmdAgent(args) {
     if (a.result) console.log("  result:\n" + a.result.split("\n").map((l) => "    " + l).join("\n"));
     if (a.error)  console.log("  error: " + a.error);
   } else if (sub === "kill") {
-    const res = await api(cfg, `/${cfg.slug}/agents/${args[1]}`, { method: "DELETE" });
+    if (!args[1]) die("usage: sbx agent kill <id>");
+    const res = await api(cfg, `/${cfg.slug}/agents/${encodeURIComponent(args[1])}`, { method: "DELETE" });
     const d = await res.json();
     console.log(d.ok && d.killed ? "killed" : d.reason ?? d.error ?? "not killed");
   } else {
@@ -295,18 +306,18 @@ async function cmdSandbox(args) {
     if (d.ok) console.log(`created: ${d.slug}`); else die(d.error);
   } else if (sub === "wake") {
     const slug = args[1] ?? cfg.slug;
-    const res = await api(cfg, `/${slug}/wake`, { method: "POST" });
+    const res = await api(cfg, `/${encodeURIComponent(slug)}/wake`, { method: "POST" });
     const d = await res.json();
     if (d.ok) console.log(`${slug}: ${d.state}`); else die(d.error);
   } else if (sub === "hibernate") {
     const slug = args[1] ?? cfg.slug;
-    const res = await api(cfg, `/${slug}/hibernate`, { method: "POST" });
+    const res = await api(cfg, `/${encodeURIComponent(slug)}/hibernate`, { method: "POST" });
     const d = await res.json();
     if (d.ok) console.log(`${slug}: ${d.state}`); else die(d.error);
   } else if (sub === "delete") {
     const slug = args[1];
     if (!slug) die("usage: sbx sandbox delete <slug>");
-    const res = await api(cfg, `/api/sandboxes/${slug}`, { method: "DELETE" });
+    const res = await api(cfg, `/api/sandboxes/${encodeURIComponent(slug)}`, { method: "DELETE" });
     const d = await res.json();
     if (d.ok) console.log(`deleted: ${d.deleted}`); else die(d.error);
   } else {
@@ -598,7 +609,7 @@ async function cmdDistro(args) {
     const slug = args[1] ?? cfg.slug;
     const name = args[2];
     if (!name) die("usage: sbx distro snapshot [slug] <name>");
-    const res = await api(cfg, `/api/sandboxes/${slug}/snapshot`, { method: "POST", body: { name } });
+    const res = await api(cfg, `/api/sandboxes/${encodeURIComponent(slug)}/snapshot`, { method: "POST", body: { name } });
     const d = await res.json();
     if (d.ok) console.log(`snapshot saved as distro: ${d.name}`); else die(d.error);
   } else {
@@ -757,8 +768,10 @@ async function cmdFs(args) {
     return;
   }
   if (sub === "rm") {
-    if (!args[1]) die("usage: sbx fs rm <path> [-r]");
-    const r = await mcp(cfg, "fs", "remove", { path: args[1], recursive: args.includes("-r") || args.includes("--recursive") });
+    const targetPath = args.slice(1).find((a) => !a.startsWith("-"));
+    if (!targetPath) die("usage: sbx fs rm <path> [-r]");
+    const recursive = args.includes("-r") || args.includes("--recursive");
+    const r = await mcp(cfg, "fs", "remove", { path: targetPath, recursive });
     console.log(r.removed ? `removed ${r.path}` : `not found: ${r.path}`);
     return;
   }
@@ -990,9 +1003,41 @@ async function cmdAccess(args) {
     const who = args[1];
     if (!who) die("usage: sbx access revoke <username|principalId>");
     const listed = await (await api(cfg, `/${cfg.slug}/access`)).json();
-    const match = (listed.access ?? []).find((a) => a.username === who || a.principalId === who || a.name === who);
-    if (!match) die(`no access entry for: ${who}`);
-    const res = await api(cfg, `/${cfg.slug}/access/${match.principalId}`, { method: "DELETE" });
+    if (!listed.ok) die(listed.error || "failed to list access entries");
+    const entries = listed.access ?? [];
+
+    // 1. Exact match on principalId
+    const exactPid = entries.find((a) => a.principalId === who);
+    let target = null;
+    if (exactPid) {
+      target = exactPid;
+    } else {
+      // 2. Exact match on username or name
+      const exactNames = entries.filter((a) => a.username === who || a.name === who);
+      if (exactNames.length === 1) {
+        target = exactNames[0];
+      } else if (exactNames.length > 1) {
+        const candidates = exactNames.map((a) => `  ${a.principalId} (${a.username || a.name || a.kind})`).join("\n");
+        die(`ambiguous access identifier "${who}" matches multiple entries:\n${candidates}`);
+      } else {
+        // 3. Prefix match by principalId, username, or name
+        const matches = entries.filter((a) => {
+          return (a.principalId && a.principalId.startsWith(who)) ||
+            (a.username && a.username.startsWith(who)) ||
+            (a.name && a.name.startsWith(who));
+        });
+        if (matches.length === 0) {
+          die(`no access entry for: ${who}`);
+        }
+        if (matches.length > 1) {
+          const candidates = matches.map((a) => `  ${a.principalId} (${a.username || a.name || a.kind})`).join("\n");
+          die(`ambiguous access identifier "${who}" matches multiple entries:\n${candidates}`);
+        }
+        target = matches[0];
+      }
+    }
+    const targetId = target.principalId;
+    const res = await api(cfg, `/${cfg.slug}/access/${encodeURIComponent(targetId)}`, { method: "DELETE" });
     const d = await res.json();
     if (!d.ok) die(d.error);
     console.log(`revoked ${who} (${d.removed} grant${d.removed === 1 ? "" : "s"}${d.tokensRevoked ? `, ${d.tokensRevoked} token${d.tokensRevoked === 1 ? "" : "s"}` : ""})`);

@@ -14,7 +14,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { openDb, closeDb } from "../packages/control-db/src/db.js";
-import { ensureSeed, mintMachineToken } from "../packages/control-db/src/registry.js";
+import { ensureSeed, mintMachineToken, createTenant, createAccount } from "../packages/control-db/src/registry.js";
 import { _resetKernels } from "../packages/kernel/src/kernel.js";
 import { attachSession, killAllSessions } from "../packages/kernel/src/pty-sessions.js";
 import { stopAllProcs } from "../packages/kernel/src/servers/proc.js";
@@ -328,6 +328,12 @@ test("C1: sbx fs commands: cp, mv, stat, and binary-safe stdio streaming with -"
 
   // Clean up
   await runSbx(["fs", "rm", "p24-task", "-r"]);
+
+  // Argument order flexibility: rm with flag before path
+  await sbx.fs.write("p24-task-flag/file.txt", "data");
+  const rmFlagFirstRes = await runSbx(["fs", "rm", "-r", "p24-task-flag"]);
+  assert.equal(rmFlagFirstRes.code, 0, rmFlagFirstRes.stderr);
+  assert.match(rmFlagFirstRes.stdout, /removed p24-task-flag/);
 });
 
 test("C1: sbx proc commands: start, logs, stop, forget, sessions", async () => {
@@ -424,4 +430,53 @@ test("C1: sbx run, stream, and ask core commands execute cleanly", async () => {
     delete process.env.SANDBOXOS_ANTHROPIC_URL;
     delete process.env.ANTHROPIC_API_KEY;
   }
+});
+
+test("C1 & C3: sbx access revoke safeguards against ambiguity and encodes parameters", async () => {
+  const tenant = createTenant(`access-tenant-${Date.now()}`);
+  createAccount(tenant.id, { username: "user_alpha", password: "pw" });
+  createAccount(tenant.id, { username: "user_alpha_beta", password: "pw" });
+
+  const share1 = await runSbx(["access", "share", "user_alpha", "--patterns", "fs.read"]);
+  assert.equal(share1.code, 0, share1.stderr);
+  const share2 = await runSbx(["access", "share", "user_alpha_beta", "--patterns", "fs.read"]);
+  assert.equal(share2.code, 0, share2.stderr);
+
+  // Ambiguous prefix matches multiple entries
+  const ambigAccess = await runSbx(["access", "revoke", "user_al"]);
+  assert.notEqual(ambigAccess.code, 0, "ambiguous access revoke must fail");
+  assert.match(ambigAccess.stderr, /ambiguous access identifier "user_al" matches multiple entries/);
+
+  // Exact match succeeds
+  const exactRevoke = await runSbx(["access", "revoke", "user_alpha"]);
+  assert.equal(exactRevoke.code, 0, exactRevoke.stderr);
+  assert.match(exactRevoke.stdout, /revoked user_alpha/);
+
+  // Clean up remaining
+  const exactRevoke2 = await runSbx(["access", "revoke", "user_alpha_beta"]);
+  assert.equal(exactRevoke2.code, 0, exactRevoke2.stderr);
+});
+
+test("C2 & C3: SandboxClient encodes dynamic URL paths", async () => {
+  const calls = [];
+  const mockFetch = async (url, opts) => {
+    calls.push({ url, method: opts?.method });
+    return new Response(JSON.stringify({ ok: true, deleted: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  const testClient = new SandboxClient({ url: "http://127.0.0.1:9999", slug: "test-sbx", fetch: mockFetch });
+
+  await testClient.sandboxes.delete("test/unsafe slug");
+  assert.ok(calls.some((c) => c.url.includes("/api/sandboxes/test%2Funsafe%20slug") && c.method === "DELETE"));
+
+  await testClient.access.revoke("user@domain.com/id#1");
+  assert.ok(calls.some((c) => c.url.includes("/access/user%40domain.com%2Fid%231") && c.method === "DELETE"));
+
+  await testClient.tokens.revoke("token/id#1");
+  assert.ok(calls.some((c) => c.url.includes("/tokens/token%2Fid%231") && c.method === "DELETE"));
+
+  await testClient.assistant.remove("chat/id#1");
+  assert.ok(calls.some((c) => c.url.includes("/chats/chat%2Fid%231") && c.method === "DELETE"));
 });
