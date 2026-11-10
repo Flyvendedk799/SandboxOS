@@ -577,7 +577,7 @@ test("[C3] workspace restore enforces overwrite protection and integrity verific
 
   const snapshot = repo.exportWorkspace("protect-ws");
 
-  // 1. Rejects tampered snapshot payload (integrity mismatch)
+  // 1. Rejects tampered snapshot payload (integrity mismatch) or missing integrity
   const tampered = JSON.parse(JSON.stringify(snapshot));
   tampered.states.env = { ENV: "hacked" };
   const destStoreTampered = tmp("dest-store-tampered");
@@ -586,6 +586,15 @@ test("[C3] workspace restore enforces overwrite protection and integrity verific
     () => repoTampered.restoreWorkspace("protect-ws", tampered),
     /snapshot corrupted: integrity check failed/i,
   );
+  assert.equal(repoTampered.has("protect-ws"), false);
+
+  const missingIntegrity = JSON.parse(JSON.stringify(snapshot));
+  delete missingIntegrity.integrity;
+  assert.throws(
+    () => repoTampered.restoreWorkspace("no-integrity-ws", missingIntegrity),
+    /snapshot corrupted: missing integrity/i,
+  );
+  assert.equal(repoTampered.has("no-integrity-ws"), false);
 
   // 2. Refuses to restore over an existing workspace without overwrite: true
   assert.throws(
@@ -612,6 +621,64 @@ test("[C3] workspace restore enforces overwrite protection and integrity verific
   const resOverwriteDir = repo2.restoreWorkspace("fresh-ws", snapshot, { workdir: destWork2, overwrite: true });
   assert.equal(resOverwriteDir.restored, true);
   assert.equal(fs.existsSync(path.join(destWork2, "file.txt")), true);
+});
+
+test("[C3] workspace restore validates commit refs and leaves no workspace registered on failure", () => {
+  const store = tmp("validate-refs-store");
+  const workdir = tmp("validate-refs-work");
+  const repo = new Repo(store);
+  repo.init("valid-ws", workdir);
+
+  write(workdir, "app.js", "console.log('test');");
+  const commitHash = repo.mark("valid-ws", { message: "initial commit" });
+  repo.branch("valid-ws", "staging", commitHash);
+
+  const snapshot = repo.exportWorkspace("valid-ws");
+
+  const sign = (s) => {
+    const copy = { ...s };
+    delete copy.integrity;
+    s.integrity = crypto.createHash("sha256").update(JSON.stringify(copy)).digest("hex");
+    return s;
+  };
+
+  const destStore = tmp("dest-validate-store");
+  const repoDest = new Repo(destStore);
+
+  // 1. Snapshot with head pointing to non-existent commit hash
+  const badHead = sign({
+    ...JSON.parse(JSON.stringify(snapshot)),
+    head: "0000000000000000000000000000000000000000",
+  });
+  assert.throws(
+    () => repoDest.restoreWorkspace("bad-head-ws", badHead),
+    /snapshot invalid: ref "0000000000000000000000000000000000000000" is not a commit in the snapshot/,
+  );
+  assert.equal(repoDest.has("bad-head-ws"), false, "workspace was not registered after head failure");
+
+  // 2. Snapshot with a branch pointing to non-existent commit hash
+  const badBranch = sign({
+    ...JSON.parse(JSON.stringify(snapshot)),
+    branches: { staging: "1111111111111111111111111111111111111111" },
+  });
+  assert.throws(
+    () => repoDest.restoreWorkspace("bad-branch-ws", badBranch),
+    /snapshot invalid: ref "1111111111111111111111111111111111111111" is not a commit in the snapshot/,
+  );
+  assert.equal(repoDest.has("bad-branch-ws"), false, "workspace was not registered after branch failure");
+
+  // 3. Snapshot with head pointing to a blob instead of a commit
+  const blobObj = snapshot.objects.find((o) => o.type === "blob");
+  assert.ok(blobObj, "snapshot contains a blob object");
+  const badType = sign({
+    ...JSON.parse(JSON.stringify(snapshot)),
+    head: blobObj.hash,
+  });
+  assert.throws(
+    () => repoDest.restoreWorkspace("bad-type-ws", badType),
+    new RegExp(`snapshot invalid: ref "${blobObj.hash}" is not a commit in the snapshot`),
+  );
+  assert.equal(repoDest.has("bad-type-ws"), false, "workspace was not registered after type failure");
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -361,14 +361,15 @@ export class Repo {
     }
     assertSafeEntryName(name);
 
-    // Verify snapshot integrity if provided
-    if (snapshot.integrity) {
-      const copy = { ...snapshot };
-      delete copy.integrity;
-      const expected = crypto.createHash("sha256").update(JSON.stringify(copy)).digest("hex");
-      if (expected !== snapshot.integrity) {
-        throw new Error("snapshot corrupted: integrity check failed");
-      }
+    // Verify snapshot integrity
+    if (!snapshot.integrity) {
+      throw new Error("snapshot corrupted: missing integrity");
+    }
+    const copy = { ...snapshot };
+    delete copy.integrity;
+    const expected = crypto.createHash("sha256").update(JSON.stringify(copy)).digest("hex");
+    if (expected !== snapshot.integrity) {
+      throw new Error("snapshot corrupted: integrity check failed");
     }
 
     // Determine target directory
@@ -393,6 +394,20 @@ export class Repo {
 
     // 1. Ingest all objects into store (validates hashes and prevents corruption)
     this.ingest(snapshot.objects ?? []);
+
+    // Validate that snapshot.head (when non-null) and snapshot.branches point to existing commits
+    if (snapshot.head != null) {
+      if (!hasObject(this.store, snapshot.head) || readObject(this.store, snapshot.head).type !== "commit") {
+        throw new Error(`snapshot invalid: ref "${snapshot.head}" is not a commit in the snapshot`);
+      }
+    }
+    if (snapshot.branches && typeof snapshot.branches === "object") {
+      for (const branchRef of Object.values(snapshot.branches)) {
+        if (!branchRef || !hasObject(this.store, branchRef) || readObject(this.store, branchRef).type !== "commit") {
+          throw new Error(`snapshot invalid: ref "${branchRef}" is not a commit in the snapshot`);
+        }
+      }
+    }
 
     // 2. Initialize workspace in registry
     this.init(name, targetWorkdir);
