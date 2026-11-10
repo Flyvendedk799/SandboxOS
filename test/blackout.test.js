@@ -116,8 +116,6 @@ test("the blackout: a job, a shell, three agent writes, and a new listener", asy
 
   let seen = "";
   const shell = attachSession(kernel.cell, sandbox.id, { name: "blackout-shell" }, (d) => { seen += d.toString(); }, () => {});
-  // Wait until the interactive shell prompt is ready before sending input
-  await until(() => seen.length > 0, "the shell prompt to arrive");
   shell.write("echo before-the-blackout\n");
   await until(() => seen.includes("before-the-blackout"), "the shell to answer");
 
