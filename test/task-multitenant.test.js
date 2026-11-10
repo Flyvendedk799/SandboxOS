@@ -289,8 +289,31 @@ test("C3: Organization team access endpoints (GET /api/team, POST /api/team, DEL
   const memberLogin = await postJson("/login", { username: memberUser, password: memberPass });
   assert.equal(memberLogin.status, 200);
   assert.equal(memberLogin.data.ok, true);
+  const memberAuth = { Authorization: `Bearer ${memberLogin.data.token}` };
 
-  // DELETE /api/team/:id -> remove member
+  // Authorization check: non-admin member cannot add new team members (403)
+  const nonAdminAdd = await postJson(
+    "/api/team",
+    { username: `sub_member_${Date.now()}`, password: "SubPass123!" },
+    memberAuth
+  );
+  assert.equal(nonAdminAdd.status, 403);
+  assert.equal(nonAdminAdd.data.ok, false);
+  assert.ok(nonAdminAdd.data.error.includes("admin or operator authority required"));
+
+  // Authorization check: non-admin member cannot delete other members (403)
+  const adminPrincipalId = initialTeam.data.members[0].id;
+  const nonAdminRemove = await deleteJson(`/api/team/${adminPrincipalId}`, memberAuth);
+  assert.equal(nonAdminRemove.status, 403);
+  assert.equal(nonAdminRemove.data.ok, false);
+  assert.ok(nonAdminRemove.data.error.includes("admin or operator authority required"));
+
+  // Authorization check: cannot remove yourself from team (400)
+  const selfRemove = await deleteJson(`/api/team/${adminPrincipalId}`, authHeader);
+  assert.equal(selfRemove.status, 400);
+  assert.equal(selfRemove.data.ok, false);
+
+  // DELETE /api/team/:id -> admin removes member
   const removeRes = await deleteJson(`/api/team/${createdMemberId}`, authHeader);
   assert.equal(removeRes.status, 200);
   assert.equal(removeRes.data.ok, true);

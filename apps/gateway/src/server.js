@@ -28,7 +28,7 @@ import {
   deleteConversation, appendConversationMessages, conversationMessages,
   updatePrincipalName, updateTenantName, setSandboxVanityDomain, getSandboxByVanityDomain,
   validateVanityDomain,
-  listTeamMembers, createTeamMember, removeTeamMember,
+  listTeamMembers, createTeamMember, removeTeamMember, isTenantAdmin,
   runningCountForTenant, runningAgentCountForTenant, modelUsage,
 } from "../../../packages/control-db/src/registry.js";
 import { authorize } from "../../../packages/kernel/src/capabilities.js";
@@ -50,7 +50,6 @@ import {
 } from "../../../packages/ai-auth/src/oauth.js";
 
 const maxSandboxes = () => Number(process.env.SANDBOXOS_MAX_SANDBOXES ?? 10);
-
 import { getKernel, _dropKernel } from "../../../packages/kernel/src/kernel.js";
 import { clearJobs as forgetJobs } from "../../../packages/kernel/src/servers/job-store.js";
 import { getCell } from "../../../packages/cell/src/cell.js";
@@ -765,6 +764,9 @@ async function handle(req, res) {
       return sendJson(res, 200, { ok: true, members });
     }
     if (req.method === "POST" && !segments[3]) {
+      if (!isTenantAdmin(principal.id)) {
+        return sendJson(res, 403, { ok: false, error: "admin or operator authority required to add team members" });
+      }
       const body = await readBody(req);
       const username = typeof body?.username === "string" ? body.username.trim() : "";
       const password = typeof body?.password === "string" ? body.password : "";
@@ -780,6 +782,9 @@ async function handle(req, res) {
       }
     }
     if (req.method === "DELETE" && segments[3]) {
+      if (!isTenantAdmin(principal.id)) {
+        return sendJson(res, 403, { ok: false, error: "admin or operator authority required to remove team members" });
+      }
       const targetId = segments[3];
       if (targetId === principal.id) {
         return sendJson(res, 400, { ok: false, error: "cannot remove yourself from the team" });
@@ -788,7 +793,7 @@ async function handle(req, res) {
         const result = removeTeamMember(principal.tenant_id, targetId);
         return sendJson(res, 200, { ok: true, ...result });
       } catch (err) {
-        const code = err.message.includes("not found") ? 404 : 400;
+        const code = err.statusCode ?? (err.message.includes("not found") ? 404 : 400);
         return sendJson(res, code, { ok: false, error: err.message });
       }
     }

@@ -1151,18 +1151,20 @@ export function createAccount(tenantId, { username, password }) {
   if (typeof username !== "string" || !username.trim()) throw new Error("username required");
   if (typeof password !== "string" || !password) throw new Error("password required");
   const cleanUsername = username.trim();
-  const db = openDb();
-  const existing = db.prepare("SELECT id FROM accounts WHERE username=?").get(cleanUsername);
-  if (existing) throw new Error(`username taken: ${cleanUsername}`);
-  // Self-service signups are NEVER operators (backlog #1): createPrincipal leaves
-  // is_operator at its default 0 and we never elevate here.
-  const principal = createPrincipal(tenantId, "human", cleanUsername);
   const salt = randomBytes(16).toString("hex");
   const hash = _hashPassword(password, salt); // self-describing scrypt$... string
-  const acc = { id: id("acc"), principal_id: principal.id, username: cleanUsername, salt, hash, created_at: now() };
-  db.prepare("INSERT INTO accounts (id,principal_id,username,salt,hash,created_at) VALUES (?,?,?,?,?,?)")
-    .run(acc.id, acc.principal_id, acc.username, acc.salt, acc.hash, acc.created_at);
-  return { ...acc, principalId: principal.id };
+
+  return withTransaction((db) => {
+    const existing = db.prepare("SELECT id FROM accounts WHERE username=?").get(cleanUsername);
+    if (existing) throw new Error(`username taken: ${cleanUsername}`);
+    // Self-service signups are NEVER operators (backlog #1): createPrincipal leaves
+    // is_operator at its default 0 and we never elevate here.
+    const principal = createPrincipal(tenantId, "human", cleanUsername);
+    const acc = { id: id("acc"), principal_id: principal.id, username: cleanUsername, salt, hash, created_at: now() };
+    db.prepare("INSERT INTO accounts (id,principal_id,username,salt,hash,created_at) VALUES (?,?,?,?,?,?)")
+      .run(acc.id, acc.principal_id, acc.username, acc.salt, acc.hash, acc.created_at);
+    return { ...acc, principalId: principal.id };
+  });
 }
 
 export function verifyAccount(username, password) {
@@ -1196,8 +1198,22 @@ export function getAccountByUsername(username) {
 
 // ---- Team Members (Organization Access) -----------------------------------
 
+export function isTenantAdmin(principalId) {
+  if (typeof principalId !== "string" || !principalId) return false;
+  if (isOperator(principalId)) return true;
+  const p = getPrincipal(principalId);
+  if (!p) return false;
+  const first = openDb().prepare(
+    "SELECT id FROM principals WHERE tenant_id=? AND kind='human' ORDER BY created_at ASC LIMIT 1"
+  ).get(p.tenant_id);
+  return first?.id === principalId;
+}
+
 export function listTeamMembers(tenantId) {
   if (typeof tenantId !== "string" || !tenantId) return [];
+  const first = openDb().prepare(
+    "SELECT id FROM principals WHERE tenant_id=? AND kind='human' ORDER BY created_at ASC LIMIT 1"
+  ).get(tenantId);
   const rows = openDb().prepare(
     `SELECT p.id AS principal_id, p.name, p.kind, p.is_operator, p.created_at,
             a.username,
@@ -1215,6 +1231,7 @@ export function listTeamMembers(tenantId) {
     name: r.name,
     kind: r.kind,
     isOperator: !!r.is_operator,
+    isAdmin: !!r.is_operator || r.principal_id === first?.id,
     createdAt: r.created_at,
     liveSessions: r.live_sessions,
   }));
@@ -1244,6 +1261,11 @@ export function removeTeamMember(tenantId, principalId) {
   const db = openDb();
   const p = db.prepare("SELECT * FROM principals WHERE id=? AND tenant_id=?").get(principalId, tenantId);
   if (!p) throw new Error("team member not found");
+  if (p.is_operator) {
+    const err = new Error("cannot remove an operator or seed owner");
+    err.statusCode = 403;
+    throw err;
+  }
   const remaining = db.prepare("SELECT COUNT(*) as n FROM principals WHERE tenant_id=? AND kind='human' AND id<>?").get(tenantId, principalId)?.n ?? 0;
   if (remaining === 0) throw new Error("cannot remove the last member of a team");
 
