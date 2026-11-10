@@ -146,6 +146,38 @@ test("C1: killTree safely rejects non-positive integer PIDs and invalid inputs",
   assert.equal(killTree("-1"), false);
 });
 
+test("C1: LocalBackend PTY input queue buffers immediate writes and cleans up timer on early kill", async () => {
+  const backend = new LocalBackend(sandbox);
+  try {
+    // 1. Immediate write right after creation runs and receives output
+    let output = "";
+    const session = await backend.execInteractive(
+      (data) => { output += data.toString(); },
+      () => {},
+      { cols: 80, rows: 24 }
+    );
+    // Write immediately without waiting for prompt or pty attachment
+    session.write("echo pty-buffering-success\n");
+    const sawOutput = await until(() => output.includes("pty-buffering-success"), 8000);
+    assert.ok(sawOutput, "command written immediately upon pty creation must execute once ready");
+    session.kill();
+
+    // 2. Immediate kill right after creation cancels pending ready timer
+    let closed = false;
+    const earlySession = await backend.execInteractive(
+      () => {},
+      () => { closed = true; },
+      { cols: 80, rows: 24 }
+    );
+    // Kill immediately before readyTimer fires or stdout arrives
+    earlySession.kill();
+    const isClosed = await until(() => closed, 5000);
+    assert.ok(isClosed, "session killed before ready must close cleanly without leaving timer");
+  } finally {
+    await backend.cleanup();
+  }
+});
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Criterion C2: Process supervision recovery, exit states, and ring buffering
 // ═════════════════════════════════════════════════════════════════════════════
