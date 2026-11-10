@@ -403,7 +403,8 @@ export class Repo {
     }
     if (snapshot.branches && typeof snapshot.branches === "object") {
       for (const branchRef of Object.values(snapshot.branches)) {
-        if (!branchRef || !hasObject(this.store, branchRef) || readObject(this.store, branchRef).type !== "commit") {
+        if (branchRef == null) continue;
+        if (!hasObject(this.store, branchRef) || readObject(this.store, branchRef).type !== "commit") {
           throw new Error(`snapshot invalid: ref "${branchRef}" is not a commit in the snapshot`);
         }
       }

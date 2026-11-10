@@ -681,6 +681,32 @@ test("[C3] workspace restore validates commit refs and leaves no workspace regis
   assert.equal(repoDest.has("bad-type-ws"), false, "workspace was not registered after type failure");
 });
 
+test("[C3] workspace restore supports empty workspace with null-target branch", () => {
+  const store = tmp("empty-branch-store");
+  const workdir = tmp("empty-branch-work");
+  const repo = new Repo(store);
+  repo.init("ws-empty", workdir);
+
+  // branch() in an empty workspace with no commit sets targetHash = ws.head (null)
+  repo.branch("ws-empty", "empty");
+
+  const snapshot = repo.exportWorkspace("ws-empty");
+  assert.equal(snapshot.head, null);
+  assert.equal(snapshot.branches.empty, null);
+
+  const destStore = tmp("empty-branch-dest-store");
+  const destWork = tmp("empty-branch-dest-work");
+  const destRepo = new Repo(destStore);
+
+  const res = destRepo.restoreWorkspace("ws-empty", snapshot, { workdir: destWork });
+  assert.equal(res.restored, true);
+
+  const branches = destRepo.listBranches("ws-empty");
+  const emptyBranch = branches.find((b) => b.name === "empty");
+  assert.ok(emptyBranch, "empty branch is listed in restored workspace");
+  assert.equal(emptyBranch.head, null);
+});
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Live Mirror Daemon Stability
 // ═════════════════════════════════════════════════════════════════════════════
