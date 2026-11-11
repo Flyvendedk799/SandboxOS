@@ -21,3 +21,4 @@ export * from "./notify.js";
 export * from "./manual.js";
 export * from "./first-run.js";
 export * from "./proposals.js";
+export * from "./diff.js";
