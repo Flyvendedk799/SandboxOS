@@ -165,6 +165,78 @@ function getDescendants(rootPid) {
   return findDescendantsPgrep(rootPid);
 }
 
+/** pid → { ppid, sid } for every process this host will tell us about. */
+function processTable() {
+  const table = new Map();
+  if (process.platform === "linux") {
+    try {
+      for (const name of fs.readdirSync("/proc")) {
+        if (!/^\d+$/.test(name)) continue;
+        try {
+          // "pid (comm) state ppid pgrp session …" — comm may hold spaces and
+          // parentheses, so the fields are counted from the last ")".
+          const stat = fs.readFileSync(`/proc/${name}/stat`, "utf8");
+          const rest = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+          table.set(Number(name), { ppid: Number(rest[1]), sid: Number(rest[3]) });
+        } catch { /* it exited while we were reading */ }
+      }
+      return table;
+    } catch { /* no /proc after all */ }
+  }
+  try {
+    const r = spawnSync("ps", ["-A", "-o", "pid=,ppid=,sess="], { encoding: "utf8", timeout: 2000 });
+    for (const line of String(r.stdout ?? "").split("\n")) {
+      const [pid, ppid, sid] = line.trim().split(/\s+/).map(Number);
+      if (Number.isInteger(pid) && pid > 0) table.set(pid, { ppid, sid });
+    }
+  } catch { /* no ps: nothing to say */ }
+  return table;
+}
+
+const ownSession = (table) => table.get(process.pid)?.sid ?? -1;
+const foreignSession = (sid, own) => Number.isInteger(sid) && sid > 1 && sid !== own && sid !== process.pid;
+
+/**
+ * The sessions (setsid) a process and its descendants live in, never our own.
+ *
+ * A pty is a session of its own, and a job the shell disowned stays in that
+ * session after the shell is gone — reparented to init, in a process group of
+ * its own, so neither the tree nor the group still leads to it. The session id
+ * is the one thing about it that does not change, which is why it is recorded
+ * while the shell is alive and used once it is not.
+ */
+export function sessionIdsOf(rootPid) {
+  const out = new Set();
+  if (process.platform === "win32" || !Number.isInteger(rootPid) || rootPid <= 1) return out;
+  const table = processTable();
+  const own = ownSession(table);
+  const queue = [rootPid];
+  const seen = new Set(queue);
+  while (queue.length) {
+    const p = queue.shift();
+    const sid = table.get(p)?.sid;
+    if (foreignSession(sid, own)) out.add(sid);
+    for (const [pid, info] of table) {
+      if (info.ppid === p && !seen.has(pid)) { seen.add(pid); queue.push(pid); }
+    }
+  }
+  return out;
+}
+
+/** End every process still living in one of `sids`. Never our own session. */
+export function killSessions(sids, signal = "SIGKILL") {
+  if (process.platform === "win32" || !sids?.size) return 0;
+  const table = processTable();
+  const own = ownSession(table);
+  let n = 0;
+  for (const [pid, info] of table) {
+    if (pid <= 1 || pid === process.pid) continue;
+    if (!foreignSession(info.sid, own) || !sids.has(info.sid)) continue;
+    try { process.kill(pid, signal); n++; } catch { /* already gone */ }
+  }
+  return n;
+}
+
 /**
  * Kill a process and everything it started.
  *

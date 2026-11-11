@@ -13,7 +13,7 @@
 import fs from "node:fs";
 import { groupHandle } from "./handles.js";
 import { newMarker, ptyWrapper, resizeScript, cleanupScript } from "./pty.js";
-import { safeSpawn, detachedSpawn, execFileSafe, killTree } from "./spawn.js";
+import { safeSpawn, detachedSpawn, execFileSafe, killTree, sessionIdsOf, killSessions } from "./spawn.js";
 import { resolveShell, baseEnv, shellTmp, toShellPath, unsupportedHost } from "./shell.js";
 
 const isWin = process.platform === "win32";
@@ -156,10 +156,16 @@ export class LocalBackend {
     // first stdout/stderr chunk arrives (or a 200ms fallback timer fires).
     let ready = !sh.pty;
     const pending = [];
+    // The sessions this shell's processes live in, noted while it is alive:
+    // a job it disowns outlives it in the same session, and by then the tree
+    // that led to it is gone (see sessionIdsOf).
+    const sessions = new Set();
+    const noteSessions = () => { for (const sid of sessionIdsOf(proc.pid)) sessions.add(sid); };
     const flushPending = () => {
       if (!ready) {
         ready = true;
         clearTimeout(readyTimer);
+        noteSessions();
         for (const data of pending.splice(0)) {
           try { proc.stdin?.write(data); } catch { /* shell exiting */ }
         }
@@ -186,6 +192,10 @@ export class LocalBackend {
       // The marker's pid is the cleanup script's to signal: it is written by the
       // Cell, so the Gateway does not read a number out of it and kill that.
       if (sh.pty) detachedSpawn(sh.bin, sh.argv(cleanupScript(marker, tmp)), { detached: process.platform !== "win32" });
+      // Ending a session ends what it started — including what it disowned and
+      // then walked away from by exiting on its own.
+      noteSessions();
+      killSessions(sessions);
       killTree(proc.pid, "SIGKILL", proc);
     };
     proc.on("exit", () => { clearTimeout(first); clearTimeout(readyTimer); cleanup(); close(); });

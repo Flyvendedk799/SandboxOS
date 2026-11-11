@@ -137,6 +137,31 @@ test("ending a session takes the process it started with it", async (t) => {
   assert.ok(freed, "the port the shell's child was holding is free again");
 });
 
+test("ending a session takes disowned processes with it even if shell exits", async (t) => {
+  const port = await freePort();
+  let seen = "";
+  const s = attachSession(kernel.cell, sandbox.id, { name: "tree-disown" }, (d) => { seen += d.toString(); }, () => {});
+  await ok("fs", "write", {
+    path: "holder-disown.js",
+    content: `require('node:net').createServer(() => {}).listen(${port}, '127.0.0.1');\n`,
+  });
+  s.write("node holder-disown.js &\n");
+  const held = await until(() => answers(port));
+  if (!held) {
+    t.skip(`no shell could start the holder on this host (saw: ${JSON.stringify(seen.slice(-120))})`);
+    killSession(sandbox.id, s.id);
+    return;
+  }
+
+  // Disown the background job and exit the shell from within the session.
+  s.write("disown; exit\n");
+
+  // The shell exited on its own. Verify the port held by the disowned child is freed by session cleanup.
+  const freed = await until(async () => !(await answers(port)));
+  killSession(sandbox.id, s.id);
+  assert.ok(freed, "the port the disowned child was holding is free after shell exit");
+});
+
 // ── and the person gets the same aim the agent has ──────────────────────────
 
 test("the History panel offers the aim, not only the rewind", () => {
