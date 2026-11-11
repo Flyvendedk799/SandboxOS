@@ -23,14 +23,20 @@ function dockerSync(args, { timeoutMs = 10_000 } = {}) {
 }
 function docker(args, { timeoutMs = 60_000 } = {}) {
   return new Promise((resolve) => {
-    execFile("docker", args, { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 },
-      (err, stdout, stderr) => {
-        resolve({
-          stdout: stdout ?? "",
-          stderr: stderr ?? "",
-          code: err && typeof err.code === "number" ? err.code : err ? 1 : 0,
+    let child;
+    try {
+      child = execFile("docker", args, { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 },
+        (err, stdout, stderr) => {
+          resolve({
+            stdout: stdout ?? "",
+            stderr: stderr ?? "",
+            code: err && typeof err.code === "number" ? err.code : err ? 1 : 0,
+          });
         });
-      });
+      child.on("error", () => { /* callback handles result; listener prevents unhandled error */ });
+    } catch (err) {
+      resolve({ stdout: "", stderr: err.message, code: 1 });
+    }
   });
 }
 
@@ -220,6 +226,11 @@ export class DockerBackend {
     const ip = (r.stdout ?? "").trim().split(/\s+/).filter(Boolean)[0];
     if (!ip) throw new Error("container has no reachable IP address");
     return { host: ip, port: Number(port) };
+  }
+
+  async cleanup() {
+    this._boot = null;
+    try { await this.stop(); } catch {}
   }
 
   async stop() {

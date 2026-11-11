@@ -38,8 +38,12 @@ export async function resolveBackend() {
 
 function _dockerAvailable() {
   return new Promise((resolve) => {
-    const p = execFile("docker", ["version", "--format", "{{.Server.Version}}"], (err) => resolve(!err));
-    p.on("error", () => resolve(false));
+    try {
+      const p = execFile("docker", ["version", "--format", "{{.Server.Version}}"], (err) => resolve(!err));
+      p.on("error", () => resolve(false));
+    } catch {
+      resolve(false);
+    }
   });
 }
 
@@ -47,8 +51,12 @@ function _fcAvailable() {
   if (process.platform !== "linux") return Promise.resolve(false);
   if (!fs.existsSync("/dev/kvm"))    return Promise.resolve(false);
   return new Promise((resolve) => {
-    const p = execFile("firecracker", ["--version"], (err) => resolve(!err));
-    p.on("error", () => resolve(false));
+    try {
+      const p = execFile("firecracker", ["--version"], (err) => resolve(!err));
+      p.on("error", () => resolve(false));
+    } catch {
+      resolve(false);
+    }
   });
 }
 
