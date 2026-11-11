@@ -16,6 +16,98 @@ import path from "node:path";
 // Files/dirs never captured by Tide.
 export const IGNORE = new Set([".git", "node_modules", ".DS_Store", ".tide"]);
 
+/** Assert that a name is a safe single-segment tree entry name (no slashes, no ..). */
+export function assertSafeEntryName(name) {
+  if (typeof name !== "string" || !name) {
+    throw new Error(`path traversal forbidden: invalid entry name "${name}"`);
+  }
+  // A backslash separates directories only where the platform says it does;
+  // elsewhere it is a character a filename may contain, and refusing it made a
+  // workspace holding such a file impossible to mark at all.
+  const backslash = path.sep === "\\" && name.includes("\\");
+  if (name === "." || name === ".." || name.includes("/") || backslash || name.includes("\0")) {
+    throw new Error(`path traversal forbidden: unsafe entry name "${name}"`);
+  }
+  return name;
+}
+
+const RESERVED = new Set([...IGNORE].map((n) => n.toLowerCase()));
+
+/** Names Tide never reads into a tree are names it must never write out of one.
+ *  A snapshot or a pushed tree that carries a `.git/config` or a `.tide/…` is
+ *  not a workspace's files — it is someone configuring the machine that checks
+ *  it out. Case-insensitive, because the filesystem may be. */
+export function assertNotReserved(relPath) {
+  for (const part of String(relPath).split(/[/\\]/)) {
+    if (RESERVED.has(part.toLowerCase())) {
+      throw new Error(`reserved name in path: "${relPath}"`);
+    }
+  }
+  return relPath;
+}
+
+/** A registry key (workspace name, state type): any label, but never one that
+ *  means something to a plain object. */
+export function assertSafeKey(key, what = "name") {
+  if (typeof key !== "string" || !key || key.includes("\0")) throw new Error(`invalid ${what}: "${key}"`);
+  if (key === "__proto__" || key === "constructor" || key === "prototype") throw new Error(`invalid ${what}: "${key}"`);
+  return key;
+}
+
+/**
+ * Resolve `relPath` under `baseDir` as somewhere a file may be written: inside
+ * the directory lexically (assertSafePath), not under a reserved name, and not
+ * *through* a symlink — a link already sitting in the target would otherwise
+ * carry the write, or a recursive delete, outside it. Whatever is in the way of
+ * the file itself (a link, a directory where a file goes, a file where a
+ * directory goes) is removed.
+ */
+export function prepareWriteTarget(baseDir, relPath) {
+  const target = assertSafePath(baseDir, relPath);
+  assertNotReserved(relPath);
+  const base = path.resolve(baseDir);
+  const parts = path.relative(base, target).split(path.sep).filter(Boolean);
+  let cur = base;
+  for (let i = 0; i < parts.length; i++) {
+    cur = path.join(cur, parts[i]);
+    let st;
+    try { st = fs.lstatSync(cur); } catch { break; } // nothing here on down
+    const last = i === parts.length - 1;
+    if (st.isSymbolicLink()) {
+      if (!last) throw new Error(`path crosses a symlink: "${relPath}"`);
+      fs.unlinkSync(cur);
+    } else if (last ? st.isDirectory() : !st.isDirectory()) {
+      fs.rmSync(cur, { recursive: true, force: true });
+    }
+  }
+  return target;
+}
+
+/** Assert that a path resolves strictly inside baseDir without path traversal. */
+export function assertSafePath(baseDir, relPath) {
+  if (typeof relPath !== "string" || !relPath) {
+    throw new Error(`path traversal forbidden: invalid relative path "${relPath}"`);
+  }
+  if (relPath.includes("\0")) {
+    throw new Error(`path traversal forbidden: null byte in path "${relPath}"`);
+  }
+  if (path.isAbsolute(relPath) || relPath.startsWith("/") || relPath.startsWith("\\")) {
+    throw new Error(`path traversal forbidden: absolute path "${relPath}"`);
+  }
+  const parts = relPath.split(/[/\\]/);
+  for (const part of parts) {
+    if (part === "..") {
+      throw new Error(`path traversal forbidden: parent segment in "${relPath}"`);
+    }
+  }
+  const normBase = path.resolve(baseDir);
+  const resolved = path.resolve(normBase, "." + path.sep + relPath.replace(/^[/\\]+/, ""));
+  if (resolved !== normBase && !resolved.startsWith(normBase + path.sep)) {
+    throw new Error(`path escapes target directory: "${relPath}"`);
+  }
+  return resolved;
+}
+
 export function hashObject(type, buf) {
   return crypto.createHash("sha256").update(type).update("\0").update(buf).digest("hex");
 }
@@ -47,7 +139,11 @@ export const hasObject = (store, hash) => fs.existsSync(objPath(store, hash));
 export const writeBlob = (store, buf) => writeObject(store, "blob", buf);
 
 export function writeTree(store, entries) {
-  const sorted = [...entries].sort((a, b) => (a.name < b.name ? -1 : 1));
+  const clean = entries.map((e) => {
+    assertSafeEntryName(e.name);
+    return { name: e.name, type: e.type === "tree" ? "tree" : "blob", hash: e.hash };
+  });
+  const sorted = [...clean].sort((a, b) => (a.name < b.name ? -1 : 1));
   return writeObject(store, "tree", Buffer.from(JSON.stringify(sorted)));
 }
 export const readTree = (store, hash) => JSON.parse(readObject(store, hash).buf.toString());
@@ -77,56 +173,138 @@ export function buildTreeFromDir(store, dir) {
 
 /** Materialize a tree into a working directory (removes managed files not in the tree). */
 export function checkoutTree(store, treeHash, dir) {
-  fs.mkdirSync(dir, { recursive: true });
+  const normDir = path.resolve(dir);
+  fs.mkdirSync(normDir, { recursive: true });
   const want = treeHash ? readTree(store, treeHash) : [];
-  const wantNames = new Set(want.map((e) => e.name));
-  for (const name of fs.readdirSync(dir)) {
+  const wantNames = new Set();
+  for (const e of want) {
+    assertSafeEntryName(e.name);
+    assertNotReserved(e.name);
+    wantNames.add(e.name);
+  }
+  for (const name of fs.readdirSync(normDir)) {
     if (IGNORE.has(name)) continue;
-    if (!wantNames.has(name)) fs.rmSync(path.join(dir, name), { recursive: true, force: true });
+    if (!wantNames.has(name)) {
+      const full = assertSafePath(normDir, name);
+      fs.rmSync(full, { recursive: true, force: true });
+    }
   }
   for (const e of want) {
-    const full = path.join(dir, e.name);
+    const full = assertSafePath(normDir, e.name);
+    // What is already there may be the wrong kind of thing: a symlink (which a
+    // recursion or a write would follow out of the workspace), a file where a
+    // directory goes, or a directory where a file goes. It is replaced.
+    let st = null;
+    try { st = fs.lstatSync(full); } catch { /* nothing there */ }
+    if (st && (st.isSymbolicLink() || (e.type === "tree") !== st.isDirectory())) {
+      fs.rmSync(full, { recursive: true, force: true });
+    }
     if (e.type === "tree") checkoutTree(store, e.hash, full);
     else fs.writeFileSync(full, readObject(store, e.hash).buf);
   }
 }
 
-/** All blob paths under a tree (recursive). */
-export function listTree(store, treeHash, prefix = "") {
+/** All leaf blobs under a tree: [{ path, hash }]. */
+export function collectTreeBlobs(store, treeHash, prefix = "") {
   const out = [];
   for (const e of treeHash ? readTree(store, treeHash) : []) {
-    if (e.type === "tree") out.push(...listTree(store, e.hash, prefix + e.name + "/"));
-    else out.push(prefix + e.name);
+    if (e.type === "tree") {
+      out.push(...collectTreeBlobs(store, e.hash, prefix + e.name + "/"));
+    } else {
+      out.push({ path: prefix + e.name, hash: e.hash });
+    }
   }
   return out;
 }
 
-/** Flat path-level diff between two trees: {path, status}. */
-export function diffTrees(store, aHash, bHash, prefix = "") {
+/** All blob paths under a tree (recursive). */
+export function listTree(store, treeHash, prefix = "") {
+  return collectTreeBlobs(store, treeHash, prefix).map((b) => b.path);
+}
+
+/** Compute summary mutation counts for a change list. */
+export function summarizeDiff(changes) {
+  const added = changes.filter((c) => c.status === "added").length;
+  const modified = changes.filter((c) => c.status === "modified").length;
+  const deleted = changes.filter((c) => c.status === "deleted").length;
+  return { added, modified, deleted, files: changes.length };
+}
+
+/** Flat path-level diff between two trees: {path, status} by default; {path, status, oldHash, newHash} with detail: true. */
+export function diffTrees(store, aHash, bHash, prefix = "", opts = {}) {
+  let options = {};
+  let pfx = "";
+  if (typeof prefix === "object" && prefix !== null) {
+    options = prefix;
+    pfx = options.prefix ?? "";
+  } else {
+    pfx = prefix || "";
+    if (typeof opts === "object" && opts !== null) {
+      options = opts;
+    }
+  }
+  const detail = !!options.detail;
+
   const a = aHash ? readTree(store, aHash) : [];
   const b = bHash ? readTree(store, bHash) : [];
   const am = new Map(a.map((e) => [e.name, e]));
   const bm = new Map(b.map((e) => [e.name, e]));
   const out = [];
+
+  const makeEntry = (itemPath, status, oldHash = null, newHash = null) => {
+    return detail
+      ? { path: itemPath, status, oldHash, newHash }
+      : { path: itemPath, status };
+  };
+
   for (const [name, be] of bm) {
     const ae = am.get(name);
-    const p = prefix + name;
+    const p = pfx + name;
     if (!ae) {
-      if (be.type === "tree") out.push(...listTree(store, be.hash, p + "/").map((x) => ({ path: x, status: "added" })));
-      else out.push({ path: p, status: "added" });
+      if (be.type === "tree") {
+        for (const leaf of collectTreeBlobs(store, be.hash, p + "/")) {
+          out.push(makeEntry(leaf.path, "added", null, leaf.hash));
+        }
+      } else {
+        out.push(makeEntry(p, "added", null, be.hash));
+      }
     } else if (ae.hash !== be.hash) {
-      if (ae.type === "tree" && be.type === "tree") out.push(...diffTrees(store, ae.hash, be.hash, p + "/"));
-      else out.push({ path: p, status: "modified" });
+      if (ae.type === "tree" && be.type === "tree") {
+        out.push(...diffTrees(store, ae.hash, be.hash, p + "/", options));
+      } else if (ae.type === "tree" && be.type === "blob") {
+        for (const leaf of collectTreeBlobs(store, ae.hash, p + "/")) {
+          out.push(makeEntry(leaf.path, "deleted", leaf.hash, null));
+        }
+        out.push(makeEntry(p, "added", null, be.hash));
+      } else if (ae.type === "blob" && be.type === "tree") {
+        out.push(makeEntry(p, "deleted", ae.hash, null));
+        for (const leaf of collectTreeBlobs(store, be.hash, p + "/")) {
+          out.push(makeEntry(leaf.path, "added", null, leaf.hash));
+        }
+      } else {
+        out.push(makeEntry(p, "modified", ae.hash, be.hash));
+      }
     }
   }
   for (const [name, ae] of am) {
     if (!bm.has(name)) {
-      const p = prefix + name;
-      if (ae.type === "tree") out.push(...listTree(store, ae.hash, p + "/").map((x) => ({ path: x, status: "deleted" })));
-      else out.push({ path: p, status: "deleted" });
+      const p = pfx + name;
+      if (ae.type === "tree") {
+        for (const leaf of collectTreeBlobs(store, ae.hash, p + "/")) {
+          out.push(makeEntry(leaf.path, "deleted", leaf.hash, null));
+        }
+      } else {
+        out.push(makeEntry(p, "deleted", ae.hash, null));
+      }
     }
   }
+
   return out;
+}
+
+/** Opt-in detailed flat path-level diff between two trees: {path, status, oldHash, newHash}. */
+export function diffTreesDetailed(store, aHash, bHash, prefix = "") {
+  return diffTrees(store, aHash, bHash, prefix, { detail: true });
 }
 
 // ---- history & sync -------------------------------------------------------
@@ -197,8 +375,12 @@ export function commonAncestor(store, a, b) {
 
 /** Read a file's bytes from a tree by slash-path, or null if absent. */
 export function readFileFromTree(store, treeHash, filePath) {
+  if (typeof filePath !== "string") return null;
+  const parts = filePath.split("/").filter(Boolean);
+  for (const part of parts) {
+    if (part === "." || part === "..") return null;
+  }
   let entries = treeHash ? readTree(store, treeHash) : [];
-  const parts = filePath.split("/");
   for (let i = 0; i < parts.length; i++) {
     const e = entries.find((x) => x.name === parts[i]);
     if (!e) return null;
@@ -217,12 +399,153 @@ export function exportObjects(store, hashes) {
   });
 }
 
+const OBJECT_TYPES = new Set(["blob", "tree", "commit", "state"]);
+
+/** Every object a commit needs that the store does not have. */
+export function missingObjects(store, commitHash) {
+  const missing = [];
+  const seen = new Set();
+  const stack = [["commit", commitHash]];
+  while (stack.length) {
+    const [t, h] = stack.pop();
+    if (!h || seen.has(h)) continue;
+    seen.add(h);
+    if (typeof h !== "string" || !/^[0-9a-f]{64}$/.test(h) || !hasObject(store, h)) { missing.push(h); continue; }
+    if (t === "commit") {
+      const c = readCommit(store, h);
+      stack.push(["tree", c.tree]);
+      for (const p of c.parents ?? []) stack.push(["commit", p]);
+    } else if (t === "tree") {
+      for (const e of readTree(store, h)) stack.push([e.type === "tree" ? "tree" : "blob", e.hash]);
+    }
+  }
+  return missing;
+}
+
 /** Ingest transported objects, verifying each hash. */
 export function importObjects(store, objs) {
+  if (!Array.isArray(objs)) return 0;
   for (const o of objs) {
+    // An empty file has an empty payload, and it is still a file.
+    if (!o || typeof o.payload !== "string" || typeof o.hash !== "string" || !OBJECT_TYPES.has(o.type)) {
+      throw new Error(`invalid object descriptor for import: ${JSON.stringify(o)?.slice(0, 200)}`);
+    }
     const buf = Buffer.from(o.payload, "base64");
     const h = writeObject(store, o.type, buf);
     if (h !== o.hash) throw new Error(`object hash mismatch: ${o.hash} != ${h}`);
   }
   return objs.length;
+}
+
+// ---- volume portability & integrity ---------------------------------------
+
+/** Compute sha256 checksum of a buffer. */
+export function sha256(buf) {
+  return crypto.createHash("sha256").update(Buffer.isBuffer(buf) ? buf : Buffer.from(buf)).digest("hex");
+}
+
+/** Build a volume manifest: list of { path, size, sha256 } sorted by path. */
+export function buildVolumeManifest(dir, prefix = "") {
+  const normDir = path.resolve(dir);
+  if (!fs.existsSync(normDir)) return [];
+  const files = [];
+
+  function walk(currentDir, currentRel) {
+    for (const name of fs.readdirSync(currentDir)) {
+      if (IGNORE.has(name)) continue;
+      const full = path.join(currentDir, name);
+      const rel = currentRel ? `${currentRel}/${name}` : name;
+      const st = fs.statSync(full);
+      if (st.isDirectory()) {
+        walk(full, rel);
+      } else if (st.isFile()) {
+        const buf = fs.readFileSync(full);
+        files.push({
+          path: rel,
+          size: st.size,
+          sha256: crypto.createHash("sha256").update(buf).digest("hex"),
+        });
+      }
+    }
+  }
+
+  walk(normDir, prefix);
+  files.sort((a, b) => (a.path < b.path ? -1 : 1));
+  return files;
+}
+
+/** Export a directory volume into a self-contained portable structure. */
+export function exportVolume(dir) {
+  const normDir = path.resolve(dir);
+  const manifest = buildVolumeManifest(normDir);
+  const files = manifest.map((m) => {
+    const full = path.join(normDir, m.path);
+    const buf = fs.readFileSync(full);
+    return {
+      path: m.path,
+      size: m.size,
+      sha256: m.sha256,
+      payload: buf.toString("base64"),
+    };
+  });
+
+  return {
+    version: 1,
+    kind: "volume",
+    exportedAt: Date.now(),
+    files,
+  };
+}
+
+/** Restore files from a volume payload into targetDir with strict path traversal checks and checksum verification. */
+export function restoreVolume(dir, volumePayload, { clean = false } = {}) {
+  if (!volumePayload || typeof volumePayload !== "object") {
+    throw new Error("invalid volume payload");
+  }
+  const files = Array.isArray(volumePayload.files) ? volumePayload.files : [];
+  const normDir = path.resolve(dir);
+  fs.mkdirSync(normDir, { recursive: true });
+
+  const targetPaths = new Set();
+  let totalBytes = 0;
+
+  // First pass: validate all entries against path traversal and checksum corruption
+  const validated = [];
+  for (const f of files) {
+    if (!f || typeof f.path !== "string") {
+      throw new Error(`invalid volume file entry: ${JSON.stringify(f)}`);
+    }
+    const safeTarget = assertSafePath(normDir, f.path);
+    assertNotReserved(f.path);
+    const buf = Buffer.from(f.payload ?? "", "base64");
+    if (f.sha256) {
+      const digest = crypto.createHash("sha256").update(buf).digest("hex");
+      if (digest !== f.sha256) {
+        throw new Error(`volume file corrupted: sha256 mismatch for "${f.path}" (${digest} != ${f.sha256})`);
+      }
+    }
+    targetPaths.add(f.path);
+    validated.push({ path: f.path, target: safeTarget, buf });
+  }
+
+  // If clean is requested, delete files currently on disk that are not in the volume
+  if (clean && fs.existsSync(normDir)) {
+    const currentFiles = buildVolumeManifest(normDir);
+    for (const cur of currentFiles) {
+      if (!targetPaths.has(cur.path)) {
+        const full = assertSafePath(normDir, cur.path);
+        fs.rmSync(full, { force: true });
+      }
+    }
+  }
+
+  // Second pass: write all verified files
+  for (const item of validated) {
+    prepareWriteTarget(normDir, item.path);
+    fs.mkdirSync(path.dirname(item.target), { recursive: true });
+    fs.writeFileSync(item.target, item.buf);
+    totalBytes += item.buf.length;
+  }
+
+  return { restored: validated.length, bytes: totalBytes };
 }

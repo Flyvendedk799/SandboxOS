@@ -509,6 +509,7 @@ export function createDesktop({ root, ctx = {} }) {
       "aria-label": win.title,
     }, bar, body, grip);
     el.dataset.id = win.id;
+    el.dataset.app = win.app;
 
     bar.addEventListener("pointerdown", (e) => startDrag(e, win.id, "win"));
     bar.addEventListener("dblclick", () => call("windowSet", { id: win.id, max: !doc().windows.find((w) => w.id === win.id)?.max }));

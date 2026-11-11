@@ -9,7 +9,7 @@
 //   sbx call <server.tool> <json>         raw MCP call
 //   sbx audit [n]                         recent audit events
 //   sbx watch                             live-tail the audit stream
-//   sbx token [--patterns a,b]            mint another (optionally narrower) token
+//   sbx token [list|mint|revoke]          manage machine tokens
 //
 // Zero dependencies (global fetch + node built-ins).
 
@@ -31,13 +31,24 @@ function flag(args, name, def) {
   const i = args.indexOf(`--${name}`);
   return i > -1 ? args[i + 1] : def;
 }
-function die(msg) { console.error("sbx: " + msg); process.exit(1); }
 
-async function ask(question, { hidden = false } = {}) {
-  if (process.env.SBX_PASSWORD) return process.env.SBX_PASSWORD;
+function die(msg) {
+  console.error("sbx: " + String(msg));
+  process.exit(1);
+}
+
+async function askPrompt(question, { hidden = false } = {}) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
   if (hidden) rl.output.write = () => {}; // best-effort no-echo
   return new Promise((res) => rl.question(question, (a) => { rl.close(); console.log(); res(a); }));
+}
+
+async function readAllStdin() {
+  const chunks = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 async function api(cfg, p, { method = "GET", body, headers = {} } = {}) {
@@ -49,22 +60,67 @@ async function api(cfg, p, { method = "GET", body, headers = {} } = {}) {
 }
 
 async function cmdLogin(args) {
-  const url = (flag(args, "url", "http://127.0.0.1:3939")).replace(/\/$/, "");
-  const password = await ask("password: ", { hidden: true });
-  const login = await fetch(url + "/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }) });
+  const url = (flag(args, "url", process.env.SBX_URL || "http://127.0.0.1:3939")).replace(/\/$/, "");
+  const directToken = flag(args, "token", process.env.SBX_TOKEN);
+  let slug = flag(args, "slug", process.env.SBX_SLUG);
+
+  if (directToken) {
+    if (!slug) die("slug required when logging in with direct machine token (--slug <slug>)");
+    let probeRes;
+    try {
+      probeRes = await fetch(`${url}/${encodeURIComponent(slug)}/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${directToken}`,
+        },
+        body: JSON.stringify({ server: "kernel", tool: "whoami", args: {} }),
+      });
+    } catch (err) {
+      die(`connection failed: ${err.message}`);
+    }
+    const probeData = await probeRes.json().catch(() => ({}));
+    // A narrow token may not hold kernel.whoami, and being told so is itself
+    // proof the Gateway knows the token: only a refusal to authenticate fails.
+    const deniedTool = probeData.code === "denied" || /^denied:/.test(probeData.error ?? "");
+    if (!probeRes.ok || (!probeData.ok && !deniedTool)) {
+      die(probeData.error || `authentication failed (HTTP ${probeRes.status})`);
+    }
+    saveConfig({ url, slug, token: directToken });
+    console.log(`logged in → ${url}/${slug}  (token configured)`);
+    return;
+  }
+
+  const username = flag(args, "user") || flag(args, "username") || process.env.SBX_USER;
+  let password = flag(args, "password") || process.env.SBX_PASSWORD;
+  if (!password) {
+    password = await askPrompt("password: ", { hidden: true });
+  }
+
+  const loginBody = username ? { username, password } : { password };
+  const login = await fetch(url + "/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(loginBody),
+  });
   const data = await login.json();
   if (!data.ok) die(data.error || "login failed");
-  const slug = flag(args, "slug", data.slug);
-  const cookie = login.headers.getSetCookie()[0].split(";")[0];
+  slug = slug || data.slug;
+  if (!slug) die("no sandbox slug associated with login");
+
+  const rawCookie = login.headers.getSetCookie?.()?.[0] || login.headers.get("set-cookie") || "";
+  const cookie = rawCookie.split(";")[0];
   const patterns = flag(args, "patterns");
-  const mint = await fetch(`${url}/${slug}/tokens`, {
-    method: "POST", headers: { "Content-Type": "application/json", Cookie: cookie },
-    body: JSON.stringify({ label: os.hostname(), patterns: patterns ? patterns.split(",") : undefined }),
+
+  const mint = await fetch(`${url}/${encodeURIComponent(slug)}/tokens`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: cookie },
+    body: JSON.stringify({ label: os.hostname(), patterns: patterns ? patterns.split(",").map((p) => p.trim()) : undefined }),
   });
   const m = await mint.json();
   if (!m.ok) die(m.error || "could not mint token");
   saveConfig({ url, slug, token: m.token });
-  console.log(`logged in → ${url}/${slug}  (token scope: ${m.patterns.join(", ")})`);
+  console.log(`logged in → ${url}/${slug}  (token scope: ${(m.patterns || []).join(", ")})`);
 }
 
 async function cmdRun(line) {
@@ -114,13 +170,82 @@ async function cmdWatch() {
 async function cmdToken(args) {
   const cfg = loadConfig();
   if (!cfg.token) die("not logged in");
+
+  const sub = args[0];
+  if (sub === "list") {
+    const res = await api(cfg, `/${cfg.slug}/tokens`);
+    const d = await res.json();
+    if (!d.ok) die(d.error);
+    for (const t of d.tokens ?? []) {
+      const id = t.principalId || t.principal_id || "";
+      const label = t.label ? ` (${t.label})` : "";
+      console.log(`${id}  ${(t.patterns || []).join(", ") || "*"}${label}`);
+    }
+    return;
+  }
+
+  if (sub === "revoke" || sub === "rm") {
+    const id = args[1];
+    if (!id) die("usage: sbx token revoke <principalId|label>");
+    const listRes = await api(cfg, `/${cfg.slug}/tokens`);
+    const listData = await listRes.json().catch(() => ({}));
+    if (!listData.ok) die(listData.error || "failed to list tokens");
+    const tokens = listData.tokens ?? [];
+
+    // 1. Exact match on principalId
+    const exactPid = tokens.find((t) => (t.principalId || t.principal_id) === id);
+    let target = null;
+    if (exactPid) {
+      target = exactPid;
+    } else {
+      // 2. Exact match on label
+      const exactLabels = tokens.filter((t) => t.label === id);
+      if (exactLabels.length === 1) {
+        target = exactLabels[0];
+      } else if (exactLabels.length > 1) {
+        const candidates = exactLabels.map((t) => `  ${t.principalId || t.principal_id} (${t.label || "unlabeled"})`).join("\n");
+        die(`ambiguous token "${id}" matches multiple tokens:\n${candidates}`);
+      } else {
+        // 3. Unique prefix of the label or principal id. The Gateway suffixes
+        //    every label it stores, so the label a person chose is only ever a
+        //    prefix; an ambiguous one is refused and the resolved id is printed.
+        const matches = tokens.filter((t) => {
+          const pid = t.principalId || t.principal_id;
+          return (t.label && t.label.startsWith(id)) || (pid && pid.startsWith(id));
+        });
+        if (matches.length === 0) {
+          die(`no token matching "${id}" found`);
+        }
+        if (matches.length > 1) {
+          const candidates = matches.map((t) => `  ${t.principalId || t.principal_id} (${t.label || "unlabeled"})`).join("\n");
+          die(`ambiguous token "${id}" matches multiple tokens:\n${candidates}`);
+        }
+        target = matches[0];
+      }
+    }
+    const targetId = target.principalId || target.principal_id;
+    const res = await api(cfg, `/${cfg.slug}/tokens/${encodeURIComponent(targetId)}`, { method: "DELETE" });
+    const d = await res.json();
+    if (!d.ok) die(d.error);
+    console.log(`revoked token: ${targetId}`);
+    return;
+  }
+
+  // default / mint — and only that. A mistyped subcommand must not quietly mint
+  // a token with the caller's full scope and print it.
+  if (sub !== undefined && sub !== "mint" && !sub.startsWith("--")) {
+    die(`unknown token subcommand: ${sub} (use: sbx token [mint] [--patterns a,b] [--label x] | list | revoke <id|label>)`);
+  }
   const patterns = flag(args, "patterns");
-  // re-mint from the current (already attenuated) token
-  const res = await api(cfg, `/${cfg.slug}/tokens`, { method: "POST", body: { patterns: patterns ? patterns.split(",") : undefined, label: "minted" } });
+  const label = flag(args, "label", "minted");
+  const res = await api(cfg, `/${cfg.slug}/tokens`, {
+    method: "POST",
+    body: { patterns: patterns ? patterns.split(",").map((p) => p.trim()) : undefined, label },
+  });
   const m = await res.json();
   if (!m.ok) die(m.error);
   console.log(m.token);
-  console.error(`scope: ${m.patterns.join(", ")}`);
+  console.error(`scope: ${(m.patterns || []).join(", ")}`);
 }
 
 // ── agent subcommands ─────────────────────────────────────────────────────
@@ -140,7 +265,8 @@ async function cmdAgent(args) {
     const d = await res.json();
     for (const a of d.agents ?? []) console.log(`${a.id.slice(0, 8)}  ${String(a.state).padEnd(8)}  ${a.name}  ${a.cmd ?? ""}`);
   } else if (sub === "get") {
-    const res = await api(cfg, `/${cfg.slug}/agents/${args[1]}`);
+    if (!args[1]) die("usage: sbx agent get <id>");
+    const res = await api(cfg, `/${cfg.slug}/agents/${encodeURIComponent(args[1])}`);
     const d = await res.json();
     if (!d.ok) die(d.error);
     const a = d.agent;
@@ -148,7 +274,8 @@ async function cmdAgent(args) {
     if (a.result) console.log("  result:\n" + a.result.split("\n").map((l) => "    " + l).join("\n"));
     if (a.error)  console.log("  error: " + a.error);
   } else if (sub === "kill") {
-    const res = await api(cfg, `/${cfg.slug}/agents/${args[1]}`, { method: "DELETE" });
+    if (!args[1]) die("usage: sbx agent kill <id>");
+    const res = await api(cfg, `/${cfg.slug}/agents/${encodeURIComponent(args[1])}`, { method: "DELETE" });
     const d = await res.json();
     console.log(d.ok && d.killed ? "killed" : d.reason ?? d.error ?? "not killed");
   } else {
@@ -178,18 +305,18 @@ async function cmdSandbox(args) {
     if (d.ok) console.log(`created: ${d.slug}`); else die(d.error);
   } else if (sub === "wake") {
     const slug = args[1] ?? cfg.slug;
-    const res = await api(cfg, `/${slug}/wake`, { method: "POST" });
+    const res = await api(cfg, `/${encodeURIComponent(slug)}/wake`, { method: "POST" });
     const d = await res.json();
     if (d.ok) console.log(`${slug}: ${d.state}`); else die(d.error);
   } else if (sub === "hibernate") {
     const slug = args[1] ?? cfg.slug;
-    const res = await api(cfg, `/${slug}/hibernate`, { method: "POST" });
+    const res = await api(cfg, `/${encodeURIComponent(slug)}/hibernate`, { method: "POST" });
     const d = await res.json();
     if (d.ok) console.log(`${slug}: ${d.state}`); else die(d.error);
   } else if (sub === "delete") {
     const slug = args[1];
     if (!slug) die("usage: sbx sandbox delete <slug>");
-    const res = await api(cfg, `/api/sandboxes/${slug}`, { method: "DELETE" });
+    const res = await api(cfg, `/api/sandboxes/${encodeURIComponent(slug)}`, { method: "DELETE" });
     const d = await res.json();
     if (d.ok) console.log(`deleted: ${d.deleted}`); else die(d.error);
   } else {
@@ -282,6 +409,12 @@ async function cmdOs(args) {
       console.log(`layout → ${args[1]}${r.tree ? `  ${r.tree}` : ""}`);
       break;
     }
+    case "arrange": {
+      const preset = args[1] || "grid";
+      const r = await desktop("arrange", { preset });
+      console.log(`arranged: ${preset} (${r.windows?.length ?? 0} windows)`);
+      break;
+    }
     case "tile": {
       // sbx os tile <id> ratio <0.1-0.9> [with <id2>] · sbx os tile <id> swap <id2> · sbx os tile <id> flip
       if (!args[1] || !args[2]) die("usage: sbx os tile <window-id> ratio <r> [with <id>] | swap <id> | flip");
@@ -350,6 +483,21 @@ async function cmdOs(args) {
       if (!args[1]) die("usage: sbx os revert <rev>");
       console.log(`now at r${(await desktop("revert", { rev: Number(args[1]) })).rev}`);
       break;
+    case "checkpoint": {
+      const name = args[1] || `CLI checkpoint ${new Date().toISOString()}`;
+      const r = await desktop("checkpoint", { name });
+      console.log(`checkpoint created: r${r.checkpoint?.rev ?? "?"} - ${r.checkpoint?.name ?? r.checkpoint?.label ?? name}`);
+      break;
+    }
+    case "checkpoints": {
+      const r = await desktop("checkpoints");
+      const list = r.checkpoints ?? [];
+      if (!list.length) { console.log("(no checkpoints)"); break; }
+      for (const cp of list) {
+        console.log(`r${String(cp.rev).padEnd(5)} ${new Date(cp.ts).toISOString()}  ${cp.name ?? cp.label ?? ""}`);
+      }
+      break;
+    }
     case "publish": {
       // sbx os publish <name> [--public|--private] [--tags=a,b]
       if (!args[1]) die("usage: sbx os publish <name> [--public|--private] [--tags=a,b]");
@@ -460,7 +608,7 @@ async function cmdDistro(args) {
     const slug = args[1] ?? cfg.slug;
     const name = args[2];
     if (!name) die("usage: sbx distro snapshot [slug] <name>");
-    const res = await api(cfg, `/api/sandboxes/${slug}/snapshot`, { method: "POST", body: { name } });
+    const res = await api(cfg, `/api/sandboxes/${encodeURIComponent(slug)}/snapshot`, { method: "POST", body: { name } });
     const d = await res.json();
     if (d.ok) console.log(`snapshot saved as distro: ${d.name}`); else die(d.error);
   } else {
@@ -571,6 +719,24 @@ async function cmdFs(args) {
     process.stdout.write((await mcp(cfg, "fs", "read", { path: args[1] })).content ?? "");
     return;
   }
+  if (sub === "stat") {
+    if (!args[1]) die("usage: sbx fs stat <path>");
+    const r = await mcp(cfg, "fs", "stat", { path: args[1] });
+    console.log(`${r.path}: ${r.type} (${human(r.size)}) mtime=${new Date(r.mtime).toISOString()}`);
+    return;
+  }
+  if (sub === "cp" || sub === "copy") {
+    if (!args[1] || !args[2]) die("usage: sbx fs cp <from> <to>");
+    const r = await mcp(cfg, "fs", "copy", { from: args[1], to: args[2] });
+    console.log(`copied: ${r.from} → ${r.to}`);
+    return;
+  }
+  if (sub === "mv" || sub === "move") {
+    if (!args[1] || !args[2]) die("usage: sbx fs mv <from> <to>");
+    const r = await mcp(cfg, "fs", "move", { from: args[1], to: args[2] });
+    console.log(`moved: ${r.from} → ${r.to}`);
+    return;
+  }
   if (sub === "tree") {
     const r = await mcp(cfg, "fs", "tree", { path: args[1] ?? ".", depth: Number(flag(args, "depth", 3)) });
     const walk = (nodes, prefix) => nodes.forEach((n, i) => {
@@ -601,8 +767,10 @@ async function cmdFs(args) {
     return;
   }
   if (sub === "rm") {
-    if (!args[1]) die("usage: sbx fs rm <path> [-r]");
-    const r = await mcp(cfg, "fs", "remove", { path: args[1], recursive: args.includes("-r") || args.includes("--recursive") });
+    const targetPath = args.slice(1).find((a) => !a.startsWith("-"));
+    if (!targetPath) die("usage: sbx fs rm <path> [-r]");
+    const recursive = args.includes("-r") || args.includes("--recursive");
+    const r = await mcp(cfg, "fs", "remove", { path: targetPath, recursive });
     console.log(r.removed ? `removed ${r.path}` : `not found: ${r.path}`);
     return;
   }
@@ -613,15 +781,19 @@ async function cmdFs(args) {
     const res = await api(cfg, `/${cfg.slug}/file?path=${encodeURIComponent(remote)}`);
     if (!res.ok) die((await res.json().catch(() => ({}))).error ?? `http ${res.status}`);
     const buf = Buffer.from(await res.arrayBuffer());
-    if (local === "-") process.stdout.write(buf);
-    else { fs.writeFileSync(local, buf); console.log(`${remote} → ${local} (${human(buf.length)})`); }
+    if (local === "-") {
+      process.stdout.write(buf);
+    } else {
+      fs.writeFileSync(local, buf);
+      console.log(`${remote} → ${local} (${human(buf.length)})`);
+    }
     return;
   }
   if (sub === "put") {
     const local = args[1];
     if (!local) die("usage: sbx fs put <local> [remote]");
-    const remote = args[2] ?? path.basename(local);
-    const body = fs.readFileSync(local);
+    const remote = args[2] ?? (local === "-" ? die("remote path required when reading from stdin (-)") : path.basename(local));
+    const body = local === "-" ? await readAllStdin() : fs.readFileSync(local);
     const res = await fetch(`${cfg.url}/${cfg.slug}/file?path=${encodeURIComponent(remote)}`, {
       method: "PUT", headers: { Authorization: `Bearer ${cfg.token}` }, body,
     });
@@ -677,6 +849,30 @@ async function cmdProc(args) {
     console.log(r.stopped ? `stopped ${r.id}` : `not stopped: ${r.reason}`);
     return;
   }
+  if (sub === "forget") {
+    if (!args[1]) die("usage: sbx proc forget <id>");
+    const r = await mcp(cfg, "proc", "forget", { id: args[1] });
+    console.log(r.forgotten ? `forgotten ${args[1]}` : `not forgotten`);
+    return;
+  }
+  if (sub === "sessions") {
+    const r = await mcp(cfg, "proc", "sessions", {});
+    const list = r.sessions ?? [];
+    if (!list.length) { console.log("(no terminal sessions)"); return; }
+    for (const s of list) {
+      console.log(`${s.id}  ${s.name}  ${s.alive ? "alive" : "exited"}  attached:${s.attached ?? 0}`);
+    }
+    return;
+  }
+  if (sub === "signal") {
+    if (!args[1]) die("usage: sbx proc signal <pid> [SIGTERM|SIGKILL|...]");
+    const pid = Number(args[1]);
+    if (!Number.isInteger(pid) || pid <= 0) die("usage: sbx proc signal <pid> [SIGTERM|SIGKILL|...] — pid must be a positive integer");
+    const sig = args[2] || "SIGTERM";
+    const r = await mcp(cfg, "proc", "signal", { pid, signal: sig });
+    console.log(`signaled ${r.pid} with ${r.signal}`);
+    return;
+  }
   die(`unknown proc subcommand: ${sub}`);
 }
 
@@ -706,6 +902,13 @@ async function cmdPort(args) {
     if (!port) die("usage: sbx port close <port>");
     const r = await mcp(cfg, "ports", "unexpose", { port });
     console.log(r.removed ? `closed :${r.port}` : `:${r.port} was not exposed`);
+    return;
+  }
+  if (sub === "check") {
+    const port = Number(args[1]);
+    if (!port) die("usage: sbx port check <port>");
+    const r = await mcp(cfg, "ports", "check", { port });
+    console.log(`port ${r.port}: ${r.up ? "listening" : "closed"}`);
     return;
   }
   if (sub === "scan") {
@@ -800,12 +1003,42 @@ async function cmdAccess(args) {
     const who = args[1];
     if (!who) die("usage: sbx access revoke <username|principalId>");
     const listed = await (await api(cfg, `/${cfg.slug}/access`)).json();
-    const match = (listed.access ?? []).find((a) => a.username === who || a.principalId === who || a.name === who);
-    if (!match) die(`no access entry for: ${who}`);
-    const res = await api(cfg, `/${cfg.slug}/access/${match.principalId}`, { method: "DELETE" });
+    if (!listed.ok) die(listed.error || "failed to list access entries");
+    const entries = listed.access ?? [];
+
+    // 1. Exact match on principalId
+    const exactPid = entries.find((a) => a.principalId === who);
+    let target = null;
+    if (exactPid) {
+      target = exactPid;
+    } else {
+      // 2. Exact match on username or name
+      const exactNames = entries.filter((a) => a.username === who || a.name === who);
+      if (exactNames.length === 1) {
+        target = exactNames[0];
+      } else if (exactNames.length > 1) {
+        const candidates = exactNames.map((a) => `  ${a.principalId} (${a.username || a.name || a.kind})`).join("\n");
+        die(`ambiguous access identifier "${who}" matches multiple entries:\n${candidates}`);
+      } else {
+        // 3. A unique prefix of the principal id only. Names are matched
+        //    whole: "bob" must never take "bobby"'s access away.
+        const matches = entries.filter((a) => a.principalId && a.principalId.startsWith(who));
+        if (matches.length === 0) {
+          die(`no access entry for: ${who}`);
+        }
+        if (matches.length > 1) {
+          const candidates = matches.map((a) => `  ${a.principalId} (${a.username || a.name || a.kind})`).join("\n");
+          die(`ambiguous access identifier "${who}" matches multiple entries:\n${candidates}`);
+        }
+        target = matches[0];
+      }
+    }
+    const targetId = target.principalId;
+    const res = await api(cfg, `/${cfg.slug}/access/${encodeURIComponent(targetId)}`, { method: "DELETE" });
     const d = await res.json();
     if (!d.ok) die(d.error);
-    console.log(`revoked ${who} (${d.removed} grant${d.removed === 1 ? "" : "s"}${d.tokensRevoked ? `, ${d.tokensRevoked} token${d.tokensRevoked === 1 ? "" : "s"}` : ""})`);
+    const shown = target.username || target.name || target.kind || "";
+    console.log(`revoked ${targetId}${shown ? ` (${shown})` : ""} (${d.removed} grant${d.removed === 1 ? "" : "s"}${d.tokensRevoked ? `, ${d.tokensRevoked} token${d.tokensRevoked === 1 ? "" : "s"}` : ""})`);
     return;
   }
   die(`unknown access subcommand: ${sub}`);
@@ -844,8 +1077,8 @@ async function cmdBackup(args) {
 
 const HELP = `sbx — drive a SandboxOS machine from anywhere.
 
-  connect     login [--url URL] [--slug SLUG] [--patterns a,b]
-              token [--patterns a,b]              mint a narrower token
+  connect     login [--url URL] [--slug SLUG] [--token TOKEN] [--user USER] [--password PWD] [--patterns a,b]
+              token [list|revoke <id>] [--patterns a,b]
               sandbox <list|create|wake|hibernate|delete>
 
   work        run "<line>"                        one Command Central line
@@ -854,21 +1087,23 @@ const HELP = `sbx — drive a SandboxOS machine from anywhere.
               stream "<cmd>"                      run a command, streaming output
               ask "<question>" [--chat ID]        the assistant, with live tool calls
 
-  files       fs ls [path] · fs cat <path> · fs tree [path] [--depth N]
+  files       fs ls [path] · fs cat <path> · fs stat <path> · fs tree [path] [--depth N]
               fs grep <query> [path] [--include "*.js"] [--regex]
-              fs mkdir <path> · fs rm <path> [-r]
-              fs get <remote> [local] · fs put <local> [remote]
+              fs cp <from> <to> · fs mv <from> <to> · fs mkdir <path> · fs rm <path> [-r]
+              fs get <remote> [local|-] · fs put <local|-> [remote]
 
   processes   proc list · proc start "<cmd>" [--name N] · proc logs <id> [-f] · proc stop <id>
-  ports       port list · port expose <port> [name] · port close <port> · port scan
+              proc forget <id> · proc sessions · proc signal <pid> [SIG]
+  ports       port list · port expose <port> [name] · port close <port> · port check <port> · port scan
   agents      agent <list|spawn|get|kill> …
 
   desktop     os show · os map · os silhouette [W H] · os open <app> · os close <id>
               os widget <kind> · os theme [key] · os motion <preset>
-              os layout <floating|tiling|master-stack|columns|rows|grid>
+              os layout <floating|tiling|master-stack|columns|rows|grid> · os arrange [preset]
               os tile <id> ratio <r> [with <id>] | swap <id> | flip
               os snap <id> <region> [WxH] · os assoc [.ext] [app]
               os apps · os tools <app> on|off · os history [rev] · os revert <rev>
+              os checkpoint [label] · os checkpoints
               os publish <name> [--public] [--tags=a,b] · os gallery [q] [--public|--mine]
               os visibility <name> <private|tenant|public> · os fork <distro>
               os export · os notify "<title>" · os tui

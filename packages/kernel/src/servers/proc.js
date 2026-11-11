@@ -46,23 +46,39 @@ function jobView(rec) {
 }
 
 /** Append a chunk to a record's ring buffer, splitting on newlines. A chunk can
- *  end mid-line, so the tail is held in `rec.pending` until its newline arrives —
- *  otherwise a single log line would be torn across two entries. */
+ *  end mid-line, so the tail is held in `rec.pendingByStream` until its newline arrives —
+ *  otherwise a single log line would be torn across two entries or interleaving stdout
+ *  and stderr would corrupt partial lines. */
 function pushLog(rec, stream, chunk) {
-  const parts = ((rec.pending ?? "") + String(chunk)).split("\n");
-  rec.pending = parts.pop() ?? "";
+  if (!rec.pendingByStream) {
+    rec.pendingByStream = { stdout: rec.pending ?? "", stderr: "" };
+  }
+  const s = stream === "stderr" ? "stderr" : "stdout";
+  const prior = rec.pendingByStream[s] ?? "";
+  const parts = (prior + String(chunk)).split("\n");
+  rec.pendingByStream[s] = parts.pop() ?? "";
+  rec.pending = rec.pendingByStream.stdout;
   for (const text of parts) {
-    rec.logs.push({ ts: Date.now(), stream, text: text.replace(/\r$/, "").slice(0, MAX_LINE_CHARS) });
+    rec.logs.push({ ts: Date.now(), stream: s, text: text.replace(/\r$/, "").slice(0, MAX_LINE_CHARS) });
   }
   if (rec.logs.length > MAX_LOG_LINES) rec.logs.splice(0, rec.logs.length - MAX_LOG_LINES);
 }
 
 /** Flush any partial trailing line when a process exits. */
 function flushLog(rec) {
-  if (rec.pending) {
-    rec.logs.push({ ts: Date.now(), stream: "stdout", text: rec.pending.slice(0, MAX_LINE_CHARS) });
+  if (rec.pendingByStream) {
+    for (const s of ["stdout", "stderr"]) {
+      if (rec.pendingByStream[s]) {
+        rec.logs.push({ ts: Date.now(), stream: s, text: rec.pendingByStream[s].replace(/\r$/, "").slice(0, MAX_LINE_CHARS) });
+        rec.pendingByStream[s] = "";
+      }
+    }
+    rec.pending = "";
+  } else if (rec.pending) {
+    rec.logs.push({ ts: Date.now(), stream: "stdout", text: rec.pending.replace(/\r$/, "").slice(0, MAX_LINE_CHARS) });
     rec.pending = "";
   }
+  if (rec.logs.length > MAX_LOG_LINES) rec.logs.splice(0, rec.logs.length - MAX_LOG_LINES);
 }
 
 /** Terminate every supervised process for a Sandbox (used on hibernate/teardown). */
@@ -110,6 +126,7 @@ async function startJob(cell, sandbox, sandboxId, { id, cmd, name, timeoutMs, re
     ...(restoredFrom ? { restoredFrom } : {}),
     logs: [],
     pending: "",
+    pendingByStream: { stdout: "", stderr: "" },
     handle: null,
     pid: null,
   };
@@ -181,7 +198,7 @@ export async function restoreJobs(cell, sandbox) {
   for (const j of saved.filter((x) => x.state !== "running")) {
     if (table.has(j.id)) continue;
     table.set(j.id, {
-      ...j, logs: [], pending: "", handle: null, pid: null,
+      ...j, logs: [], pending: "", pendingByStream: { stdout: "", stderr: "" }, handle: null, pid: null,
       // The logs went with the Gateway that captured them; say so rather than
       // showing an empty tail that reads like a process that printed nothing.
       interrupted: true,
@@ -203,7 +220,7 @@ export async function restoreJobs(cell, sandbox) {
       table.set(j.id, {
         ...j, state: "failed", code: null, exitedAt: Date.now(),
         failure: `could not restart: ${e.message}`,
-        logs: [], pending: "", handle: null, pid: null,
+        logs: [], pending: "", pendingByStream: { stdout: "", stderr: "" }, handle: null, pid: null,
       });
     }
   }

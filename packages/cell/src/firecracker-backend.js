@@ -38,18 +38,24 @@ const HOST_KEY_PUB = HOST_KEY + ".pub";
 
 function sh(cmd, args, { timeoutMs = 30_000 } = {}) {
   return new Promise((resolve) => {
-    execFile(cmd, args, { timeout: timeoutMs },
-      (err, stdout, stderr) => resolve({
-        stdout: stdout ?? "", stderr: stderr ?? "",
-        code: err && typeof err.code === "number" ? err.code : err ? 1 : 0,
-      }));
+    let child;
+    try {
+      child = execFile(cmd, args, { timeout: timeoutMs },
+        (err, stdout, stderr) => resolve({
+          stdout: stdout ?? "", stderr: stderr ?? "",
+          code: err && typeof err.code === "number" ? err.code : err ? 1 : 0,
+        }));
+      child.on("error", () => { /* callback receives it; listener prevents unhandled error */ });
+    } catch (err) {
+      resolve({ stdout: "", stderr: err.message, code: 1 });
+    }
   });
 }
 
 function ensureHostKey() {
   if (fs.existsSync(HOST_KEY)) return;
   fs.mkdirSync(KEY_DIR, { recursive: true });
-  const r = require("child_process").spawnSync(
+  const r = spawnSync(
     "ssh-keygen", ["-t", "ed25519", "-N", "", "-f", HOST_KEY],
     { stdio: "ignore" }
   );
@@ -181,8 +187,10 @@ export class FirecrackerBackend {
     if (fs.existsSync(this.pidFile) && fs.existsSync(this.socketPath)) {
       const pid = parseInt(fs.readFileSync(this.pidFile, "utf8").trim(), 10);
       try {
-        process.kill(pid, 0);
-        return { state: "running", reaped: await this._reap() };
+        if (Number.isInteger(pid) && pid > 1) {
+          process.kill(pid, 0);
+          return { state: "running", reaped: await this._reap() };
+        }
       } catch { /* stale pidfile */ }
     }
 
@@ -316,6 +324,7 @@ export class FirecrackerBackend {
 `); onClose(); });
     proc.stdout.on("data", onData);
     proc.stderr.on("data", onData);
+    proc.on("error", onClose);
     proc.on("close", onClose);
     return {
       write(data) { try { proc.stdin.write(data); } catch {} },
@@ -348,6 +357,21 @@ export class FirecrackerBackend {
     return { host: GUEST_IP, port: Number(port) };
   }
 
+  async cleanup() {
+    this._boot = null;
+    try {
+      if (fs.existsSync(this.pidFile)) {
+        const pid = parseInt(fs.readFileSync(this.pidFile, "utf8").trim(), 10);
+        if (Number.isInteger(pid) && pid > 1) {
+          process.kill(pid, "SIGTERM");
+        }
+      }
+    } catch {}
+    for (const f of [this.socketPath, this.pidFile]) {
+      try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch {}
+    }
+  }
+
   async stop() {
     this._boot = null;
     // Best-effort snapshot so the next wake can restore.
@@ -355,7 +379,9 @@ export class FirecrackerBackend {
     try {
       if (fs.existsSync(this.pidFile)) {
         const pid = parseInt(fs.readFileSync(this.pidFile, "utf8").trim(), 10);
-        process.kill(pid, "SIGTERM");
+        if (Number.isInteger(pid) && pid > 1) {
+          process.kill(pid, "SIGTERM");
+        }
       }
     } catch {}
     return { state: "stopped" };
@@ -366,7 +392,9 @@ export class FirecrackerBackend {
     try {
       if (fs.existsSync(this.pidFile)) {
         const pid = parseInt(fs.readFileSync(this.pidFile, "utf8").trim(), 10);
-        process.kill(pid, "SIGKILL");
+        if (Number.isInteger(pid) && pid > 1) {
+          process.kill(pid, "SIGKILL");
+        }
       }
     } catch {}
     for (const f of [this.socketPath, this.pidFile]) {

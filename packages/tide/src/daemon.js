@@ -4,11 +4,20 @@
 // laptop and it appears in your Sandbox, with full history" (docs/05).
 
 import fs from "node:fs";
+import { IGNORE } from "./objects.js";
+
+function isIgnored(name) {
+  if (!name) return false;
+  const parts = String(name).split(/[/\\]/);
+  return parts.some((p) => IGNORE.has(p) || p === ".tide");
+}
 
 export async function runDaemon({ client, repo, workspace, dir, intervalMs = 2000, log = console.error }) {
-  let busy = false, queued = false;
+  let busy = false, queued = false, stopped = false;
+  let poll = null, debounce = null, watcher = null;
 
   async function sync() {
+    if (stopped) return;
     if (busy) { queued = true; return; }
     busy = true;
     try {
@@ -23,20 +32,40 @@ export async function runDaemon({ client, repo, workspace, dir, intervalMs = 200
       log("tide sync error:", e.message);
     } finally {
       busy = false;
-      if (queued) { queued = false; setTimeout(sync, 50); }
+      if (!stopped && queued) {
+        queued = false;
+        setTimeout(sync, 50);
+      }
     }
   }
 
   await sync();
 
-  let debounce = null;
-  const watcher = fs.watch(dir, { recursive: true }, (_ev, name) => {
-    if (name && String(name).startsWith(".tide")) return;
-    clearTimeout(debounce);
-    debounce = setTimeout(sync, 400);
-  });
-  const poll = setInterval(sync, intervalMs);
+  try {
+    watcher = fs.watch(dir, { recursive: true }, (_ev, name) => {
+      if (stopped) return;
+      if (isIgnored(name)) return;
+      clearTimeout(debounce);
+      debounce = setTimeout(() => { if (!stopped) sync(); }, 400);
+    });
+    watcher.on?.("error", (e) => {
+      log("tide watcher error:", e.message);
+    });
+  } catch (err) {
+    log("tide watcher unavailable, falling back to interval polling:", err.message);
+  }
+
+  poll = setInterval(() => { if (!stopped) sync(); }, intervalMs);
   log(`tide live · ${dir} ⇌ ${client.slug}/${workspace}  (ctrl-c to stop)`);
 
-  return { stop() { watcher.close(); clearInterval(poll); clearTimeout(debounce); } };
+  return {
+    sync,
+    isRunning: () => !stopped,
+    stop() {
+      stopped = true;
+      if (watcher) { try { watcher.close(); } catch {} }
+      if (poll) clearInterval(poll);
+      if (debounce) clearTimeout(debounce);
+    },
+  };
 }

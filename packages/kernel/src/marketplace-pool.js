@@ -29,7 +29,18 @@ class HostedServer {
 
   _ensure() {
     if (this.child && this.child.connected) return;
-    const child = fork(HOST_SCRIPT, [this.source], { stdio: ["ignore", "inherit", "inherit", "ipc"] });
+    let child;
+    try {
+      child = fork(HOST_SCRIPT, [this.source], { stdio: ["ignore", "inherit", "inherit", "ipc"] });
+    } catch (err) {
+      for (const p of this._pending.values()) {
+        clearTimeout(p.timer);
+        p.reject(new Error(`marketplace server failed to spawn: ${err.message}`));
+      }
+      this._pending.clear();
+      this.child = null;
+      throw new Error(`marketplace server failed to spawn: ${err.message}`);
+    }
     child.on("message", (msg) => {
       const p = this._pending.get(msg?.id);
       if (!p) return;
@@ -57,7 +68,7 @@ class HostedServer {
   }
 
   _send(op, tool, args, timeoutMs) {
-    this._ensure();
+    try { this._ensure(); } catch (e) { return Promise.reject(e); }
     const id = ++this._seq;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
