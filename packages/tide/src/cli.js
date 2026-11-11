@@ -126,7 +126,9 @@ async function cmdCheckout(args) {
 async function cmdExport(args) {
   const { cfg, repo } = localCtx();
   const snap = repo.exportWorkspace(cfg.workspace);
-  const out = args[0] || `${cfg.workspace}-snapshot.json`;
+  // Not into the working tree by default: the next mark would commit the
+  // snapshot, and the next export would carry it inside itself.
+  const out = args[0] || path.join(os.tmpdir(), `${cfg.workspace}-snapshot.json`);
   fs.writeFileSync(out, JSON.stringify(snap, null, 2));
   console.log(`exported ${cfg.workspace} → ${out}`);
 }

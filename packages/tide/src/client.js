@@ -9,7 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   reachable, exportObjects, readCommit, writeCommit, listTree, buildTreeFromDir,
-  commonAncestor, readFileFromTree, assertSafePath,
+  commonAncestor, readFileFromTree, assertSafePath, prepareWriteTarget,
 } from "./objects.js";
 import { merge3 } from "./merge.js";
 
@@ -108,8 +108,10 @@ export class TideClient {
         content = Buffer.from(merge3(b?.toString() ?? "", o.toString(), t.toString()).merged);
       }
 
-      const full = assertSafePath(ws.path, p);
-      if (content == null) { fs.rmSync(full, { force: true }); continue; }
+      if (content == null) { fs.rmSync(assertSafePath(ws.path, p), { force: true }); continue; }
+      // A path that is a file on one side and a directory on the other, or a
+      // symlink on disk, is cleared out of the way rather than written through.
+      const full = prepareWriteTarget(ws.path, p);
       fs.mkdirSync(path.dirname(full), { recursive: true });
       fs.writeFileSync(full, content);
     }

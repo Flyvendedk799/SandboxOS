@@ -21,10 +21,66 @@ export function assertSafeEntryName(name) {
   if (typeof name !== "string" || !name) {
     throw new Error(`path traversal forbidden: invalid entry name "${name}"`);
   }
-  if (name === "." || name === ".." || name.includes("/") || name.includes("\\") || name.includes("\0")) {
+  // A backslash separates directories only where the platform says it does;
+  // elsewhere it is a character a filename may contain, and refusing it made a
+  // workspace holding such a file impossible to mark at all.
+  const backslash = path.sep === "\\" && name.includes("\\");
+  if (name === "." || name === ".." || name.includes("/") || backslash || name.includes("\0")) {
     throw new Error(`path traversal forbidden: unsafe entry name "${name}"`);
   }
   return name;
+}
+
+const RESERVED = new Set([...IGNORE].map((n) => n.toLowerCase()));
+
+/** Names Tide never reads into a tree are names it must never write out of one.
+ *  A snapshot or a pushed tree that carries a `.git/config` or a `.tide/…` is
+ *  not a workspace's files — it is someone configuring the machine that checks
+ *  it out. Case-insensitive, because the filesystem may be. */
+export function assertNotReserved(relPath) {
+  for (const part of String(relPath).split(/[/\\]/)) {
+    if (RESERVED.has(part.toLowerCase())) {
+      throw new Error(`reserved name in path: "${relPath}"`);
+    }
+  }
+  return relPath;
+}
+
+/** A registry key (workspace name, state type): any label, but never one that
+ *  means something to a plain object. */
+export function assertSafeKey(key, what = "name") {
+  if (typeof key !== "string" || !key || key.includes("\0")) throw new Error(`invalid ${what}: "${key}"`);
+  if (key === "__proto__" || key === "constructor" || key === "prototype") throw new Error(`invalid ${what}: "${key}"`);
+  return key;
+}
+
+/**
+ * Resolve `relPath` under `baseDir` as somewhere a file may be written: inside
+ * the directory lexically (assertSafePath), not under a reserved name, and not
+ * *through* a symlink — a link already sitting in the target would otherwise
+ * carry the write, or a recursive delete, outside it. Whatever is in the way of
+ * the file itself (a link, a directory where a file goes, a file where a
+ * directory goes) is removed.
+ */
+export function prepareWriteTarget(baseDir, relPath) {
+  const target = assertSafePath(baseDir, relPath);
+  assertNotReserved(relPath);
+  const base = path.resolve(baseDir);
+  const parts = path.relative(base, target).split(path.sep).filter(Boolean);
+  let cur = base;
+  for (let i = 0; i < parts.length; i++) {
+    cur = path.join(cur, parts[i]);
+    let st;
+    try { st = fs.lstatSync(cur); } catch { break; } // nothing here on down
+    const last = i === parts.length - 1;
+    if (st.isSymbolicLink()) {
+      if (!last) throw new Error(`path crosses a symlink: "${relPath}"`);
+      fs.unlinkSync(cur);
+    } else if (last ? st.isDirectory() : !st.isDirectory()) {
+      fs.rmSync(cur, { recursive: true, force: true });
+    }
+  }
+  return target;
 }
 
 /** Assert that a path resolves strictly inside baseDir without path traversal. */
@@ -123,6 +179,7 @@ export function checkoutTree(store, treeHash, dir) {
   const wantNames = new Set();
   for (const e of want) {
     assertSafeEntryName(e.name);
+    assertNotReserved(e.name);
     wantNames.add(e.name);
   }
   for (const name of fs.readdirSync(normDir)) {
@@ -134,6 +191,14 @@ export function checkoutTree(store, treeHash, dir) {
   }
   for (const e of want) {
     const full = assertSafePath(normDir, e.name);
+    // What is already there may be the wrong kind of thing: a symlink (which a
+    // recursion or a write would follow out of the workspace), a file where a
+    // directory goes, or a directory where a file goes. It is replaced.
+    let st = null;
+    try { st = fs.lstatSync(full); } catch { /* nothing there */ }
+    if (st && (st.isSymbolicLink() || (e.type === "tree") !== st.isDirectory())) {
+      fs.rmSync(full, { recursive: true, force: true });
+    }
     if (e.type === "tree") checkoutTree(store, e.hash, full);
     else fs.writeFileSync(full, readObject(store, e.hash).buf);
   }
@@ -334,12 +399,36 @@ export function exportObjects(store, hashes) {
   });
 }
 
+const OBJECT_TYPES = new Set(["blob", "tree", "commit", "state"]);
+
+/** Every object a commit needs that the store does not have. */
+export function missingObjects(store, commitHash) {
+  const missing = [];
+  const seen = new Set();
+  const stack = [["commit", commitHash]];
+  while (stack.length) {
+    const [t, h] = stack.pop();
+    if (!h || seen.has(h)) continue;
+    seen.add(h);
+    if (typeof h !== "string" || !/^[0-9a-f]{64}$/.test(h) || !hasObject(store, h)) { missing.push(h); continue; }
+    if (t === "commit") {
+      const c = readCommit(store, h);
+      stack.push(["tree", c.tree]);
+      for (const p of c.parents ?? []) stack.push(["commit", p]);
+    } else if (t === "tree") {
+      for (const e of readTree(store, h)) stack.push([e.type === "tree" ? "tree" : "blob", e.hash]);
+    }
+  }
+  return missing;
+}
+
 /** Ingest transported objects, verifying each hash. */
 export function importObjects(store, objs) {
   if (!Array.isArray(objs)) return 0;
   for (const o of objs) {
-    if (!o || !o.payload || !o.hash || !o.type) {
-      throw new Error(`invalid object descriptor for import: ${JSON.stringify(o)}`);
+    // An empty file has an empty payload, and it is still a file.
+    if (!o || typeof o.payload !== "string" || typeof o.hash !== "string" || !OBJECT_TYPES.has(o.type)) {
+      throw new Error(`invalid object descriptor for import: ${JSON.stringify(o)?.slice(0, 200)}`);
     }
     const buf = Buffer.from(o.payload, "base64");
     const h = writeObject(store, o.type, buf);
@@ -427,6 +516,7 @@ export function restoreVolume(dir, volumePayload, { clean = false } = {}) {
       throw new Error(`invalid volume file entry: ${JSON.stringify(f)}`);
     }
     const safeTarget = assertSafePath(normDir, f.path);
+    assertNotReserved(f.path);
     const buf = Buffer.from(f.payload ?? "", "base64");
     if (f.sha256) {
       const digest = crypto.createHash("sha256").update(buf).digest("hex");
@@ -451,6 +541,7 @@ export function restoreVolume(dir, volumePayload, { clean = false } = {}) {
 
   // Second pass: write all verified files
   for (const item of validated) {
+    prepareWriteTarget(normDir, item.path);
     fs.mkdirSync(path.dirname(item.target), { recursive: true });
     fs.writeFileSync(item.target, item.buf);
     totalBytes += item.buf.length;

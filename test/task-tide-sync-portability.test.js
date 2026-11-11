@@ -6,6 +6,7 @@
 //  - C2: Workspace state serialization/deserialization, volume export/restore without corruption or path traversal.
 //  - C3: Tide core primitives, branch/mark tracking, and full workspace export and restore without data loss.
 
+import "./_setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -16,10 +17,10 @@ import crypto from "node:crypto";
 import {
   writeBlob, writeTree, buildTreeFromDir, diffTrees, diffTreesDetailed, summarizeDiff,
   assertSafePath, exportVolume, restoreVolume,
-} from "./objects.js";
-import { Repo } from "./repo.js";
-import { TideClient } from "./client.js";
-import { runDaemon } from "./daemon.js";
+} from "../packages/tide/src/objects.js";
+import { Repo } from "../packages/tide/src/repo.js";
+import { TideClient } from "../packages/tide/src/client.js";
+import { runDaemon } from "../packages/tide/src/daemon.js";
 
 const tmp = (tag = "tide-p") => path.join(os.tmpdir(), `${tag}-${crypto.randomUUID().slice(0, 8)}`);
 const write = (dir, relPath, content) => {
@@ -753,4 +754,101 @@ test("live mirror daemon starts, executes sync, responds to lifecycle stop clean
   const pushCountBefore = pushed;
   await daemon.sync();
   assert.equal(pushed, pushCountBefore);
+});
+
+// ── review follow-ups ────────────────────────────────────────────────────────
+
+test("a workspace with an empty file exports and restores", () => {
+  const src = new Repo(tmp("tide-empty-src"));
+  const dir = tmp("tide-empty-wd");
+  src.init("ws", dir);
+  fs.writeFileSync(path.join(dir, "__init__.py"), "");
+  fs.writeFileSync(path.join(dir, "a.txt"), "a");
+  src.mark("ws", { message: "with an empty file" });
+  const snap = src.exportWorkspace("ws");
+
+  const dst = new Repo(tmp("tide-empty-dst"));
+  const out = tmp("tide-empty-out");
+  dst.restoreWorkspace("ws", snap, { workdir: out });
+  assert.equal(fs.readFileSync(path.join(out, "__init__.py"), "utf8"), "");
+  assert.equal(fs.readFileSync(path.join(out, "a.txt"), "utf8"), "a");
+});
+
+test("a tree that carries .git or .tide is refused at checkout, not written", async () => {
+  const { writeBlob, writeTree, checkoutTree, restoreVolume } = await import("../packages/tide/src/objects.js");
+  const store = tmp("tide-resv-store");
+  const blob = writeBlob(store, Buffer.from("[core]\n\tfsmonitor = evil\n"));
+  const inner = writeTree(store, [{ name: "config", type: "blob", hash: blob }]);
+  for (const name of [".git", ".GIT", ".tide"]) {
+    const root = writeTree(store, [{ name, type: "tree", hash: inner }]);
+    const dir = tmp("tide-resv-wd");
+    assert.throws(() => checkoutTree(store, root, dir), /reserved name/);
+    assert.equal(fs.existsSync(path.join(dir, name, "config")), false);
+  }
+  const dir = tmp("tide-resv-vol");
+  assert.throws(
+    () => restoreVolume(dir, { files: [{ path: ".git/config", payload: Buffer.from("x").toString("base64") }] }),
+    /reserved name/,
+  );
+});
+
+test("a restore missing one object changes nothing", () => {
+  const src = new Repo(tmp("tide-atomic-src"));
+  const dir = tmp("tide-atomic-wd");
+  src.init("ws", dir);
+  fs.writeFileSync(path.join(dir, "a.txt"), "alpha");
+  fs.writeFileSync(path.join(dir, "b.txt"), "beta");
+  src.mark("ws", { message: "two files" });
+  const snap = src.exportWorkspace("ws");
+  // Drop one blob and re-seal the snapshot, as a truncated-but-consistent export would be.
+  const victim = snap.objects.findIndex((o) => o.type === "blob");
+  snap.objects.splice(victim, 1);
+  delete snap.integrity;
+  snap.integrity = crypto.createHash("sha256").update(JSON.stringify(snap)).digest("hex");
+
+  const dst = new Repo(tmp("tide-atomic-dst"));
+  const out = tmp("tide-atomic-out");
+  assert.throws(() => dst.restoreWorkspace("ws", snap, { workdir: out }), /snapshot incomplete/);
+  assert.equal(dst.has("ws"), false, "no workspace is registered");
+  assert.equal(fs.existsSync(out) ? fs.readdirSync(out).length : 0, 0, "no partial tree is left behind");
+});
+
+test("checkout replaces a symlink and a wrong-typed entry instead of writing through them", { skip: process.platform === "win32" }, async () => {
+  const { writeBlob, writeTree, checkoutTree, restoreVolume } = await import("../packages/tide/src/objects.js");
+  const store = tmp("tide-link-store");
+  const outside = tmp("tide-link-outside");
+  fs.mkdirSync(outside, { recursive: true });
+  fs.writeFileSync(path.join(outside, "keep.txt"), "mine");
+
+  const blob = writeBlob(store, Buffer.from("x"));
+  const sub = writeTree(store, [{ name: "f.txt", type: "blob", hash: blob }]);
+  const root = writeTree(store, [{ name: "link", type: "tree", hash: sub }, { name: "was-dir", type: "blob", hash: blob }]);
+
+  const dir = tmp("tide-link-wd");
+  fs.mkdirSync(path.join(dir, "was-dir"), { recursive: true });
+  fs.symlinkSync(outside, path.join(dir, "link"));
+  checkoutTree(store, root, dir);
+  assert.equal(fs.readFileSync(path.join(outside, "keep.txt"), "utf8"), "mine", "nothing outside the workspace was deleted");
+  assert.equal(fs.existsSync(path.join(outside, "f.txt")), false, "nothing was written through the link");
+  assert.equal(fs.lstatSync(path.join(dir, "link")).isDirectory(), true);
+  assert.equal(fs.readFileSync(path.join(dir, "was-dir"), "utf8"), "x", "a directory where a file goes is replaced");
+
+  const vol = tmp("tide-link-vol");
+  fs.mkdirSync(vol, { recursive: true });
+  fs.symlinkSync(outside, path.join(vol, "link"));
+  assert.throws(
+    () => restoreVolume(vol, { files: [{ path: "link/pwn.txt", payload: Buffer.from("x").toString("base64") }] }),
+    /crosses a symlink/,
+  );
+  assert.equal(fs.existsSync(path.join(outside, "pwn.txt")), false);
+});
+
+test("names a filesystem allows are names Tide can mark, and registry keys are not paths", { skip: process.platform === "win32" }, () => {
+  const repo = new Repo(tmp("tide-names-store"));
+  const dir = tmp("tide-names-wd");
+  repo.init("team/app", dir);
+  fs.writeFileSync(path.join(dir, "a\\b.txt"), "backslash");
+  assert.doesNotThrow(() => repo.mark("team/app", { message: "a backslash in a name" }));
+  assert.doesNotThrow(() => repo.putState("team/app", "agents/planner", { ok: true }));
+  assert.throws(() => repo.init("__proto__", tmp("tide-names-x")), /invalid workspace name/);
 });

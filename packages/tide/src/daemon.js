@@ -9,7 +9,7 @@ import { IGNORE } from "./objects.js";
 function isIgnored(name) {
   if (!name) return false;
   const parts = String(name).split(/[/\\]/);
-  return parts.some((p) => IGNORE.has(p) || p.startsWith(".tide"));
+  return parts.some((p) => IGNORE.has(p) || p === ".tide");
 }
 
 export async function runDaemon({ client, repo, workspace, dir, intervalMs = 2000, log = console.error }) {

@@ -12,7 +12,7 @@ import crypto from "node:crypto";
 import {
   buildTreeFromDir, checkoutTree, diffTrees, summarizeDiff, writeCommit, readCommit,
   reachable, exportObjects, importObjects, isAncestor, writeState, readState,
-  hasObject, readObject, assertSafePath, assertSafeEntryName, buildVolumeManifest,
+  hasObject, readObject, assertSafePath, assertSafeEntryName, assertSafeKey, missingObjects, buildVolumeManifest,
   exportVolume, restoreVolume, IGNORE,
 } from "./objects.js";
 
@@ -39,7 +39,7 @@ export class Repo {
 
   /** Register a workspace at a working dir (idempotent). */
   init(name, workdir) {
-    assertSafeEntryName(name);
+    assertSafeKey(name, "workspace name");
     const reg = this.registry();
     if (!reg[name]) {
       reg[name] = {
@@ -147,7 +147,7 @@ export class Repo {
   _resolveCommit(name, ref) {
     if (!ref) return null;
     const ws = this.get(name);
-    if (ws.branches && ws.branches[ref]) return ws.branches[ref];
+    if (ws.branches && Object.prototype.hasOwnProperty.call(ws.branches, ref)) return ws.branches[ref];
     return ref;
   }
 
@@ -261,7 +261,7 @@ export class Repo {
 
   /** Store a typed JSON state object (env, manifest, agents, …) for a workspace. */
   putState(name, type, data) {
-    assertSafeEntryName(type);
+    assertSafeKey(type, "state type");
     const ws = this.get(name);
     const hash = writeState(this.store, data);
     const reg = this.registry();
@@ -410,17 +410,38 @@ export class Repo {
       }
     }
 
-    // 2. Initialize workspace in registry
+    // Everything every ref needs has to be here before anything is touched: a
+    // snapshot missing one blob used to fail half-way through the checkout,
+    // leaving a registered workspace, a head, and part of a tree.
+    const refs = new Set([snapshot.head, ...Object.values(snapshot.branches ?? {})].filter(Boolean));
+    for (const ref of refs) {
+      const missing = missingObjects(this.store, ref);
+      if (missing.length) {
+        throw new Error(`snapshot incomplete: ${missing.length} object(s) missing for ref "${ref}" (first: ${missing[0]})`);
+      }
+    }
+    for (const type of Object.keys(snapshot.states && typeof snapshot.states === "object" ? snapshot.states : {})) {
+      assertSafeKey(type, "state type");
+    }
+
+    // 2. Restore the working tree from the head commit — the step that can
+    //    still fail, so it goes before the registry says the workspace exists.
+    if (snapshot.head) {
+      const commit = readCommit(this.store, snapshot.head);
+      checkoutTree(this.store, commit.tree, targetWorkdir);
+    }
+
+    // 3. Initialize workspace in registry
     this.init(name, targetWorkdir);
 
-    // 3. Restore all typed state objects
+    // 4. Restore all typed state objects
     if (snapshot.states && typeof snapshot.states === "object") {
       for (const [type, data] of Object.entries(snapshot.states)) {
         this.putState(name, type, data);
       }
     }
 
-    // 4. Restore branches & head
+    // 5. Restore branches & head
     const branches = { ...(snapshot.branches ?? {}) };
     const currentBranch = snapshot.currentBranch ?? "main";
     if (snapshot.head && !branches[currentBranch]) {
@@ -430,12 +451,6 @@ export class Repo {
       currentBranch,
       branches,
     });
-
-    // 5. Restore volume working tree from commit head
-    if (snapshot.head) {
-      const commit = readCommit(this.store, snapshot.head);
-      checkoutTree(this.store, commit.tree, targetWorkdir);
-    }
 
     return {
       workspace: name,
