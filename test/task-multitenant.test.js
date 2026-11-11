@@ -31,7 +31,9 @@ async function postJson(path, body, headers = {}) {
     headers: { "Content-Type": "application/json", "X-Forwarded-For": nextIp(), ...headers },
     body: JSON.stringify(body),
   });
-  return { status: res.status, data: await res.json(), headers: res.headers };
+  // The session is the cookie; nothing echoes it into a body a script could read.
+  const token = /sbx_session=([^;]+)/.exec(res.headers.get("set-cookie") ?? "")?.[1] ?? null;
+  return { status: res.status, data: await res.json(), headers: res.headers, token };
 }
 
 async function getJson(path, headers = {}) {
@@ -60,7 +62,7 @@ test("C1: POST /signup succeeds with valid credentials and returns token and slu
   const res = await postJson("/signup", { username, password });
   assert.equal(res.status, 200);
   assert.equal(res.data.ok, true);
-  assert.ok(typeof res.data.token === "string" && res.data.token.length > 0);
+  assert.ok(typeof res.token === "string" && res.token.length > 0);
   assert.ok(typeof res.data.slug === "string" && res.data.slug.length > 0);
   assert.equal(res.data.username, username);
 });
@@ -99,7 +101,7 @@ test("C1: POST /login handles valid login and invalid/missing parameters without
   const loginRes = await postJson("/login", { username, password });
   assert.equal(loginRes.status, 200);
   assert.equal(loginRes.data.ok, true);
-  assert.ok(typeof loginRes.data.token === "string");
+  assert.ok(typeof loginRes.token === "string");
   assert.ok(typeof loginRes.data.slug === "string");
 
   // Invalid password -> 401
@@ -128,7 +130,7 @@ test("C1: Profile management operates without 500 errors", async () => {
   const username = `profile_user_${Date.now()}`;
   const password = "ValidPassword123!";
   const signup = await postJson("/signup", { username, password });
-  const authHeader = { Authorization: `Bearer ${signup.data.token}` };
+  const authHeader = { Authorization: `Bearer ${signup.token}` };
 
   // GET /api/profile
   const getProf = await getJson("/api/profile", authHeader);
@@ -161,7 +163,7 @@ test("C2: Quota limits configuration and live reporting via GET/POST /api/quota"
   const username = `quota_user_${Date.now()}`;
   const password = "ValidPassword123!";
   const signup = await postJson("/signup", { username, password });
-  const authHeader = { Authorization: `Bearer ${signup.data.token}` };
+  const authHeader = { Authorization: `Bearer ${signup.token}` };
 
   // Check default quota
   const defaultQuota = await getJson("/api/quota", authHeader);
@@ -193,7 +195,7 @@ test("C2: Strictly enforce max_sandboxes quota on sandbox creation", async () =>
   const username = `sb_quota_user_${Date.now()}`;
   const password = "ValidPassword123!";
   const signup = await postJson("/signup", { username, password });
-  const authHeader = { Authorization: `Bearer ${signup.data.token}` };
+  const authHeader = { Authorization: `Bearer ${signup.token}` };
 
   // Set max_sandboxes to 2 (user already has 1 sandbox from signup)
   await postJson("/api/quota", { maxSandboxes: 2 }, authHeader);
@@ -216,7 +218,7 @@ test("C2: Strictly enforce max_agents quota on agent spawning", async () => {
   const username = `ag_quota_user_${Date.now()}`;
   const password = "ValidPassword123!";
   const signup = await postJson("/signup", { username, password });
-  const authHeader = { Authorization: `Bearer ${signup.data.token}` };
+  const authHeader = { Authorization: `Bearer ${signup.token}` };
   const userSlug = signup.data.slug;
 
   // Set max_agents to 1
@@ -255,7 +257,7 @@ test("C3: Organization team access endpoints (GET /api/team, POST /api/team, DEL
   const username = `org_admin_${Date.now()}`;
   const password = "ValidPassword123!";
   const signup = await postJson("/signup", { username, password });
-  const authHeader = { Authorization: `Bearer ${signup.data.token}` };
+  const authHeader = { Authorization: `Bearer ${signup.token}` };
 
   // GET /api/team -> initially includes the signup admin user
   const initialTeam = await getJson("/api/team", authHeader);
@@ -289,7 +291,7 @@ test("C3: Organization team access endpoints (GET /api/team, POST /api/team, DEL
   const memberLogin = await postJson("/login", { username: memberUser, password: memberPass });
   assert.equal(memberLogin.status, 200);
   assert.equal(memberLogin.data.ok, true);
-  const memberAuth = { Authorization: `Bearer ${memberLogin.data.token}` };
+  const memberAuth = { Authorization: `Bearer ${memberLogin.token}` };
 
   // Authorization check: non-admin member cannot add new team members (403)
   const nonAdminAdd = await postJson(
@@ -340,7 +342,7 @@ test("C3: Vanity domain management, resolution, and request routing", async () =
   const username = `vanity_owner_${Date.now()}`;
   const password = "ValidPassword123!";
   const signup = await postJson("/signup", { username, password });
-  const authHeader = { Authorization: `Bearer ${signup.data.token}` };
+  const authHeader = { Authorization: `Bearer ${signup.token}` };
   const userSlug = signup.data.slug;
 
   const vanityDomain = `client-app-${Date.now().toString(36)}.example.com`;
@@ -358,7 +360,7 @@ test("C3: Vanity domain management, resolution, and request routing", async () =
   // Duplicate vanity domain assignment is rejected with 409
   // Create another tenant to try stealing this vanity domain
   const user2 = await postJson("/signup", { username: `user2_${Date.now()}`, password: "ValidPassword123!" });
-  const auth2 = { Authorization: `Bearer ${user2.data.token}` };
+  const auth2 = { Authorization: `Bearer ${user2.token}` };
   const dupeDom = await postJson(
     `/api/sandboxes/${user2.data.slug}/domain`,
     { domain: vanityDomain },
@@ -382,7 +384,17 @@ test("C3: Vanity domain management, resolution, and request routing", async () =
   assert.equal(resolveMiss.data.ok, false);
 
   // Vanity Host routing: sending Host: <vanityDomain> to the gateway
-  // Requesting /mcp on vanity host routes directly into userSlug
+  // Requesting /mcp on vanity host routes directly into userSlug. fetch will not
+  // send a Host of our choosing, so the test stands in for a trusted proxy —
+  // which is also the only time X-Forwarded-Host is believed.
+  const unrouted = await postJson(
+    "/mcp",
+    { server: "proc", tool: "exec", args: { cmd: "echo no" } },
+    { ...authHeader, "X-Forwarded-Host": vanityDomain }
+  );
+  assert.notEqual(unrouted.status, 200, "without a trusted proxy, X-Forwarded-Host routes nothing");
+  process.env.SANDBOXOS_TRUST_PROXY = "1";
+  try {
   const mcpOnVanity = await postJson(
     "/mcp",
     { server: "proc", tool: "exec", args: { cmd: "echo routed-via-vanity-host" } },
@@ -408,15 +420,17 @@ test("C3: Vanity domain management, resolution, and request routing", async () =
   const healthOnSub = await getJson("/health", { Host: subHost, "X-Forwarded-Host": subHost });
   assert.equal(healthOnSub.status, 200);
   assert.equal(healthOnSub.data.ok, true);
-
-  delete process.env.SANDBOXOS_DOMAIN;
+  } finally {
+    delete process.env.SANDBOXOS_DOMAIN;
+    delete process.env.SANDBOXOS_TRUST_PROXY;
+  }
 });
 
 test("C3: Live usage reporting in GET /api/stats and GET /api/quota", async () => {
   const username = `stats_user_${Date.now()}`;
   const password = "ValidPassword123!";
   const signup = await postJson("/signup", { username, password });
-  const authHeader = { Authorization: `Bearer ${signup.data.token}` };
+  const authHeader = { Authorization: `Bearer ${signup.token}` };
 
   const statsRes = await getJson("/api/stats", authHeader);
   assert.equal(statsRes.status, 200);
@@ -434,7 +448,7 @@ test("C2: Quota door validation rejects invalid parameter values with 400 naming
   const username = `quota_val_user_${Date.now()}`;
   const password = "ValidPassword123!";
   const signup = await postJson("/signup", { username, password });
-  const authHeader = { Authorization: `Bearer ${signup.data.token}` };
+  const authHeader = { Authorization: `Bearer ${signup.token}` };
 
   const badCases = [
     { payload: { maxSandboxes: -1 }, field: "maxSandboxes" },
@@ -483,7 +497,7 @@ test("C3: Vanity domain door validation rejects invalid domains with 400 and dup
   const username = `domain_val_user_${Date.now()}`;
   const password = "ValidPassword123!";
   const signup = await postJson("/signup", { username, password });
-  const authHeader = { Authorization: `Bearer ${signup.data.token}` };
+  const authHeader = { Authorization: `Bearer ${signup.token}` };
   const userSlug = signup.data.slug;
 
   process.env.SANDBOXOS_DOMAIN = "sbx.test";
@@ -549,7 +563,7 @@ test("C1: Profile update rejects duplicate tenant name with 409", async () => {
   const user2 = `tenant_two_${Date.now()}`;
   const signup2 = await postJson("/signup", { username: user2, password: pass });
   assert.equal(signup2.status, 200);
-  const auth2 = { Authorization: `Bearer ${signup2.data.token}` };
+  const auth2 = { Authorization: `Bearer ${signup2.token}` };
 
   // User 2 attempts to rename their tenant to User 1's tenant name
   const renameRes = await postJson(
@@ -560,4 +574,81 @@ test("C1: Profile update rejects duplicate tenant name with 409", async () => {
   assert.equal(renameRes.status, 409, `Expected 409 on duplicate tenant name, got ${renameRes.status}`);
   assert.equal(renameRes.data.ok, false);
   assert.ok(renameRes.data.error.includes("already in use"));
+});
+
+// ── review follow-ups: a member is not the tenant, and a name is not an identity ──
+
+test("a team member without admin authority cannot administer the organization", async () => {
+  const admin = await postJson("/signup", { username: `boss_${Date.now()}`, password: "ValidPassword123!" });
+  const adminAuth = { Authorization: `Bearer ${admin.token}` };
+  const memberUser = `hand_${Date.now()}`;
+  const added = await postJson("/api/team", { username: memberUser, password: "MemberPass123!" }, adminAuth);
+  assert.equal(added.status, 201);
+  const member = await postJson("/login", { username: memberUser, password: "MemberPass123!" });
+  const memberAuth = { Authorization: `Bearer ${member.token}` };
+
+  const second = await postJson("/api/sandboxes", { slug: `spare-${Date.now().toString(36)}` }, adminAuth);
+  assert.equal(second.status, 200);
+
+  const quota = await postJson("/api/quota", { maxRunning: 0 }, memberAuth);
+  assert.equal(quota.status, 403, "a member cannot rewrite the tenant's quota");
+  const rename = await postJson("/api/profile", { tenantName: `taken-over-${Date.now()}` }, memberAuth);
+  assert.equal(rename.status, 403, "a member cannot rename the tenant");
+  const domain = await postJson(`/api/sandboxes/${admin.data.slug}/domain`, { domain: `m-${Date.now()}.example.com` }, memberAuth);
+  assert.equal(domain.status, 403, "a member cannot point a domain at the tenant's Sandbox");
+  const del = await deleteJson(`/api/sandboxes/${second.data.slug}`, memberAuth);
+  assert.equal(del.status, 403, "a member cannot delete a Sandbox they hold nothing on");
+
+  assert.equal((await postJson("/api/quota", { maxRunning: 3 }, adminAuth)).status, 200, "the admin still can");
+  const weak = await postJson("/api/team", { username: `w_${Date.now()}`, password: "x" }, adminAuth);
+  assert.equal(weak.status, 400, "a team member's password is held to the signup minimum");
+});
+
+test("a member who has used the product can still be removed", async () => {
+  const { createConversation, getSandboxBySlug } = await import("../packages/control-db/src/registry.js");
+  const admin = await postJson("/signup", { username: `lead_${Date.now()}`, password: "ValidPassword123!" });
+  const adminAuth = { Authorization: `Bearer ${admin.token}` };
+  const added = await postJson("/api/team", { username: `leaver_${Date.now()}`, password: "MemberPass123!" }, adminAuth);
+  const sb = getSandboxBySlug(admin.data.slug);
+  createConversation(sb.id, added.data.member.id, "notes");
+  const removed = await deleteJson(`/api/team/${added.data.member.id}`, adminAuth);
+  assert.equal(removed.status, 200, JSON.stringify(removed.data));
+});
+
+test("renaming a tenant to the seed tenant's name does not make it the operator", async () => {
+  const { config } = await import("../packages/config/src/config.js");
+  const { ensureSeed: seed, updateTenantName, getTenant, isOperator, getPrincipal } = await import("../packages/control-db/src/registry.js");
+  const { tenant: seedTenant, owner: seedOwner } = seed("local");
+  const attacker = await postJson("/signup", { username: `mallory_${Date.now()}`, password: "ValidPassword123!" });
+  const attackerAuth = { Authorization: `Bearer ${attacker.token}` };
+  const team = await getJson("/api/team", attackerAuth);
+  const attackerId = team.data.members[0].id;
+
+  // The seed tenant's admin renames it, freeing the name…
+  const original = getTenant(seedTenant.id).name;
+  updateTenantName(seedTenant.id, `renamed-${Date.now()}`);
+  try {
+    // …and the name still cannot be taken, nor would taking it matter.
+    const grab = await postJson("/api/profile", { tenantName: config.seed.tenantName }, attackerAuth);
+    assert.equal(grab.status, 409);
+    const again = seed("local");
+    assert.equal(again.owner.id, seedOwner.id, "the seed owner is found by the seed Sandbox, not by a name");
+    assert.equal(isOperator(attackerId), false);
+    assert.equal(getPrincipal(attackerId).tenant_id !== seedTenant.id, true);
+  } finally {
+    updateTenantName(seedTenant.id, original);
+  }
+});
+
+test("a tenant cannot claim the gateway's own hostname as a vanity domain", async () => {
+  const user = await postJson("/signup", { username: `squat_${Date.now()}`, password: "ValidPassword123!" });
+  const auth = { Authorization: `Bearer ${user.token}` };
+  process.env.SANDBOXOS_PUBLIC_HOSTS = "os.example.org";
+  try {
+    const res = await postJson(`/api/sandboxes/${user.data.slug}/domain`, { domain: "os.example.org" }, auth);
+    assert.equal(res.status, 400);
+    assert.match(res.data.error, /gateway itself/);
+  } finally {
+    delete process.env.SANDBOXOS_PUBLIC_HOSTS;
+  }
 });

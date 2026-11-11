@@ -346,6 +346,19 @@ function requireOperator(principal) {
   return !!principal && isOperator(principal.id);
 }
 
+/** Who may change what the whole tenant lives under — its name, its quota, its
+ *  domains, its team. The tenant's admin (or an operator), and a device token
+ *  that holds everything on the tenant's primary Sandbox: that is what `sbx`
+ *  logs in as, and only someone with that authority could have minted it. A
+ *  member the admin merely added holds neither. */
+function canAdministerTenant(principal) {
+  if (!principal) return false;
+  if (isTenantAdmin(principal.id)) return true;
+  if (principal.kind !== "machine") return false;
+  const primary = getPrimarySandboxForTenant(principal.tenant_id);
+  return !!primary && grantsFor(principal.id, primary.id).includes("*");
+}
+
 async function profileResponse(principal) {
   const tenant = getTenant(principal.tenant_id);
   const profile = getTenantProfile(principal.tenant_id);
@@ -419,9 +432,35 @@ function authRateLimited(req) {
 // the rest of the handler works identically to path-based routing.
 const GLOBAL_RESERVED = new Set(["health", "login", "logout", "signup", "static", "favicon.ico", "api"]);
 
+/** The host a request was addressed to. `X-Forwarded-Host` is a client-settable
+ *  header, so it is believed only when the operator says a proxy is in front
+ *  (SANDBOXOS_TRUST_PROXY=1) — otherwise any client could choose its own route. */
+function requestHost(req) {
+  const trustProxy = /^(1|true|yes)$/i.test(process.env.SANDBOXOS_TRUST_PROXY ?? "");
+  const forwarded = trustProxy ? req.headers["x-forwarded-host"] : null;
+  const hostHeader = String(forwarded ?? req.headers.host ?? "").split(",")[0].trim().toLowerCase();
+  // Strip the port; a bracketed IPv6 literal keeps its colons.
+  return hostHeader.startsWith("[") ? hostHeader.slice(0, hostHeader.indexOf("]") + 1) : hostHeader.split(":")[0];
+}
+
+/** Hosts that are the Gateway itself and so can never be a tenant's vanity
+ *  domain: the configured domain, any the operator lists, and the one this very
+ *  request arrived on. Without this a tenant could claim the Gateway's own
+ *  hostname and have every other tenant's requests routed into their Sandbox. */
+function gatewayHosts(req) {
+  const hosts = new Set();
+  for (const h of (process.env.SANDBOXOS_PUBLIC_HOSTS ?? "").split(",")) {
+    if (h.trim()) hosts.add(h.trim().toLowerCase());
+  }
+  const configured = (process.env.SANDBOXOS_DOMAIN ?? "").trim().toLowerCase();
+  if (configured) hosts.add(configured);
+  const here = req ? requestHost(req) : "";
+  if (here) hosts.add(here);
+  return hosts;
+}
+
 function extractSubdomainSlug(req) {
-  const hostHeader = (req.headers["x-forwarded-host"] ?? req.headers.host ?? "").split(",")[0];
-  const host = hostHeader.split(":")[0].toLowerCase().trim();
+  const host = requestHost(req);
   if (!host) return null;
   const configuredDomain = (process.env.SANDBOXOS_DOMAIN ?? "").trim().toLowerCase();
   if (configuredDomain) {
@@ -431,9 +470,22 @@ function extractSubdomainSlug(req) {
       if (sub && SLUG_RE.test(sub)) return sub;
     }
   }
+  // The Gateway's own names are never vanity-routed, whatever a row says.
+  if (gatewayHosts(null).has(host)) return null;
   const vanity = getSandboxByVanityDomain(host);
   if (vanity) return vanity.slug;
   return null;
+}
+
+/** A vanity domain a tenant may claim, or a thrown 400. */
+function claimableVanityDomain(req, domain) {
+  const clean = validateVanityDomain(domain);
+  if (clean && gatewayHosts(req).has(clean)) {
+    const err = new Error("invalid domain: that host is the gateway itself");
+    err.statusCode = 400;
+    throw err;
+  }
+  return clean;
 }
 
 async function handle(req, res) {
@@ -476,14 +528,14 @@ async function handle(req, res) {
       if (!sb) return sendJson(res, 500, { ok: false, error: "no sandbox for account" });
       const token = createSession(principal.id, "session");
       res.setHeader("Set-Cookie", `sbx_session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`);
-      return sendJson(res, 200, { ok: true, slug: sb.slug, username, token });
+      return sendJson(res, 200, { ok: true, slug: sb.slug, username });
     }
     // Legacy single-password login.
     if (!password || password !== config.password) return sendJson(res, 401, { ok: false, error: "wrong password" });
     const { owner, sandbox } = ensureSeed(config.cellBackend === "local" ? "local" : config.cellBackend);
     const token = createSession(owner.id, "session");
     res.setHeader("Set-Cookie", `sbx_session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`);
-    return sendJson(res, 200, { ok: true, slug: sandbox.slug, token });
+    return sendJson(res, 200, { ok: true, slug: sandbox.slug });
   }
   if (top === "logout" && req.method === "POST") {
     revokeSession(cookies(req).sbx_session);
@@ -508,7 +560,7 @@ async function handle(req, res) {
       seedVolume(sandbox); // an empty machine is an uninformative first impression
       const token = createSession(acc.principalId, "session");
       res.setHeader("Set-Cookie", `sbx_session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`);
-      return sendJson(res, 200, { ok: true, slug: sandbox.slug, username, token });
+      return sendJson(res, 200, { ok: true, slug: sandbox.slug, username });
     } catch (e) {
       return sendJson(res, 409, { ok: false, error: e.message });
     }
@@ -585,18 +637,22 @@ async function handle(req, res) {
         }
       }
 
-      if (name != null) {
-        if (typeof name !== "string") return sendJson(res, 400, { ok: false, error: "name must be a string" });
-        updatePrincipalName(principal.id, name.trim());
-      }
+      // Everything is checked before anything is written, so a refused rename
+      // does not leave half the request applied.
+      if (name != null && typeof name !== "string") return sendJson(res, 400, { ok: false, error: "name must be a string" });
       if (tenantName != null) {
         if (typeof tenantName !== "string") return sendJson(res, 400, { ok: false, error: "tenantName must be a string" });
+        // The tenant's name belongs to the tenant, not to each of its members.
+        if (!canAdministerTenant(principal)) {
+          return sendJson(res, 403, { ok: false, error: "admin authority required to rename the organization" });
+        }
         try {
           updateTenantName(principal.tenant_id, tenantName.trim());
         } catch (err) {
           return sendJson(res, err.statusCode ?? 409, { ok: false, error: err.message });
         }
       }
+      if (name != null) updatePrincipalName(principal.id, name.trim());
 
       // A subscription provider has no key to store: its credential is an OAuth login
       // held under /api/claude-code (or the host's own CLI). Quietly ignoring a key sent
@@ -739,6 +795,11 @@ async function handle(req, res) {
       if (targetTenant !== principal.tenant_id && !requireOperator(principal)) {
         return sendJson(res, 403, { ok: false, error: "operator authority required to modify another tenant's quota" });
       }
+      // A tenant has members now, and a member is not the tenant: only its admin
+      // (or an operator) sets the limits everyone in it lives under.
+      if (!canAdministerTenant(principal)) {
+        return sendJson(res, 403, { ok: false, error: "admin authority required to modify the organization's quota" });
+      }
       try {
         const updated = setQuota(targetTenant, { maxSandboxes, maxAgents, maxRunning, memMb, cpuShares, maxDiskMb, networkEgress });
         const usage = {
@@ -764,15 +825,15 @@ async function handle(req, res) {
       return sendJson(res, 200, { ok: true, members });
     }
     if (req.method === "POST" && !segments[3]) {
-      if (!isTenantAdmin(principal.id)) {
+      if (!canAdministerTenant(principal)) {
         return sendJson(res, 403, { ok: false, error: "admin or operator authority required to add team members" });
       }
       const body = await readBody(req);
       const username = typeof body?.username === "string" ? body.username.trim() : "";
       const password = typeof body?.password === "string" ? body.password : "";
       const name = typeof body?.name === "string" ? body.name.trim() : null;
-      if (!username || !password) {
-        return sendJson(res, 400, { ok: false, error: "username and password required" });
+      if (username.length < 2 || password.length < 8) {
+        return sendJson(res, 400, { ok: false, error: "username (min 2 chars) and password (min 8 chars) required" });
       }
       try {
         const member = createTeamMember(principal.tenant_id, { username, password, name });
@@ -782,7 +843,7 @@ async function handle(req, res) {
       }
     }
     if (req.method === "DELETE" && segments[3]) {
-      if (!isTenantAdmin(principal.id)) {
+      if (!canAdministerTenant(principal)) {
         return sendJson(res, 403, { ok: false, error: "admin or operator authority required to remove team members" });
       }
       const targetId = segments[3];
@@ -894,9 +955,12 @@ async function handle(req, res) {
     if (!sb || sb.tenant_id !== principal.tenant_id)
       return sendJson(res, 404, { ok: false, error: "sandbox not found" });
     const { domain, vanityDomain } = await readBody(req);
+    if (!canAdministerTenant(principal)) {
+      return sendJson(res, 403, { ok: false, error: "admin authority required to set a vanity domain" });
+    }
     const targetDomain = vanityDomain !== undefined ? vanityDomain : domain;
     try {
-      const result = setSandboxVanityDomain(sb.id, targetDomain ?? null);
+      const result = setSandboxVanityDomain(sb.id, claimableVanityDomain(req, targetDomain ?? null));
       return sendJson(res, 200, { ok: true, slug: sb.slug, vanityDomain: result.vanityDomain });
     } catch (e) {
       const code = e.statusCode ?? (e.message.includes("already in use") ? 409 : 400);
@@ -911,6 +975,10 @@ async function handle(req, res) {
     const sb = getSandboxBySlug(segments[3]);
     if (!sb || sb.tenant_id !== principal.tenant_id)
       return sendJson(res, 404, { ok: false, error: "sandbox not found" });
+    // Being in the tenant is not owning the machine: deleting one takes the
+    // tenant's admin, or whoever holds everything on that Sandbox.
+    if (!canAdministerTenant(principal) && !grantsFor(principal.id, sb.id).includes("*"))
+      return sendJson(res, 403, { ok: false, error: "not authorized to delete this sandbox" });
     if (sandboxCountForTenant(principal.tenant_id) <= 1)
       return sendJson(res, 409, { ok: false, error: "cannot delete the last sandbox" });
     if (scheduler.isRunning(sb.id)) await scheduler.hibernate(sb);
@@ -930,8 +998,11 @@ async function handle(req, res) {
     if (!SLUG_RE.test(newSlug ?? "") || RESERVED.has(newSlug)) return sendJson(res, 400, { ok: false, error: "invalid slug" });
     const targetDomain = vanityDomain || domain;
     if (targetDomain) {
+      if (!canAdministerTenant(principal)) {
+        return sendJson(res, 403, { ok: false, error: "admin authority required to set a vanity domain" });
+      }
       try {
-        const cleanDomain = validateVanityDomain(targetDomain);
+        const cleanDomain = claimableVanityDomain(req, targetDomain);
         const existing = getSandboxByVanityDomain(cleanDomain);
         if (existing) {
           return sendJson(res, 409, { ok: false, error: `vanity domain already in use: ${cleanDomain}` });
@@ -1466,9 +1537,8 @@ async function handle(req, res) {
     // Agent spawn quota: check before delegating to the kernel.
     if (mcpSrv === "agents" && mcpTool === "spawn") {
       const agentQuota = getQuota(principal.tenant_id);
-      const tenantRunning = runningAgentCountForTenant(principal.tenant_id);
-      const sbRunning = runningAgentCount(sandbox.id);
-      if (tenantRunning >= agentQuota.max_agents || sbRunning >= agentQuota.max_agents)
+      // The tenant's count includes this Sandbox's, so it is the only one to ask.
+      if (runningAgentCountForTenant(principal.tenant_id) >= agentQuota.max_agents)
         return sendJson(res, 429, { ok: false, error: `agent quota exceeded (max ${agentQuota.max_agents})` });
     }
     const result = await kernel.call({ principalId: principal.id, heldPatterns: held, server: mcpSrv, tool: mcpTool, args: args ?? {} });

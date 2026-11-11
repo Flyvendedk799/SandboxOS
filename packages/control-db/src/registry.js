@@ -85,6 +85,12 @@ export function updateTenantName(tenantId, name) {
   if (typeof tenantId !== "string" || !tenantId) throw new Error("tenantId required");
   if (typeof name !== "string" || !name.trim()) throw new Error("tenant name required");
   const clean = name.trim();
+  // The seed tenant's name is how a first boot finds it; nobody else takes it.
+  if (clean === config.seed.tenantName && getSandboxBySlug(config.seed.slug)?.tenant_id !== tenantId) {
+    const err = new Error(`tenant name already in use: ${clean}`);
+    err.statusCode = 409;
+    throw err;
+  }
   const existing = openDb().prepare("SELECT id FROM tenants WHERE name=? AND id<>?").get(clean, tenantId);
   if (existing) {
     const err = new Error(`tenant name already in use: ${clean}`);
@@ -149,7 +155,7 @@ export function createSandbox(tenantId, { slug, name, cellBackend }) {
   const volume = path.join(config.sandboxesDir, sid, "volume");
   const s = {
     id: sid, tenant_id: tenantId, slug, name: name ?? slug,
-    cell_backend: cellBackend ?? "local", volume_path: volume,
+    cell_backend: cellBackend, volume_path: volume,
     state: "stopped", last_active_at: null, created_at: now(),
     vanity_domain: null,
   };
@@ -1204,7 +1210,7 @@ export function isTenantAdmin(principalId) {
   const p = getPrincipal(principalId);
   if (!p) return false;
   const first = openDb().prepare(
-    "SELECT id FROM principals WHERE tenant_id=? AND kind='human' ORDER BY created_at ASC LIMIT 1"
+    "SELECT id FROM principals WHERE tenant_id=? AND kind='human' ORDER BY created_at ASC, rowid ASC LIMIT 1"
   ).get(p.tenant_id);
   return first?.id === principalId;
 }
@@ -1212,7 +1218,7 @@ export function isTenantAdmin(principalId) {
 export function listTeamMembers(tenantId) {
   if (typeof tenantId !== "string" || !tenantId) return [];
   const first = openDb().prepare(
-    "SELECT id FROM principals WHERE tenant_id=? AND kind='human' ORDER BY created_at ASC LIMIT 1"
+    "SELECT id FROM principals WHERE tenant_id=? AND kind='human' ORDER BY created_at ASC, rowid ASC LIMIT 1"
   ).get(tenantId);
   const rows = openDb().prepare(
     `SELECT p.id AS principal_id, p.name, p.kind, p.is_operator, p.created_at,
@@ -1221,7 +1227,7 @@ export function listTeamMembers(tenantId) {
        FROM principals p
        LEFT JOIN accounts a ON a.principal_id = p.id
       WHERE p.tenant_id = ? AND p.kind = 'human'
-      ORDER BY p.created_at ASC`
+      ORDER BY p.created_at ASC, p.rowid ASC`
   ).all(now(), tenantId);
 
   return rows.map((r) => ({
@@ -1270,6 +1276,20 @@ export function removeTeamMember(tenantId, principalId) {
   if (remaining === 0) throw new Error("cannot remove the last member of a team");
 
   return withTransaction((db) => {
+    // Authority the member handed on does not outlive the member: the agents
+    // they spawned keep their rows (the audit chain names them) but lose every
+    // grant and session, which is all that made them able to act.
+    const spawned = db.prepare("SELECT principal_id FROM agents WHERE spawned_by=?").all(principalId);
+    for (const a of spawned) {
+      db.prepare("DELETE FROM grants WHERE principal_id=?").run(a.principal_id);
+      db.prepare("DELETE FROM sessions WHERE principal_id=?").run(a.principal_id);
+    }
+    // Everything else that names the member has to go before the member can —
+    // a job would run as them, and a conversation is theirs alone.
+    db.prepare("DELETE FROM jobs WHERE principal_id=?").run(principalId);
+    db.prepare(`DELETE FROM conversation_messages WHERE conversation_id IN
+                  (SELECT id FROM conversations WHERE principal_id=?)`).run(principalId);
+    db.prepare("DELETE FROM conversations WHERE principal_id=?").run(principalId);
     db.prepare("DELETE FROM grants WHERE principal_id=?").run(principalId);
     db.prepare("DELETE FROM sessions WHERE principal_id=?").run(principalId);
     db.prepare("DELETE FROM accounts WHERE principal_id=?").run(principalId);
@@ -1282,10 +1302,14 @@ export function removeTeamMember(tenantId, principalId) {
 
 /** Idempotently create the seed tenant, human principal, and primary Sandbox. */
 export function ensureSeed(cellBackend) {
-  let tenant = getTenantByName(config.seed.tenantName);
-  if (!tenant) tenant = createTenant(config.seed.tenantName);
-
   let sandbox = getSandboxBySlug(config.seed.slug);
+  // Once seeded, the seed tenant is whoever owns the seed Sandbox — not whoever
+  // currently carries its name. A tenant's name can be changed by its admin, and
+  // finding the operator's tenant by name let another tenant rename itself into
+  // being the host operator.
+  let tenant = sandbox ? getTenant(sandbox.tenant_id) : null;
+  if (!tenant) tenant = getTenantByName(config.seed.tenantName) ?? createTenant(config.seed.tenantName);
+
   let owner;
   if (!sandbox) {
     owner = createPrincipal(tenant.id, "human", `${config.seed.tenantName}-owner`);
@@ -1297,7 +1321,7 @@ export function ensureSeed(cellBackend) {
     grant(owner.id, sandbox.id, "*");
   } else {
     owner = openDb()
-      .prepare("SELECT * FROM principals WHERE tenant_id=? AND kind='human' ORDER BY created_at LIMIT 1")
+      .prepare("SELECT * FROM principals WHERE tenant_id=? AND kind='human' ORDER BY created_at, rowid LIMIT 1")
       .get(tenant.id);
   }
   // Backlog #1: the seed owner is the host operator. Idempotent — re-seeding a
