@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS sandboxes (
   volume_path   TEXT NOT NULL,
   state         TEXT NOT NULL,          -- 'stopped' | 'running'
   last_active_at INTEGER,
-  created_at    INTEGER NOT NULL
+  created_at    INTEGER NOT NULL,
+  vanity_domain TEXT UNIQUE
 );
 
 -- Capability grants: a principal may invoke tools matching <pattern> on a Sandbox.
@@ -188,7 +189,9 @@ CREATE TABLE IF NOT EXISTS tenant_quotas (
   max_agents    INTEGER NOT NULL DEFAULT 10,
   max_running   INTEGER NOT NULL DEFAULT 2,
   mem_mb        INTEGER NOT NULL DEFAULT 512,
-  cpu_shares    REAL    NOT NULL DEFAULT 1.0
+  cpu_shares    REAL    NOT NULL DEFAULT 1.0,
+  max_disk_mb   INTEGER NOT NULL DEFAULT 1024,
+  network_egress TEXT   NOT NULL DEFAULT 'allow'
 );
 
 -- Tenant profile/onboarding state. Credentials live in encrypted tenant_secrets;
@@ -315,6 +318,11 @@ const MIGRATIONS = [
   "ALTER TABLE distros ADD COLUMN preview TEXT",
   "ALTER TABLE distros ADD COLUMN publisher TEXT",
   "ALTER TABLE distros ADD COLUMN forks INTEGER NOT NULL DEFAULT 0",
+  // Multi-tenant onboarding, vanity domain routing, and quota resource management
+  "ALTER TABLE sandboxes ADD COLUMN vanity_domain TEXT",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_sandboxes_vanity ON sandboxes(vanity_domain) WHERE vanity_domain IS NOT NULL",
+  "ALTER TABLE tenant_quotas ADD COLUMN max_disk_mb    INTEGER NOT NULL DEFAULT 1024",
+  "ALTER TABLE tenant_quotas ADD COLUMN network_egress TEXT    NOT NULL DEFAULT 'allow'",
 ];
 
 // Backlog #14 (migration hardening): only swallow the benign "column/table already
