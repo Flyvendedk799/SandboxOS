@@ -39,7 +39,7 @@ class HostedServer {
       }
       this._pending.clear();
       this.child = null;
-      return;
+      throw new Error(`marketplace server failed to spawn: ${err.message}`);
     }
     child.on("message", (msg) => {
       const p = this._pending.get(msg?.id);
@@ -68,7 +68,7 @@ class HostedServer {
   }
 
   _send(op, tool, args, timeoutMs) {
-    this._ensure();
+    try { this._ensure(); } catch (e) { return Promise.reject(e); }
     const id = ++this._seq;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {

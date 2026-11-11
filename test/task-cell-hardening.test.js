@@ -398,3 +398,50 @@ test("C3: packages/kernel/src/servers/net.js - net.fetch blocks private IP and S
   assert.equal(res3.ok, false);
   assert.match(res3.error, /egress blocked/);
 });
+
+// ── review follow-ups: the guard holds on every hop and every spelling ───────
+
+test("net.fetch re-checks a redirect's destination instead of following it blind", async () => {
+  const http = await import("node:http");
+  const { netServer } = await import("../packages/kernel/src/servers/net.js");
+  const srv = http.createServer((req, res) => {
+    if (req.url === "/hop") { res.writeHead(302, { location: `http://localhost:${srv.address().port}/secret` }); res.end(); return; }
+    if (req.url === "/same") { res.writeHead(302, { location: "/landed" }); res.end(); return; }
+    res.end(req.url === "/landed" ? "landed" : "secret");
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  try {
+    const port = srv.address().port;
+    // 127.0.0.1 is the operator's explicit escape hatch; `localhost` is not.
+    const fetchTool = netServer({ manifest: { servers: { net: { egress: "allow", allow: ["127.0.0.1"] } } } }).tools.fetch;
+    await assert.rejects(
+      fetchTool.handler({}, { url: `http://127.0.0.1:${port}/hop` }),
+      /egress blocked/,
+      "a redirect to a host the guard would refuse is refused",
+    );
+    const ok = await fetchTool.handler({}, { url: `http://127.0.0.1:${port}/same` });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body, "landed", "an allowed redirect is still followed");
+  } finally {
+    srv.close();
+  }
+});
+
+test("egress policy sees one host however it is spelled", async () => {
+  const { egressAllowed, isBlockedAddress } = await import("../packages/kernel/src/servers/net.js");
+  assert.equal(egressAllowed({ deny: ["2606:4700::1111"] }, "[2606:4700::1111]"), false, "a bracketed v6 literal matches its deny entry");
+  assert.equal(egressAllowed({ deny: ["evil.com"] }, "evil.com."), false, "a trailing dot does not step around a deny entry");
+  assert.equal(egressAllowed({ egress: "deny", allow: ["2606:4700::1111"] }, "[2606:4700::1111]"), true);
+  for (const ip of ["64:ff9b:1::a00:1", "::ffff:0:127.0.0.1", "fec0::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2", "192.0.0.8"]) {
+    assert.equal(isBlockedAddress(ip), true, `${ip} is not a public destination`);
+  }
+  assert.equal(isBlockedAddress("2606:4700::1111"), false, "a public v6 address is still reachable");
+});
+
+test("safeSpawn reports a spawn that throws exactly once, and closes", async () => {
+  const { safeSpawn } = await import("../packages/cell/src/spawn.js");
+  let errors = 0;
+  const child = safeSpawn(12345, [], {}, () => { errors++; });
+  await new Promise((r) => child.on("close", r));
+  assert.equal(errors, 1);
+});

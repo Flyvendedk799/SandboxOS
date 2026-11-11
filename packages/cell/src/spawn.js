@@ -32,9 +32,11 @@ export function safeSpawn(bin, args = [], opts = {}, onError) {
     emitter.on("error", (e) => {
       try { onError?.(e); } catch {}
     });
+    // One report, through the listener above — and a 'close', so a caller
+    // waiting for the child to end is not left waiting for one that never began.
     queueMicrotask(() => {
-      try { onError?.(err); } catch {}
       emitter.emit("error", err);
+      emitter.emit("close", null, null);
     });
     return emitter;
   }

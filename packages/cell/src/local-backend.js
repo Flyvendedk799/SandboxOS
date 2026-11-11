@@ -12,7 +12,7 @@
 
 import fs from "node:fs";
 import { groupHandle } from "./handles.js";
-import { newMarker, markerPath, ptyWrapper, resizeScript, cleanupScript } from "./pty.js";
+import { newMarker, ptyWrapper, resizeScript, cleanupScript } from "./pty.js";
 import { safeSpawn, detachedSpawn, execFileSafe, killTree } from "./spawn.js";
 import { resolveShell, baseEnv, shellTmp, toShellPath, unsupportedHost } from "./shell.js";
 
@@ -180,22 +180,14 @@ export class LocalBackend {
       if (cleaned) return;
       cleaned = true;
       clearTimeout(readyTimer);
-      if (sh.pty) {
-        try {
-          const mPath = markerPath(marker, tmp);
-          if (fs.existsSync(mPath)) {
-            const content = fs.readFileSync(mPath, "utf8");
-            const p = parseInt(content.split("\n")[1]?.trim(), 10);
-            if (Number.isInteger(p) && p > 1) {
-              killTree(p, "SIGKILL");
-            }
-          }
-        } catch {}
-        detachedSpawn(sh.bin, sh.argv(cleanupScript(marker, tmp)), { detached: process.platform !== "win32" });
-      }
+      // Nothing queued outlives the session, and nothing queues after it.
+      ready = true;
+      pending.length = 0;
+      // The marker's pid is the cleanup script's to signal: it is written by the
+      // Cell, so the Gateway does not read a number out of it and kill that.
+      if (sh.pty) detachedSpawn(sh.bin, sh.argv(cleanupScript(marker, tmp)), { detached: process.platform !== "win32" });
       killTree(proc.pid, "SIGKILL", proc);
     };
-    proc.on("error", close);
     proc.on("exit", () => { clearTimeout(first); clearTimeout(readyTimer); cleanup(); close(); });
     return {
       write(data) {
