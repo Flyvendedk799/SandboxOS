@@ -34,8 +34,8 @@ test("DEVICES contains contract viewport presets", () => {
   assert.equal(tablet.h, 768);
 
   const phone = deviceOf("phone");
-  assert.equal(phone.w, 375);
-  assert.equal(phone.h, 667);
+  assert.equal(phone.w, 390);
+  assert.equal(phone.h, 780);
 
   const fit = deviceOf("fit");
   assert.equal(fit.w, null);
@@ -68,7 +68,7 @@ test("computeStageLayout scales down for pane smaller than device without collap
 });
 
 test("computeStageLayout caps scale at 1.0 when pane is larger than device", () => {
-  const phone = deviceOf("phone"); // 375x667
+  const phone = deviceOf("phone"); // 390x780
   const layout = computeStageLayout({
     paneWidth: 1920,
     paneHeight: 1080,
@@ -114,7 +114,7 @@ test("formatStageBadge accurately distinguishes device presets and formats doc s
   // Phone
   const phoneBadge = formatStageBadge({ stageMode: "preview", device: "phone", scale: 1, doc });
   assert.ok(phoneBadge.includes("preview"));
-  assert.ok(phoneBadge.includes("375×667"), "phone badge shows 375×667");
+  assert.ok(phoneBadge.includes("390×780"), "phone badge shows 390×780");
   assert.ok(!phoneBadge.includes("1440×900"), "phone badge must not show desktop dimensions");
 
   // Fit

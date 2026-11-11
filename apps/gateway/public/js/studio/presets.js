@@ -9,7 +9,7 @@
 export const DEVICES = Object.freeze([
   { id: "desktop", name: "Desktop", w: 1440, h: 900 },
   { id: "tablet", name: "Tablet", w: 1024, h: 768 },
-  { id: "phone", name: "Phone", w: 375, h: 667 },
+  { id: "phone", name: "Phone", w: 390, h: 780 },
   { id: "fit", name: "Fit", w: null, h: null },
 ]);
 

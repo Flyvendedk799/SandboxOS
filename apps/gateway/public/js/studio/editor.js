@@ -43,6 +43,7 @@ export function createStudioCodeEditor({ onTargetChange } = {}) {
 
   let lastApplied = null;
   const expandedDetails = new Set(); // proposalId
+  const busy = new Set(); // proposalId with an apply/discard in flight
 
   function updateProposalBadge() {
     const count = os.doc?.proposals?.length ?? 0;
@@ -137,12 +138,17 @@ export function createStudioCodeEditor({ onTargetChange } = {}) {
             h("div.act", null,
               h("button.app-btn.primary", {
                 onclick: async () => {
+                  if (busy.has(p.id)) return;
+                  busy.add(p.id);
                   try {
-                    const beforeRev = os.doc?.rev ?? 0;
                     const r = await call("applyProposal", { id: p.id });
+                    // Each op was its own revision, so what this proposal did
+                    // starts that many revisions back from where it ended —
+                    // the server's count, not a client rev that may lag.
+                    const applied = r.applied?.length ?? 0;
                     let diff = null;
                     try {
-                      const hist = await call("history", { rev: Math.max(0, beforeRev) });
+                      const hist = await call("history", { rev: Math.max(0, r.rev - (applied + 1)) });
                       diff = hist?.diff ?? null;
                     } catch { /* history lookup */ }
                     lastApplied = {
@@ -151,19 +157,26 @@ export function createStudioCodeEditor({ onTargetChange } = {}) {
                       diff,
                     };
                     expandedDetails.delete(p.id);
-                    toast("Applied proposal", { body: `${r.applied?.length ?? 0} ops applied`, kind: "ok" });
+                    // A proposal can stop part-way: the kernel reports that
+                    // rather than throwing, and it is not a success.
+                    if (r.failure) toast("Partly applied", { body: `${r.failure.tool}: ${r.failure.error}`, kind: "err", timeout: 5000 });
+                    else toast("Applied proposal", { body: `${applied} ops applied`, kind: "ok" });
                     paintProposals();
                   } catch (e) { toastError("Could not apply", e); }
+                  finally { busy.delete(p.id); }
                 },
               }, "Apply"),
               h("button.app-btn", {
                 onclick: async () => {
+                  if (busy.has(p.id)) return;
+                  busy.add(p.id);
                   try {
                     await call("discardProposal", { id: p.id });
                     expandedDetails.delete(p.id);
                     toast("Discarded proposal", { kind: "ok" });
                     paintProposals();
                   } catch (e) { toastError("Could not discard", e); }
+                  finally { busy.delete(p.id); }
                 },
               }, "Discard"),
               h("button.app-btn.ghost", {

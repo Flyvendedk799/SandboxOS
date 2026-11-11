@@ -42,7 +42,7 @@ export function createBuilder({ onOpenCode } = {}) {
   const themeStudio = createThemeStudio();
   const motionStudio = createMotionStudio();
 
-  const setTab = (t) => { tab = t; remember("tab", t); render(); };
+  const setTab = (t) => { if (!TABS.some(([id]) => id === t)) return; tab = t; remember("tab", t); render(); };
   const setCat = (c) => { cat = c; render(); };
 
   // ── Library ───────────────────────────────────────────────────────────────
@@ -625,10 +625,11 @@ export function createBuilder({ onOpenCode } = {}) {
       fields: [{ name: "name", label: "Name" }],
       confirmLabel: "Create",
     });
-    if (!got?.name) return;
+    const name = got?.name?.trim();
+    if (!name) return;
     try {
-      await call("checkpoint", { name: got.name.trim() });
-      toast(`Created snapshot "${got.name}"`, { kind: "ok" });
+      await call("checkpoint", { name });
+      toast(`Created snapshot "${name}"`, { kind: "ok" });
       paintCheckpoints(pane.querySelector("#os-checkpoints"));
     } catch (e) { toastError("Could not create snapshot", e); }
   }
@@ -668,13 +669,16 @@ export function createBuilder({ onOpenCode } = {}) {
             }, icon("history", 14), h("span.nm", c.name), h("span.sub", `r${c.rev}${c.ts ? ` · ${new Date(c.ts).toLocaleDateString()}` : ""}`)),
             h("button.diff-toggle", {
               title: "What is different between this snapshot and now",
-              onclick: async () => {
+              onclick: async (e) => {
+                const btn = e.currentTarget;
                 if (openDiff.has(c.id)) {
                   openDiff.delete(c.id);
                   diffHost.hidden = true;
+                  btn.textContent = "diff";
                 } else {
                   openDiff.add(c.id);
                   diffHost.hidden = false;
+                  btn.textContent = "hide";
                   try {
                     const d = await call("checkpointDiff", { id: c.id });
                     fill(diffHost, renderStructuralDiff(d.diff));

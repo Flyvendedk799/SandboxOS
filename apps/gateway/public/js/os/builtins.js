@@ -1077,7 +1077,7 @@ const settings = {
 };
 
 export const APPS = {
-  files, terminal, console: consoleApp, notes, metrics, observability: metrics, media, browser, settings,
+  files, terminal, console: consoleApp, notes, metrics, media, browser, settings,
   // The machine's own work — processes, ports, agents, secrets, sync, access, the
   // audit log — lives in ops.js, so this file stays about the desk and that one
   // stays about the machine.
