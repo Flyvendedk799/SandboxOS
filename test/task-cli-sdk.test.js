@@ -442,15 +442,18 @@ test("C1 & C3: sbx access revoke safeguards against ambiguity and encodes parame
   const share2 = await runSbx(["access", "share", "user_alpha_beta", "--patterns", "fs.read"]);
   assert.equal(share2.code, 0, share2.stderr);
 
-  // Ambiguous prefix matches multiple entries
+  // A name is matched whole: a prefix of someone's name revokes no one, whether
+  // it would have matched two people or — the dangerous case — exactly one.
   const ambigAccess = await runSbx(["access", "revoke", "user_al"]);
-  assert.notEqual(ambigAccess.code, 0, "ambiguous access revoke must fail");
-  assert.match(ambigAccess.stderr, /ambiguous access identifier "user_al" matches multiple entries/);
+  assert.notEqual(ambigAccess.code, 0, "a name prefix must not revoke");
+  assert.match(ambigAccess.stderr, /no access entry for: user_al/);
+  const nearMiss = await runSbx(["access", "revoke", "user_alpha_b"]);
+  assert.notEqual(nearMiss.code, 0, "a prefix that matches exactly one other person must not revoke them");
 
   // Exact match succeeds
   const exactRevoke = await runSbx(["access", "revoke", "user_alpha"]);
   assert.equal(exactRevoke.code, 0, exactRevoke.stderr);
-  assert.match(exactRevoke.stdout, /revoked user_alpha/);
+  assert.match(exactRevoke.stdout, /revoked \S+ \(user_alpha\)/);
 
   // Clean up remaining
   const exactRevoke2 = await runSbx(["access", "revoke", "user_alpha_beta"]);
@@ -479,4 +482,30 @@ test("C2 & C3: SandboxClient encodes dynamic URL paths", async () => {
 
   await testClient.assistant.remove("chat/id#1");
   assert.ok(calls.some((c) => c.url.includes("/chats/chat%2Fid%231") && c.method === "DELETE"));
+});
+
+// ── review follow-ups ────────────────────────────────────────────────────────
+
+test("a mistyped token subcommand mints nothing", async () => {
+  const before = await runSbx(["token", "list"]);
+  const res = await runSbx(["token", "delete", "whatever"]);
+  assert.notEqual(res.code, 0);
+  assert.match(res.stderr, /unknown token subcommand: delete/);
+  assert.equal(res.stdout.trim(), "", "no token was printed");
+  const after = await runSbx(["token", "list"]);
+  assert.equal(after.stdout.trim().split("\n").length, before.stdout.trim().split("\n").length, "no token was minted");
+});
+
+test("quota.set accepts the names quota.get returns, and agents.events throws on an error status", async () => {
+  const { SandboxClient } = await import("../packages/sdk/src/client.js");
+  const seen = [];
+  const mockFetch = async (url, opts) => {
+    seen.push({ url: String(url), body: opts?.body ? JSON.parse(opts.body) : null });
+    if (String(url).includes("/events")) return new Response(JSON.stringify({ ok: false, error: "no such agent" }), { status: 404 });
+    return new Response(JSON.stringify({ ok: true, quota: {} }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  const c = new SandboxClient({ url: "http://gw.test", slug: "s", token: "t", fetch: mockFetch });
+  await c.quota.set({ max_agents: 2, maxRunning: 1, id: "ignored", updated_at: 5 });
+  assert.deepEqual(seen.at(-1).body, { maxAgents: 2, maxRunning: 1 });
+  await assert.rejects(async () => { for await (const _ of c.agents.events("nope")) { /* none */ } }, /no such agent|404/);
 });

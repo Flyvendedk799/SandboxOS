@@ -32,18 +32,8 @@ function flag(args, name, def) {
   return i > -1 ? args[i + 1] : def;
 }
 
-function formatErrorMessage(err) {
-  if (!err) return "unknown error";
-  if (typeof err === "string") return err;
-  let msg = err.message || err.error || "unknown error";
-  if (err.code) msg = `[${err.code}] ${msg}`;
-  if (err.remediation) msg += ` (Remediation: ${err.remediation})`;
-  return msg;
-}
-
 function die(msg) {
-  const text = typeof msg === "object" ? formatErrorMessage(msg) : String(msg);
-  console.error("sbx: " + text);
+  console.error("sbx: " + String(msg));
   process.exit(1);
 }
 
@@ -90,7 +80,10 @@ async function cmdLogin(args) {
       die(`connection failed: ${err.message}`);
     }
     const probeData = await probeRes.json().catch(() => ({}));
-    if (!probeRes.ok || !probeData.ok) {
+    // A narrow token may not hold kernel.whoami, and being told so is itself
+    // proof the Gateway knows the token: only a refusal to authenticate fails.
+    const deniedTool = probeData.code === "denied" || /^denied:/.test(probeData.error ?? "");
+    if (!probeRes.ok || (!probeData.ok && !deniedTool)) {
       die(probeData.error || `authentication failed (HTTP ${probeRes.status})`);
     }
     saveConfig({ url, slug, token: directToken });
@@ -213,7 +206,9 @@ async function cmdToken(args) {
         const candidates = exactLabels.map((t) => `  ${t.principalId || t.principal_id} (${t.label || "unlabeled"})`).join("\n");
         die(`ambiguous token "${id}" matches multiple tokens:\n${candidates}`);
       } else {
-        // 3. Prefix match by label or principalId
+        // 3. Unique prefix of the label or principal id. The Gateway suffixes
+        //    every label it stores, so the label a person chose is only ever a
+        //    prefix; an ambiguous one is refused and the resolved id is printed.
         const matches = tokens.filter((t) => {
           const pid = t.principalId || t.principal_id;
           return (t.label && t.label.startsWith(id)) || (pid && pid.startsWith(id));
@@ -236,7 +231,11 @@ async function cmdToken(args) {
     return;
   }
 
-  // default / mint
+  // default / mint — and only that. A mistyped subcommand must not quietly mint
+  // a token with the caller's full scope and print it.
+  if (sub !== undefined && sub !== "mint" && !sub.startsWith("--")) {
+    die(`unknown token subcommand: ${sub} (use: sbx token [mint] [--patterns a,b] [--label x] | list | revoke <id|label>)`);
+  }
   const patterns = flag(args, "patterns");
   const label = flag(args, "label", "minted");
   const res = await api(cfg, `/${cfg.slug}/tokens`, {
@@ -868,6 +867,7 @@ async function cmdProc(args) {
   if (sub === "signal") {
     if (!args[1]) die("usage: sbx proc signal <pid> [SIGTERM|SIGKILL|...]");
     const pid = Number(args[1]);
+    if (!Number.isInteger(pid) || pid <= 0) die("usage: sbx proc signal <pid> [SIGTERM|SIGKILL|...] — pid must be a positive integer");
     const sig = args[2] || "SIGTERM";
     const r = await mcp(cfg, "proc", "signal", { pid, signal: sig });
     console.log(`signaled ${r.pid} with ${r.signal}`);
@@ -1020,12 +1020,9 @@ async function cmdAccess(args) {
         const candidates = exactNames.map((a) => `  ${a.principalId} (${a.username || a.name || a.kind})`).join("\n");
         die(`ambiguous access identifier "${who}" matches multiple entries:\n${candidates}`);
       } else {
-        // 3. Prefix match by principalId, username, or name
-        const matches = entries.filter((a) => {
-          return (a.principalId && a.principalId.startsWith(who)) ||
-            (a.username && a.username.startsWith(who)) ||
-            (a.name && a.name.startsWith(who));
-        });
+        // 3. A unique prefix of the principal id only. Names are matched
+        //    whole: "bob" must never take "bobby"'s access away.
+        const matches = entries.filter((a) => a.principalId && a.principalId.startsWith(who));
         if (matches.length === 0) {
           die(`no access entry for: ${who}`);
         }
@@ -1040,7 +1037,8 @@ async function cmdAccess(args) {
     const res = await api(cfg, `/${cfg.slug}/access/${encodeURIComponent(targetId)}`, { method: "DELETE" });
     const d = await res.json();
     if (!d.ok) die(d.error);
-    console.log(`revoked ${who} (${d.removed} grant${d.removed === 1 ? "" : "s"}${d.tokensRevoked ? `, ${d.tokensRevoked} token${d.tokensRevoked === 1 ? "" : "s"}` : ""})`);
+    const shown = target.username || target.name || target.kind || "";
+    console.log(`revoked ${targetId}${shown ? ` (${shown})` : ""} (${d.removed} grant${d.removed === 1 ? "" : "s"}${d.tokensRevoked ? `, ${d.tokensRevoked} token${d.tokensRevoked === 1 ? "" : "s"}` : ""})`);
     return;
   }
   die(`unknown access subcommand: ${sub}`);

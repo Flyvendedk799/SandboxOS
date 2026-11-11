@@ -373,6 +373,11 @@ class AgentsApi {
   /** Live audit events of an agent as an async iterator. */
   async *events(id, { signal } = {}) {
     const res = await this.c.request(`agents/${encodeURIComponent(id)}/events`, { raw: true, headers: { Accept: "text/event-stream" }, signal });
+    // An unknown agent or a bad token is an error, not a stream with nothing in it.
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw buildSandboxError(data, `agent events failed: ${res.status}`, { status: res.status });
+    }
     yield* sseEvents(res);
   }
 }
@@ -559,10 +564,31 @@ class SandboxesApi {
   }
 }
 
+const QUOTA_KEYS = {
+  max_sandboxes: "maxSandboxes", max_agents: "maxAgents", max_running: "maxRunning",
+  mem_mb: "memMb", cpu_shares: "cpuShares", max_disk_mb: "maxDiskMb", network_egress: "networkEgress",
+};
+const QUOTA_FIELDS = new Set([...Object.values(QUOTA_KEYS), "tenantId"]);
+
 class QuotaApi {
   constructor(c) { this.c = c; }
   get() { return this.c.request("/api/quota").then((r) => r.quota); }
-  set(limits) { return this.c.request("/api/quota", { method: "POST", body: limits }).then((r) => r.quota); }
+  /** Live usage against the quota: sandboxes, running sandboxes and agents, tokens. */
+  usage() { return this.c.request("/api/quota").then((r) => r.usage); }
+  /**
+   * Set limits. Accepts the camelCase names the Gateway takes (`maxSandboxes`)
+   * and the snake_case names `get()` returns (`max_sandboxes`), so what was read
+   * can be changed and written back.
+   */
+  set(limits = {}) {
+    const body = {};
+    for (const [k, v] of Object.entries(limits)) {
+      if (v == null) continue;
+      const key = QUOTA_KEYS[k] ?? k;
+      if (QUOTA_FIELDS.has(key)) body[key] = v;
+    }
+    return this.c.request("/api/quota", { method: "POST", body }).then((r) => r.quota);
+  }
 }
 
 // ── SSE ──────────────────────────────────────────────────────────────────────
