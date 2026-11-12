@@ -112,7 +112,8 @@ async function postJson(credential, model, body) {
 async function callAnthropic(credential, { model, system, tools, messages }) {
   return postJson(credential, model, {
     model,
-    max_tokens: 4096,
+    // Thinking is always on for the current models and counts against this cap.
+    max_tokens: 16000,
     messages,
     ...(tools.length ? { tools } : {}),
     // A subscription token must carry the Claude Code identity as its first system

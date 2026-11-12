@@ -86,7 +86,7 @@ test("Settings is a form, not a spreadsheet", () => {
   assert.match(css, /\.settings-col \.kv \{ display: grid; grid-template-columns: 170px minmax\(0, 1fr\);/,
     "two columns, so the controls share a left edge");
   const builtins = read("../apps/gateway/public/js/os/builtins.js");
-  assert.match(builtins, /h\("div\.settings-col", null, \.\.\.\(section === "machine" \? machineSection : desktopSection\)\)/);
+  assert.match(builtins, /h\("div\.settings-col", null, \.\.\.\(section === "machine" \? machineSection : section === "ai" \? aiSection\(\) : desktopSection\)\)/);
 });
 
 // ── Ports answers the question it was opened for ───────────────────────────

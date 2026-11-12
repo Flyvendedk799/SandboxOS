@@ -61,7 +61,8 @@ async function post(credential, model, body, opts) {
 async function callAnthropic(credential, model, prompt, system, effort) {
   const body = {
     model,
-    max_tokens: 2048,
+    // Thinking is always on for the current models and counts against this cap.
+    max_tokens: 16000,
     messages: [{ role: "user", content: prompt }],
     // A subscription token must open with the Claude Code identity block, in first
     // position, as a block of its own. systemFor is what guarantees that.

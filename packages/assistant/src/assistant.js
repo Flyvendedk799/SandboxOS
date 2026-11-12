@@ -290,7 +290,8 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
       // has not earned. systemFor is what puts it there.
       body = {
         model: chosen,
-        max_tokens: 4096,
+        // Streamed, so a high cap costs nothing up front; thinking counts against it.
+        max_tokens: 32000,
         stream: true,
         system: systemFor(credential, system),
         messages,
