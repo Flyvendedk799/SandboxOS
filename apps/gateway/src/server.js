@@ -20,7 +20,7 @@ import {
   createTenant, totalSandboxCount, tenantAgentStats, getAgent,
   listSandboxesForTenant, deleteSandbox,
   getQuota, setQuota, runningAgentCount, isOperator, recordModelUsage,
-  getTenant, getTenantProfile, updateTenantProfile, LLM_PROVIDERS,
+  getTenant, getTenantProfile, updateTenantProfile, LLM_PROVIDERS, normalizeLlmModel,
   appendAudit,
   listSandboxAccess, revokeSandboxAccess, shareSandbox, listMachineTokens,
   verifyAuditChain,
@@ -43,11 +43,16 @@ import {
   manualIndex, manualPage, manualHeadings,
 } from "../../../packages/os/src/index.js";
 import { putTenantSecret, removeTenantSecret } from "../../../packages/secrets/src/store.js";
-import { providerConfig, providerOptions } from "../../../packages/llm/src/providers.js";
-import { claudeAccounts } from "../../../packages/ai-auth/src/tenant.js";
+import {
+  chooseModel, modelFitsProvider, providerConfig, providerOptions, providersFor,
+} from "../../../packages/llm/src/providers.js";
+import { antigravityAccounts, claudeAccounts } from "../../../packages/ai-auth/src/tenant.js";
 import {
   ClaudeLoginError, exchangeClaudeCode, parsePastedCode, sameState, startClaudeLogin,
 } from "../../../packages/ai-auth/src/oauth.js";
+import {
+  AntigravityLoginError, exchangeAntigravityCode, startAntigravityLogin,
+} from "../../../packages/ai-auth/src/antigravity.js";
 
 const maxSandboxes = () => Number(process.env.SANDBOXOS_MAX_SANDBOXES ?? 10);
 import { getKernel, _dropKernel } from "../../../packages/kernel/src/kernel.js";
@@ -378,6 +383,9 @@ async function profileResponse(principal) {
     },
     profile: {
       llmProvider: profile.llm_provider,
+      // What the tenant chose (null = "the provider's default") and what calls will use.
+      llmModel: profile.llm_model ?? null,
+      effectiveModel: chooseModel(profile.llm_provider, { saved: profile.llm_model }),
       onboardingCompleted: !!profile.onboarding_completed,
       keyConfigured: !!active?.configured,
       updatedAt: profile.updated_at,
@@ -396,12 +404,19 @@ const PENDING_LOGIN_TTL_MS = 10 * 60 * 1000;
 /** A pasted code is short. Generous enough for a whole URL and nothing more. */
 const MAX_PASTED_CODE = 2048;
 const DISCONNECTED_CLAUDE = { connected: false, plan: null, expiresAt: null, expired: false, scopes: [] };
+const DISCONNECTED_GOOGLE = { connected: false, email: null, expiresAt: null, expired: false, projectId: null };
 const pendingLogins = new Map();
+/** The same, for Google (Antigravity) logins — a separate map so the two never collide. */
+const pendingGoogleLogins = new Map();
+/** A GCP project id: 6–30 lowercase letters, digits and hyphens. Google's own rule. */
+const GCP_PROJECT_RE = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 
 /** Drop anything past its window. Called on each use, so no timer has to exist. */
 function sweepPendingLogins() {
   const at = Date.now();
-  for (const [key, entry] of pendingLogins) if (entry.expiresAt <= at) pendingLogins.delete(key);
+  for (const map of [pendingLogins, pendingGoogleLogins]) {
+    for (const [key, entry] of map) if (entry.expiresAt <= at) map.delete(key);
+  }
 }
 
 // ---- auth rate limiting (backlog #10) -------------------------------------
@@ -624,7 +639,7 @@ async function handle(req, res) {
     if (req.method === "GET") return sendJson(res, 200, await profileResponse(principal));
     if (req.method === "POST" || req.method === "PUT") {
       const body = await readBody(req);
-      const { llmProvider, apiKey, clearApiKey, completeOnboarding, onboardingCompleted, name, tenantName } = body ?? {};
+      const { llmProvider, llmModel, apiKey, clearApiKey, completeOnboarding, onboardingCompleted, name, tenantName } = body ?? {};
       const current = getTenantProfile(principal.tenant_id);
       let provider = current.llm_provider;
       if (llmProvider != null) {
@@ -635,6 +650,34 @@ async function handle(req, res) {
         if (!LLM_PROVIDERS.includes(provider)) {
           return sendJson(res, 400, { ok: false, error: `provider must be one of: ${LLM_PROVIDERS.join(", ")}` });
         }
+      }
+
+      // The model. Absent keeps the saved one; null or "" goes back to the provider's
+      // catalogue default. A typed-in id the catalogue has never heard of is accepted —
+      // providers ship models faster than any catalogue — but one the catalogue knows
+      // belongs to a *different* provider is refused, because sending `gpt-5` with a
+      // Claude key is a mistake rather than a model too new to be listed.
+      let model;
+      if (llmModel !== undefined) {
+        if (llmModel !== null && typeof llmModel !== "string") {
+          return sendJson(res, 400, { ok: false, error: "llmModel must be a string or null" });
+        }
+        try {
+          model = normalizeLlmModel(llmModel);
+        } catch (err) {
+          return sendJson(res, 400, { ok: false, error: err.message });
+        }
+        if (model && !modelFitsProvider(model, provider)) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: `${model} is a ${providersFor(model).join(" / ")} model, not ${provider}. Choose one of ${provider}'s models or switch provider.`,
+            providers: providersFor(model),
+          });
+        }
+      } else if (provider !== current.llm_provider && current.llm_model && !modelFitsProvider(current.llm_model, provider)) {
+        // Switching provider leaves a saved model from the old one behind; it would only be
+        // skipped at call time, so clear it now and let the profile say what is used.
+        model = null;
       }
 
       // Everything is checked before anything is written, so a refused rename
@@ -668,6 +711,7 @@ async function handle(req, res) {
 
       updateTenantProfile(principal.tenant_id, {
         llmProvider: provider,
+        llmModel: model,
         onboardingCompleted: completeOnboarding ?? onboardingCompleted,
       });
       const refreshed = getPrincipal(principal.id) ?? principal;
@@ -769,6 +813,111 @@ async function handle(req, res) {
     }
 
     return sendJson(res, 405, { ok: false, error: "unsupported method for /api/claude-code" });
+  }
+
+  // ── Google subscription login (Gemini via Antigravity) ─────────────────────
+  //
+  //   POST   /api/antigravity/login            begin — returns the URL to approve at
+  //   POST   /api/antigravity/login/complete   finish — takes the pasted code (+ projectId)
+  //   GET    /api/antigravity                  is this tenant connected, and as whom
+  //   POST   /api/antigravity/project          set or clear the GCP project id
+  //   DELETE /api/antigravity                  disconnect
+  //
+  // The /api/claude-code flow, with Google's endpoints: the user approves on Google's
+  // page, which shows a code instead of redirecting (a Gateway has no loopback port),
+  // and pastes it back. Google's code carries no state, so the PKCE verifier held here
+  // is what binds a code to this tenant's login.
+  if (top === "api" && segments[2] === "antigravity") {
+    const principal = authenticate(req);
+    if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
+    const accountId = principal.tenant_id;
+    const accounts = antigravityAccounts(accountId);
+
+    if (req.method === "GET" && !segments[3]) {
+      return sendJson(res, 200, { ok: true, ...(await accounts.status(accountId)) });
+    }
+
+    if (req.method === "DELETE" && !segments[3]) {
+      pendingGoogleLogins.delete(accountId);
+      await accounts.forget(accountId);
+      appendAudit({
+        sandboxId: null, principalId: principal.id, onBehalfOf: null,
+        server: "antigravity", tool: "disconnect", resultKind: "ok",
+      });
+      return sendJson(res, 200, { ok: true, ...DISCONNECTED_GOOGLE });
+    }
+
+    if (req.method === "POST" && segments[3] === "project" && !segments[4]) {
+      const { projectId } = await readBody(req);
+      const value = typeof projectId === "string" ? projectId.trim() : "";
+      if (value && !GCP_PROJECT_RE.test(value)) {
+        return sendJson(res, 400, { ok: false, error: "That is not a Google Cloud project id." });
+      }
+      if (!(await accounts.status(accountId)).connected) {
+        return sendJson(res, 400, { ok: false, error: "Connect a Google account first." });
+      }
+      await accounts.setProjectId(accountId, value || null);
+      return sendJson(res, 200, { ok: true, ...(await accounts.status(accountId)) });
+    }
+
+    if (req.method === "POST" && segments[3] === "login" && !segments[4]) {
+      sweepPendingLogins();
+      const started = startAntigravityLogin();
+      pendingGoogleLogins.set(accountId, {
+        verifier: started.verifier, state: started.state, expiresAt: Date.now() + PENDING_LOGIN_TTL_MS,
+      });
+      return sendJson(res, 200, {
+        ok: true, url: started.url, expiresInSeconds: Math.round(PENDING_LOGIN_TTL_MS / 1000),
+      });
+    }
+
+    if (req.method === "POST" && segments[3] === "login" && segments[4] === "complete") {
+      sweepPendingLogins();
+      const entry = pendingGoogleLogins.get(accountId);
+      if (!entry) {
+        return sendJson(res, 400, {
+          ok: false, error: "That login has expired or was never started. Begin it again.",
+        });
+      }
+
+      const { code, projectId } = await readBody(req);
+      if (typeof code !== "string" || code.length > MAX_PASTED_CODE) {
+        return sendJson(res, 400, { ok: false, error: "Paste the code from the approval page." });
+      }
+      const parsed = parsePastedCode(code);
+      if (!parsed) {
+        return sendJson(res, 400, { ok: false, error: "That does not look like an authorization code." });
+      }
+      if (parsed.state !== null && !sameState(entry.state, parsed.state)) {
+        return sendJson(res, 400, {
+          ok: false, error: "That code came from a different login. Start again and use the newest link.",
+        });
+      }
+      const project = typeof projectId === "string" ? projectId.trim() : "";
+      if (project && !GCP_PROJECT_RE.test(project)) {
+        return sendJson(res, 400, { ok: false, error: "That is not a Google Cloud project id." });
+      }
+
+      // Single use either way.
+      pendingGoogleLogins.delete(accountId);
+
+      try {
+        const identity = await exchangeAntigravityCode({ code: parsed.code, verifier: entry.verifier });
+        await accounts.save(accountId, identity, project || undefined);
+        appendAudit({
+          sandboxId: null, principalId: principal.id, onBehalfOf: null,
+          server: "antigravity", tool: "connect", args: { email: identity.email }, resultKind: "ok",
+        });
+        return sendJson(res, 200, { ok: true, ...(await accounts.status(accountId)) });
+      } catch (e) {
+        if (e instanceof AntigravityLoginError) {
+          return sendJson(res, 400, { ok: false, error: e.message, restart: e.restart });
+        }
+        return sendJson(res, 502, { ok: false, error: e.message });
+      }
+    }
+
+    return sendJson(res, 405, { ok: false, error: "unsupported method for /api/antigravity" });
   }
 
   // API: per-tenant quota — read current limits or update them.

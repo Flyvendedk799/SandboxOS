@@ -64,6 +64,7 @@ export function agentsServer(deps) {
             kind: { type: "string", enum: ["shell", "ai"], default: "shell" },
             prompt: { type: "string", description: "Initial user message (kind: ai)." },
             system: { type: "string", description: "System prompt (kind: ai)." },
+            model: { type: "string", description: "Model id (kind: ai). Defaults to the tenant's chosen model, else the provider's catalogue default." },
           },
         },
         async handler(ctx, a) {
@@ -111,6 +112,7 @@ export function agentsServer(deps) {
               systemPrompt: a.system ?? "",
               kernel: ctx.kernel,
               sandbox,
+              model: typeof a.model === "string" && a.model.trim() ? a.model.trim() : undefined,
             }).catch(() => {}).finally(announce);
           }
           return { id: agent.id, state: "queued", kind, patterns: minted.patterns };
