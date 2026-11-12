@@ -71,7 +71,16 @@ export function providerErrorFacts(error) {
 
 /** Which CLI owns the login behind a subscription provider, for the "run this" sentence. */
 function cliFor(provider) {
-  return provider === "codex" ? "codex" : "claude";
+  if (provider === "codex") return "codex";
+  if (provider === "gemini-cli") return "agy";
+  return "claude";
+}
+
+/** Whose plan a subscription provider bills, for the "your plan refused" sentence. */
+function planFor(provider) {
+  if (provider === "codex") return "ChatGPT";
+  if (provider === "gemini-cli") return "Google / Gemini";
+  return "Claude";
 }
 
 /**
@@ -114,7 +123,7 @@ export function describeProviderError(error, provider, model, options = {}) {
       // allowances: the heavy model can be refused for hours while the light one answers
       // every time, and "your plan is rate-limited" sends people off to wait when they
       // could have switched model and carried on.
-      return `Your ${provider === "codex" ? "ChatGPT" : "Claude"} plan refused this call for \`${model}\`. `
+      return `Your ${planFor(provider)} plan refused this call for \`${model}\`. `
         + "A plan limits each model separately, so a heavier model can be exhausted while a "
         + "lighter one still works — switching model is usually the fastest fix. The allowance "
         + `is also shared with everything signed in to the plan, the \`${cli}\` CLI included.`
