@@ -1,4 +1,4 @@
-// ai-auth — bring-your-own-credential auth for Anthropic and OpenAI.
+// ai-auth — bring-your-own-credential auth for Anthropic, OpenAI and Google Gemini.
 //
 // Three ways to pay for a model call, behind one small set of pieces:
 //
@@ -35,20 +35,39 @@ export {
   parseCodexAuth, readCodexLogin,
 } from "./codex.js";
 
+export {
+  ANTIGRAVITY_OAUTH, AntigravityAuthError, AntigravityCliCredential, AntigravityLoginError,
+  antigravityTokenUrl, exchangeAntigravityCode, parseAntigravityToken, refreshAntigravityToken,
+  startAntigravityLogin,
+} from "./antigravity.js";
+
 export { ClaudeAccountStore } from "./account-store.js";
-export { apiKeys, claudeAccounts, _resetHostSecret } from "./tenant.js";
+export { AntigravityAccountStore } from "./antigravity-account-store.js";
+export { antigravityAccounts, apiKeys, claudeAccounts, _resetHostSecret } from "./tenant.js";
 export { ApiKeyStore } from "./key-store.js";
 
 export {
   FREE, PRICING, PROVIDER_IDS, SUBSCRIPTION_PROVIDERS, UNKNOWN_MODEL_PRICING, costOf,
-  formatUsd, isPricingKnown, isSubscription, pricingFor, providerOf, wireOf, worstCaseCost,
+  formatUsd, isPricingKnown, isSubscription, pricingFor, providerOf, ratesAt, wireOf, worstCaseCost,
 } from "./pricing.js";
 
-export { MODELS, modelSpec, modelsFor, pricingKeyFor } from "./models.js";
+export {
+  MODELS, defaultModelFor, defaultModels, modelSpec, modelsFor, pricingKeyFor, providersForModel,
+} from "./models.js";
 export { describeProviderError, providerErrorFacts } from "./errors.js";
 
 export {
   ANTHROPIC_VERSION, CLAUDE_CODE_BETA, CLAUDE_CODE_SYSTEM, CLAUDE_CODE_VERSION,
   CODEX_BASE_URL, anthropicKeyOptions, anthropicSubscriptionOptions, codexOptions,
-  httpHeadersFor, openAiKeyOptions, withClaudeCodeIdentity,
+  codexResponsesBody, httpHeadersFor, openAiKeyOptions, withClaudeCodeIdentity,
 } from "./clients.js";
+
+export {
+  ANTIGRAVITY_CLIENT_VERSION, CLOUD_CODE_DAILY_BASE_URL, CLOUD_CODE_PROD_BASE_URL,
+  GEMINI_38_FLASH_TIERED, GEMINI_STUDIO_BASE_URL, GOOGLE_ENTERPRISE_CLOUD_CODE_PROJECT,
+  antigravityCliOptions, antigravityClientVersion, antigravityThinkingLevel, geminiKeyOptions,
+  geminiStudioModelId, isAntigravityUpgradeNotice, normalizeAntigravityModelId,
+  sanitizePersonalCloudCodeProject, toCodeAssistRequest,
+} from "./gemini.js";
+
+export { sanitizeGeminiFunctionParameters } from "./gemini-schema.js";

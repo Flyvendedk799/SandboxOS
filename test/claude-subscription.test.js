@@ -167,6 +167,9 @@ test("a call on the subscription sends a bearer token and opens with the Claude 
   // answers fine.
   assert.equal(sent.body.system[0].text, "You are Claude Code, Anthropic's official CLI for Claude.");
   assert.equal(sent.body.system.length, 1, "no caller prompt was supplied, so there is nothing after it");
+  // The 5.x models 400 on a non-default temperature or any `thinking` setting, so none is sent.
+  assert.equal(sent.body.model, "claude-sonnet-5-5", "no model chosen: the catalogue default");
+  for (const field of ["temperature", "top_p", "top_k", "thinking"]) assert.ok(!(field in sent.body), field);
 });
 
 test("disconnecting falls the tenant back to needing a key", async () => {

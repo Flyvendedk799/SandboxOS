@@ -14,10 +14,22 @@ import { canDelegate } from "../../kernel/src/capabilities.js";
 
 const now = () => Date.now();
 const id = (prefix) => `${prefix}_${crypto.randomUUID().slice(0, 8)}`;
-// The providers a tenant may select, in the order a picker should show them. Two are
-// metered API keys and two are subscriptions the user or operator has signed in to; the
-// difference in what it takes to make a call lives in packages/llm/src/providers.js.
-export const LLM_PROVIDERS = ["claude", "claude-code", "openai", "codex"];
+// The providers a tenant may select, in the order a picker should show them: per vendor,
+// the metered API key and then the subscription. What it takes to make a call with each
+// lives in packages/llm/src/providers.js.
+export const LLM_PROVIDERS = ["claude", "claude-code", "openai", "codex", "gemini", "gemini-cli"];
+
+/** A model id as a person might type it: no spaces, nothing a URL or a header would mangle. */
+const MODEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$/;
+
+/** A stored model id, or null for "the provider's default". Throws on anything else. */
+export function normalizeLlmModel(model) {
+  if (model == null) return null;
+  const value = String(model).trim();
+  if (!value) return null;
+  if (!MODEL_ID_RE.test(value)) throw new Error(`invalid model id: ${model}`);
+  return value;
+}
 
 function normalizeLlmProvider(provider) {
   const value = String(provider ?? "").trim().toLowerCase();
@@ -55,24 +67,33 @@ export function getTenantProfile(tenantId) {
   return db.prepare("SELECT * FROM tenant_profiles WHERE tenant_id=?").get(tenantId) ?? null;
 }
 
-export function updateTenantProfile(tenantId, { llmProvider, onboardingCompleted } = {}) {
+/**
+ * @param {object} changes
+ * @param {string} [changes.llmProvider]
+ * @param {string|null} [changes.llmModel] undefined keeps the stored model; null or ""
+ *   clears it back to the provider's catalogue default
+ * @param {boolean} [changes.onboardingCompleted]
+ */
+export function updateTenantProfile(tenantId, { llmProvider, llmModel, onboardingCompleted } = {}) {
   if (typeof tenantId !== "string" || !tenantId) return null;
   const current = getTenantProfile(tenantId);
   const next = {
     llm_provider: llmProvider == null ? (current?.llm_provider ?? "claude") : normalizeLlmProvider(llmProvider),
+    llm_model: llmModel === undefined ? (current?.llm_model ?? null) : normalizeLlmModel(llmModel),
     onboarding_completed: onboardingCompleted == null
       ? (current?.onboarding_completed ?? 0)
       : (onboardingCompleted ? 1 : 0),
     updated_at: now(),
   };
   openDb().prepare(`INSERT INTO tenant_profiles
-      (tenant_id, llm_provider, onboarding_completed, updated_at)
-      VALUES (?, ?, ?, ?)
+      (tenant_id, llm_provider, llm_model, onboarding_completed, updated_at)
+      VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(tenant_id) DO UPDATE SET
         llm_provider=excluded.llm_provider,
+        llm_model=excluded.llm_model,
         onboarding_completed=excluded.onboarding_completed,
         updated_at=excluded.updated_at`)
-    .run(tenantId, next.llm_provider, next.onboarding_completed, next.updated_at);
+    .run(tenantId, next.llm_provider, next.llm_model, next.onboarding_completed, next.updated_at);
   return getTenantProfile(tenantId);
 }
 

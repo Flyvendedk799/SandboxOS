@@ -9,6 +9,8 @@
 // plain fetch headers, which is what SandboxOS itself uses: the spine talks to both
 // APIs over global fetch and has no SDK to configure.
 
+import { antigravityCliOptions } from "./gemini.js";
+
 /**
  * The system block a Claude Code OAuth token has to carry.
  *
@@ -83,8 +85,36 @@ export const CLAUDE_CODE_BETA = [
 
 export const ANTHROPIC_VERSION = "2023-06-01";
 
-/** Codex speaks the OpenAI Responses API at its own host, not at api.openai.com. */
+/**
+ * Codex speaks the OpenAI **Responses** API at its own host, not at api.openai.com — and
+ * only that API: the ChatGPT backend has no `/chat/completions`. A request there also has
+ * to carry `instructions`, `store: false` and `stream: true`, and must not carry
+ * `max_output_tokens`; see codexResponsesBody.
+ */
 export const CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex";
+
+/**
+ * The body the ChatGPT Codex backend accepts, from Responses-API pieces.
+ *
+ * Each field answers a refusal the backend is known to give (these are the Codex CLI's
+ * own request shape, not verified from this tree against a live plan): no `instructions`
+ * → 400 "Instructions are required"; `store` left at its default → 400, a subscription
+ * cannot store responses server-side; no `stream: true` → 400 "Stream must be set to
+ * true"; the token-limit parameters → "Unsupported parameter". With `store: false` nothing is kept
+ * between calls, so every request carries the whole conversation as `input` — and the
+ * items echoed back must not keep the server-side `id`s the backend just told us it did
+ * not store.
+ */
+export function codexResponsesBody({ model, instructions, input, tools = [] }) {
+  return {
+    model,
+    instructions: instructions || "You are a helpful assistant.",
+    input,
+    store: false,
+    stream: true,
+    ...(tools.length ? { tools, tool_choice: "auto", parallel_tool_calls: false } : {}),
+  };
+}
 
 /** A metered Anthropic API key. Nothing surprising; here for symmetry with the other three. */
 export function anthropicKeyOptions(apiKey) {
@@ -153,6 +183,7 @@ export function codexOptions(identity, baseUrl = CODEX_BASE_URL) {
  * beside a working bearer token is not ignored, it is rejected.
  */
 export function httpHeadersFor(credential) {
+  // SandboxOS names the metered Anthropic provider `claude`; it falls to the default.
   const json = { "content-type": "application/json" };
   switch (credential.provider) {
     case "claude-code":
@@ -173,6 +204,11 @@ export function httpHeadersFor(credential) {
       };
     case "openai":
       return { ...json, authorization: `Bearer ${credential.apiKey}` };
+    case "gemini":
+      // A header rather than `?key=` in the URL: the URL is what ends up in logs.
+      return { ...json, "x-goog-api-key": credential.apiKey };
+    case "gemini-cli":
+      return antigravityCliOptions({ accessToken: credential.accessToken, projectId: credential.projectId }).defaultHeaders;
     default:
       return { ...json, "x-api-key": credential.apiKey, "anthropic-version": ANTHROPIC_VERSION };
   }

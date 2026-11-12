@@ -13,6 +13,7 @@ process.env.SANDBOXOS_CELL_BACKEND = "local";
 process.env.SANDBOXOS_PASSWORD = "test";
 delete process.env.ANTHROPIC_API_KEY;
 delete process.env.OPENAI_API_KEY;
+delete process.env.GEMINI_API_KEY;
 
 export const TEST_HOME = home;
 
