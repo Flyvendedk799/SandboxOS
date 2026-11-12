@@ -1554,8 +1554,15 @@ async function handle(req, res) {
       if (op === "tab") return sendJson(res, 200, { ok: true, ...(await rec.tab(body.op, body.id)) });
       return sendJson(res, 404, { ok: false, error: "not found" });
     } catch (e) {
-      const status = e instanceof BraiwserError ? e.status : (e?.code === "BRAIWSER_UNAVAILABLE" ? 503 : 500);
-      return sendJson(res, status, { ok: false, code: e?.code ?? "BRAIWSER_ERROR", error: e?.message ?? "browser error" });
+      if (e instanceof BraiwserError) return sendJson(res, e.status, { ok: false, code: e.code, error: e.message });
+      // The browser itself failing (Chromium would not start, a page crashed) is the
+      // host's problem, not the request's: logged here, said plainly there.
+      console.error(`braiwser ${op || "request"}: ${e?.stack ?? e}`);
+      const code = e?.code === "BRAIWSER_UNAVAILABLE" ? "BRAIWSER_UNAVAILABLE" : op === "open" ? "BRAIWSER_LAUNCH_FAILED" : "BRAIWSER_ERROR";
+      const error = op === "open" && code !== "BRAIWSER_UNAVAILABLE"
+        ? `Braiwser could not start a browser on this host: ${String(e?.message ?? e).split("\n")[0]}`
+        : e?.message ?? "browser error";
+      return sendJson(res, 503, { ok: false, code, error });
     }
   }
 

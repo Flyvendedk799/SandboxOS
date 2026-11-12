@@ -93,6 +93,8 @@ export function installRuntime({ root = defaultRuntimeRoot(), script = path.join
 
 // ── loading the driver ──────────────────────────────────────────────────────
 
+let warnedNoSandbox = false;
+
 /**
  * Braiwser's Playwright driver, loaded from the installed runtime, configured for a
  * server: headless, a standard user agent (headless Chromium's own is refused by
@@ -106,7 +108,20 @@ export function loadDriver(status = inspectRuntime()) {
   const real = req("playwright-core");
   const chromium = {
     launch: async (options) => {
-      const browser = await real.chromium.launch(options);
+      let browser;
+      try {
+        browser = await real.chromium.launch(options);
+      } catch (e) {
+        // Many Linux hosts (Ubuntu 23.10+ AppArmor, unprivileged containers) do not let
+        // Chromium build its own sandbox. Playwright's own default is to run without it;
+        // do that rather than leave the Browser unable to start, and say so once.
+        if (!options?.chromiumSandbox || !/sandbox/i.test(String(e?.message))) throw e;
+        if (!warnedNoSandbox) {
+          warnedNoSandbox = true;
+          console.warn("braiwser: this host cannot run Chromium's own sandbox; running without it (set SANDBOXOS_BRAIWSER_NO_SANDBOX=1 to say so explicitly)");
+        }
+        browser = await real.chromium.launch({ ...options, chromiumSandbox: false, args: [...(options.args ?? []), "--disable-dev-shm-usage"] });
+      }
       const newContext = browser.newContext.bind(browser);
       browser.newContext = (o = {}) => newContext({ ...o, serviceWorkers: "block" });
       return browser;

@@ -838,7 +838,7 @@ const browser = {
         const r = await fetch(`${base}/${wid}/open`, { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ width: size.w || 1024, height: size.h || 640, url: address }) });
         const data = await r.json().catch(() => ({}));
-        if (r.status === 503) return poll();
+        if (r.status === 503 && data.code === "BRAIWSER_UNAVAILABLE") return poll();
         if (!r.ok) { overlay.hidden = false; fill(overlay, h("div.braiwser-start", null, h("p", null, data.error ?? "Braiwser could not start."), h("button.app-btn", { onclick: start }, "Try again"))); return; }
         opened = true;
         if (address === BRAIWSER_HOME && (!data.url || data.url === BRAIWSER_HOME)) showStart(); else overlay.hidden = true;
