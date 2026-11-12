@@ -251,3 +251,41 @@ test("real Braiwser: a Cell port, its hot-reload socket, typing, tabs and refusa
     assert.match((await s.describe()).blocked.reason, /port 4000/);
   } finally { await mgr.closeAll(); cell.close(); cell.closeAllConnections(); }
 });
+
+// ── agents browse through Braiwser too ─────────────────────────────────────
+
+test("net.browse: an agent reads a JavaScript-rendered page through Braiwser, under the same rules", async () => {
+  const { getKernel } = await import("../packages/kernel/src/kernel.js");
+  const { grantsFor } = await import("../packages/control-db/src/registry.js");
+  openDb();
+  const { owner, sandbox } = ensureSeed("local");
+  const kernel = await getKernel(sandbox);
+  const held = grantsFor(owner.id, sandbox.id);
+  const call = (server, tool, args) => kernel.call({ principalId: owner.id, heldPatterns: held, server, tool, args });
+  const saved = process.env.SANDBOXOS_BRAIWSER_ROOT;
+  const app = http.createServer((_q, r) => { r.writeHead(200, { "content-type": "text/html" }); r.end("<title>spa</title><div id=root></div><script>root.textContent='rendered by script'</script>"); });
+  await new Promise((r) => app.listen(0, "127.0.0.1", r));
+  const port = app.address().port;
+  try {
+    let r = await call("net", "browse", { url: `http://localhost:${port}/` });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /not installed on this host/, "no runtime: a sentence saying how to get one");
+    if (!REAL) return;
+    process.env.SANDBOXOS_BRAIWSER_ROOT = REAL;
+    r = await call("net", "browse", { url: `http://localhost:${port}/` });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /not exposed/, "an unexposed port is refused for an agent as for a person");
+    assert.ok((await call("ports", "expose", { port, name: "spa" })).ok);
+    r = await call("net", "browse", { url: `localhost:${port}` });
+    assert.ok(r.ok, r.error);
+    assert.equal(r.result.title, "spa");
+    assert.match(r.result.text, /rendered by script/, "what fetch would miss");
+    r = await call("net", "browse", { url: "http://169.254.169.254/latest/meta-data" });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /private address/);
+  } finally {
+    process.env.SANDBOXOS_BRAIWSER_ROOT = saved;
+    await call("ports", "unexpose", { port }).catch(() => {});
+    app.close(); _resetKernels(); closeDb();
+  }
+});

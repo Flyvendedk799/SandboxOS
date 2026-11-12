@@ -39,6 +39,13 @@ gap, shared with `net.fetch`'s threat model but not its pinning: Chromium resolv
 again after the guard did, so a DNS-rebinding host could in principle swap addresses
 between the two lookups.
 
+## Agents
+
+`net.browse` is also a Kernel tool: an agent opens a page in Braiwser and gets its
+rendered text and title back — for pages that need JavaScript, where `net.fetch` returns
+an empty shell. Same policy as above, per request; a few run at once per host
+(`SANDBOXOS_BRAIWSER_AGENT_CONCURRENCY`, default 2), the rest wait.
+
 ## Capability and limits
 
 Using it needs `net.browse` (owners hold `*`). Environment knobs:
