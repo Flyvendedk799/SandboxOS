@@ -13,10 +13,10 @@
 
 name: release check
 
+# Pushes and pull requests are checked by ServerHoster (.survhub/ci.yml), which
+# runs the Linux-without-Docker leg and the better-sqlite3 suite. This matrix
+# (macOS, Windows, Linux with Docker) now runs only when started by hand.
 on:
-  push:
-    branches: [master]
-  pull_request:
   workflow_dispatch:
 
 jobs:

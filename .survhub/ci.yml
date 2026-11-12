@@ -1,0 +1,39 @@
+# Runs on ServerHoster (in Docker on the VPS), not GitHub Actions.
+# Triggers: pushes to master and pull requests into master.
+#
+# Covers the two legs of .github/workflows/release-check.yml that run on Linux
+# without Docker: `linux-no-docker` (the release check page) and
+# `suite (better-sqlite3)`. The job has no Docker, so the release check reports
+# it as absent and skips the container stage, exactly like that leg did.
+# The macOS, Windows and Linux-with-Docker legs stay in the GitHub workflow,
+# which now only runs when started by hand.
+image: mcr.microsoft.com/playwright:v1.63.0-noble
+timeoutMinutes: 40
+memoryMb: 4096
+cpus: 2
+env:
+  # Node is fetched into the per-repo cache; the image's Chromium is found via
+  # PLAYWRIGHT_BROWSERS_PATH, which the image sets.
+  PATH: /cache/tools/node-v24.11.1-linux-x64/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+steps:
+  - name: Node 24 and 22
+    run: |
+      set -e
+      mkdir -p /cache/tools
+      for v in 24.11.1 22.20.0; do
+        d=/cache/tools/node-v$v-linux-x64
+        [ -x $d/bin/node ] || curl -fsSL https://nodejs.org/dist/v$v/node-v$v-linux-x64.tar.gz | tar xz -C /cache/tools
+        $d/bin/node -v
+      done
+  - name: Install
+    run: npm ci --no-audit --no-fund
+  - name: Release check
+    run: npm run release-check
+  - name: Suite (better-sqlite3, Node 22)
+    run: |
+      set -e
+      export PATH=/cache/tools/node-v22.20.0-linux-x64/bin:$PATH
+      rm -rf node_modules
+      npm ci --no-audit --no-fund
+      npm install --no-save better-sqlite3
+      npm run test:better-sqlite3
