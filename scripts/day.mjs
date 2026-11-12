@@ -31,6 +31,9 @@ const home = path.join(os.tmpdir(), `sandboxos-day-${crypto.randomUUID().slice(0
 process.env.SANDBOXOS_HOME = home;
 process.env.SANDBOXOS_CELL_BACKEND = "local";
 process.env.SANDBOXOS_PASSWORD = "day";
+// The Browser is Braiwser. The day never installs it behind your back: point
+// SANDBOXOS_BRAIWSER_ROOT at an installed runtime to see a real page in act 4.
+process.env.SANDBOXOS_BRAIWSER_AUTOINSTALL ??= "0";
 
 /**
  * DAY_KEYBOARD=1 drives the whole day with the keyboard: every activation
@@ -285,8 +288,20 @@ try {
   // error, and this day fails on those.
   check(await until(serves("day one"), "the proxy to answer"), "and the Gateway serves it under the slug, no tunnel required");
   await desktop("open", { app: "browser", props: { port: serverPort, path: "/" } });
-  const inFrame = await until(async () => page.frames().some((f) => f.url().includes(`/p/${serverPort}/`)), "the Browser to show it");
-  check(inFrame, "the Browser window shows it inside the desktop");
+  const braiwserReady = (await page.evaluate(async () => (await fetch(`/${location.pathname.split("/")[1]}/braiwser/status`)).json())).ready;
+  if (braiwserReady) {
+    // Braiwser opens the port the window was handed as this machine's localhost.
+    const shown = await until(async () => page.evaluate((p) => {
+      const addr = document.querySelector(".braiwser-address")?.value ?? "";
+      return addr.includes(`localhost:${p}`) && !!document.querySelector(".braiwser-frame")?.getAttribute("src");
+    }, serverPort), "Braiwser to show it", 45_000);
+    check(shown, "the Browser (Braiwser) window shows it inside the desktop");
+  } else {
+    // No runtime on this host: the window says how it gets one, and offers the
+    // port directly meanwhile — never an empty page and never an error.
+    const setup = await until(async () => page.evaluate(() => /Braiwser/.test(document.querySelector(".braiwser-start")?.textContent ?? "")), "Braiwser's setup screen");
+    check(setup, "the Browser (Braiwser) window says how it gets set up, and offers the ports meanwhile");
+  }
   await shot(page, "04-ports");
 
   // ── 5 · Access ────────────────────────────────────────────────────────────

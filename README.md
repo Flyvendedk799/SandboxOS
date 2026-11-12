@@ -107,12 +107,19 @@ Every call goes **authenticate → authorize (default-deny) → route → execut
 
 ### Paying for the model
 
-Four providers, split by *billing* rather than by vendor: a metered **Anthropic** or
-**OpenAI** API key, encrypted per tenant; a **Claude subscription** the tenant signs in to
-from the settings page, so calls bill to their own plan rather than to whoever set the
-host up; or the **`codex` login** already on the machine, for a self-hosted instance where
-the operator's plan is the point. All four go through one credential resolver, so the
+Six providers, split by *billing* rather than by vendor: a metered **Anthropic**,
+**OpenAI** or **Gemini** API key, encrypted per tenant; a **Claude subscription** or a
+**Google subscription** (Gemini through Antigravity) the tenant signs in to from the
+settings page, so calls bill to their own plan rather than to whoever set the host up; or
+the **`codex` login** already on the machine, for a self-hosted instance where the
+operator's plan is the point. All six go through one credential resolver, so the
 Assistant, the AI agents and the `llm` server never learn the difference.
+
+The model is picked the same way everywhere: the request's own, else the tenant's saved
+choice (Settings → AI provider and model, grouped per provider with each model's weight),
+else the provider's catalogue default — Sonnet 5.5, GPT-5, Gemini 3.8 Flash. The catalogue
+is ai-auth's, newest models included (Fable 5.2, Opus 5.5, Sonnet 5.5, Haiku 5.5), and a
+model it does not list can still be typed in.
 
 Ported from [ai-auth](https://github.com/Flyvendedk799/ai-auth), including the handful of
 details that each cost a day to find out — chief among them that a subscription token must
@@ -138,7 +145,7 @@ of them is revertible from the revision history.
   thing folds into a stack: same document, one front window, dock along the bottom.
 - **Apps** — sixteen built in. The desk: Files, **Terminal** (a real PTY whose
   sessions outlive the window — close it, reopen it, the build is still running),
-  Console, Notes, Assistant, Observability, Media, Browser, Settings. And the
+  Console, Notes, Assistant, Observability, Media, Braiwser (the browser), Settings. And the
   machine's own work, so a console is never required: **Jobs** (supervised processes,
   live logs, the cron schedule), **Ports**, **Agents**, **Secrets**, **Sync** (Tide),
   **Access** (who can reach this machine) and **Audit** (every call, hash-chain

@@ -30,9 +30,10 @@ export function initSettings() {
   let tokens = [];
   let me = null;
   let claude = null;
+  let google = null;
 
   async function load() {
-    const [p, q, s, sb, d, ac, tk, cc] = await Promise.all([
+    const [p, q, s, sb, d, ac, tk, cc, ag] = await Promise.all([
       api.get("/api/profile").catch(() => null),
       api.get("/api/quota").catch(() => null),
       api.tryMcp("mcp-registry", "list", {}),
@@ -41,6 +42,7 @@ export function initSettings() {
       api.get("access").catch(() => ({ access: [] })),
       api.get("tokens").catch(() => ({ tokens: [] })),
       api.get("/api/claude-code").catch(() => null),
+      api.get("/api/antigravity").catch(() => null),
     ]);
     profile = p;
     quota = q?.quota ?? null;
@@ -51,6 +53,7 @@ export function initSettings() {
     me = ac?.you ?? null;
     tokens = tk?.tokens ?? [];
     claude = cc;
+    google = ag;
     if (p) setState({ user: p.user, tenant: p.tenant, profile: p.profile });
     if (s) setState({ servers: s.enabled ?? [] });
     render();
@@ -65,9 +68,42 @@ export function initSettings() {
     return p.configured ? "key set" : "no key yet";
   }
 
+  /** One option's text: the name, its weight, and whether a newer one replaced it. */
+  function modelOptionText(m) {
+    return `${m.label} · ${m.tier}${m.previous ? " · previous" : ""}`;
+  }
+
+  /**
+   * The model chooser, the way OpenBot draws it: one group per provider that can make a
+   * call (plus the selected one, so a choice never vanishes), each opening with a
+   * "default" entry that follows the catalogue. A value is `provider|model`; an empty
+   * model means "the provider's default".
+   */
+  function modelSelect(providers, currentProvider, currentModel) {
+    const shown = providers.filter((p) => p.configured || p.id === currentProvider);
+    const select = h("select", { style: { minWidth: "18rem" } },
+      ...shown.map((p) => {
+        const known = (p.catalogue ?? []).some((m) => m.id === currentModel);
+        const defaultSpec = (p.catalogue ?? []).find((m) => m.id === p.defaultModel);
+        return h("optgroup", { label: `${p.label}${p.configured ? "" : " — not connected"}` },
+          h("option", { value: `${p.id}|`, selected: p.id === currentProvider && !currentModel },
+            `Default — ${defaultSpec?.label ?? p.defaultModel ?? "provider default"}`),
+          ...(p.catalogue ?? []).map((m) => h("option", {
+            value: `${p.id}|${m.id}`, selected: p.id === currentProvider && m.id === currentModel,
+          }, modelOptionText(m))),
+          // A typed-in model is a real choice; show it rather than pretend it is the default.
+          p.id === currentProvider && currentModel && !known
+            ? h("option", { value: `${p.id}|${currentModel}`, selected: true }, `${currentModel} · typed in`)
+            : null,
+        );
+      }));
+    return select;
+  }
+
   function providerSection() {
     const providers = profile?.profile?.providers ?? [];
     const current = profile?.profile?.llmProvider;
+    const currentModel = profile?.profile?.llmModel ?? null;
     const keyInput = h("input", { type: "password", placeholder: "paste a new key", autocomplete: "new-password" });
 
     const picker = h("div.choice-grid", null, ...providers.map((p) => h("label.choice", null,
@@ -75,30 +111,81 @@ export function initSettings() {
       h("span.name", p.label ?? p.id),
       h("span.note", { class: p.configured ? "ok" : "" }, providerNote(p)),
     )));
+    const chosenProvider = () => picker.querySelector("input:checked")?.value ?? current;
+
+    const models = modelSelect(providers, current, currentModel);
+    const customInput = h("input", {
+      type: "text", placeholder: "or type a model id", autocomplete: "off", spellcheck: "false",
+      style: { maxWidth: "16rem" },
+    });
+    const modelNote = h("p.dim", { style: { fontSize: "var(--fs-sm)", margin: "6px 0 0" } });
+
+    /** What the select says now, as { provider, model }. */
+    const selected = () => {
+      const [prov, ...rest] = String(models.value ?? "").split("|");
+      return { provider: prov || chosenProvider(), model: rest.join("|") || null };
+    };
+    function describeSelection() {
+      const { provider, model } = selected();
+      const p = providers.find((x) => x.id === provider);
+      const id = model ?? p?.defaultModel;
+      const spec = (p?.catalogue ?? []).find((m) => m.id === id);
+      modelNote.textContent = spec
+        ? `${spec.label} (${spec.tier}) — ${spec.note}`
+        : id ? `${id} — not in the catalogue; sent to the provider as typed.` : "";
+    }
+    describeSelection();
+
+    // Choosing a model in another provider's group switches provider with it, and
+    // switching provider resets the model to that provider's default — the two can
+    // never disagree on the way to the server.
+    models.addEventListener("change", () => {
+      const { provider } = selected();
+      const radio = picker.querySelector(`input[value="${CSS.escape(provider)}"]`);
+      if (radio) radio.checked = true;
+      describeSelection();
+    });
+    picker.addEventListener("change", () => {
+      const prov = chosenProvider();
+      const fallback = `${prov}|`;
+      if (![...models.options].some((o) => o.value === fallback)) {
+        // Not connected yet, so it has no group: add one holding just its default.
+        const p = providers.find((x) => x.id === prov);
+        models.append(h("optgroup", { label: `${p?.label ?? prov} — not connected` },
+          h("option", { value: fallback }, `Default — ${p?.defaultModel ?? "provider default"}`)));
+      }
+      models.value = fallback;
+      describeSelection();
+    });
 
     // A subscription is paid for by a plan, not by a key, so the key row would be a box
     // with nowhere to send what you type into it. Hidden rather than disabled: a field
     // that cannot do anything is worse than no field.
     const keyless = providers.find((p) => p.id === current)?.billing === "subscription";
 
-    return section("AI provider",
-      "Natural-language commands and AI agents run against this provider. A key is stored encrypted and never returned to the browser; a subscription is connected below and bills to that plan.",
+    return section("AI provider and model",
+      "Natural-language commands, the Assistant and AI agents run against this provider and model. A key is stored encrypted and never returned to the browser; a subscription is connected below and bills to that plan. The model list is ai-auth's catalogue — light, balanced or heavy — and any other model id can be typed in.",
       picker,
+      h("div.row", { style: { marginTop: "var(--s-3)", flexWrap: "wrap" } },
+        h("span.dim", "Model"), models, customInput),
+      modelNote,
       h("div.row", { style: { marginTop: "var(--s-3)" } },
         keyless ? null : keyInput,
         h("button", {
           onclick: async () => {
-            const chosen = picker.querySelector("input:checked")?.value ?? current;
+            const { provider, model } = selected();
+            const typed = customInput.value.trim();
             try {
               const r = await api.post("/api/profile", {
-                llmProvider: chosen,
+                llmProvider: provider,
+                llmModel: typed || model,
                 ...(keyInput.value.trim() ? { apiKey: keyInput.value.trim() } : {}),
                 completeOnboarding: true,
               });
               profile = r;
               setState({ profile: r.profile });
               keyInput.value = "";
-              toast("Provider saved", { kind: "ok" });
+              toast("Provider saved", { body: `Using ${r.profile.effectiveModel}`, kind: "ok" });
               render();
             } catch (e) { toastError("Could not save the provider", e); }
           },
@@ -175,6 +262,87 @@ export function initSettings() {
       "Calls fall back to whatever API key is configured. You can connect again at any time.")) return;
     try {
       claude = await api.del("/api/claude-code");
+      profile = await api.get("/api/profile");
+      toast("Disconnected", { kind: "ok" });
+      render();
+    } catch (e) { toastError("Could not disconnect", e); }
+  }
+
+  // ── Google subscription (Gemini via Antigravity) ───────────────────────────
+  //
+  // The same paste-the-code flow as Claude's, against Google: approve on Google's page,
+  // paste back the code it shows. Some Google licenses also need a Cloud project id,
+  // which nothing in the login reveals, so it can be given here.
+
+  function googleSection() {
+    const connected = !!google?.connected;
+    return section("Google subscription (Gemini)",
+      "Sign in with a Google account and Gemini calls bill to its plan through Google's Cloud Code endpoint, the way the `agy` CLI does. "
+      + "The approval page says Antigravity, because this is the login that CLI performs.",
+      h("div.row", { style: { flexWrap: "wrap" } },
+        h("span.chip", { class: connected ? "ok" : "" }, connected ? "connected" : "not connected"),
+        google?.email ? h("span.chip.mono", google.email) : null,
+        google?.projectId ? h("span.chip.mono", `project ${google.projectId}`) : null,
+        google?.expired ? h("span.chip.sand", "token expired — refreshes on next use") : null,
+        h("span.spacer"),
+        connected ? h("button.ghost.sm", { onclick: editGoogleProject }, "Project…") : null,
+        connected
+          ? h("button.ghost.sm", { onclick: disconnectGoogle }, "Disconnect")
+          : h("button.sm", { onclick: connectGoogle }, "Connect"),
+      ),
+    );
+  }
+
+  async function connectGoogle() {
+    let started;
+    try {
+      started = await api.post("/api/antigravity/login", {});
+    } catch (e) { return toastError("Could not start the login", e); }
+
+    const got = await dialog({
+      title: "Connect a Google subscription",
+      message: "Open the link, sign in with Google, approve, and paste the code it shows you back here.",
+      fields: [
+        { name: "code", label: "Authorization code", placeholder: "4/0A…", hint: "The whole URL works too." },
+        { name: "projectId", label: "Google Cloud project (optional)", placeholder: "my-project-id",
+          hint: "Only if your license needs one. You can set it later." },
+      ],
+      confirmLabel: "Connect",
+      render: () => h("p", null, h("a", { href: started.url, target: "_blank", rel: "noreferrer noopener" }, "Open the Google approval page")),
+    });
+    if (!got?.code?.trim()) return;
+
+    try {
+      google = await api.post("/api/antigravity/login/complete", {
+        code: got.code.trim(),
+        ...(got.projectId?.trim() ? { projectId: got.projectId.trim() } : {}),
+      });
+      profile = await api.get("/api/profile");
+      toast("Google subscription connected", { body: google.email ?? undefined, kind: "ok" });
+      render();
+    } catch (e) { toastError("Could not complete the login", e); }
+  }
+
+  async function editGoogleProject() {
+    const got = await dialog({
+      title: "Google Cloud project",
+      message: "Some Google licenses route Gemini through a project of your own. Leave empty if yours does not.",
+      fields: [{ name: "projectId", label: "Project id", value: google?.projectId ?? "", placeholder: "my-project-id" }],
+      confirmLabel: "Save",
+    });
+    if (!got) return;
+    try {
+      google = await api.post("/api/antigravity/project", { projectId: got.projectId.trim() });
+      toast("Project saved", { kind: "ok" });
+      render();
+    } catch (e) { toastError("Could not save the project", e); }
+  }
+
+  async function disconnectGoogle() {
+    if (!await confirmDialog("Disconnect the Google subscription?",
+      "Gemini calls fall back to whatever API key is configured. You can connect again at any time.")) return;
+    try {
+      google = await api.del("/api/antigravity");
       profile = await api.get("/api/profile");
       toast("Disconnected", { kind: "ok" });
       render();
@@ -496,6 +664,7 @@ export function initSettings() {
         )),
       providerSection(),
       claudeSection(),
+      googleSection(),
       cellSection(),
       serversSection(),
       accessSection(),

@@ -7,13 +7,15 @@ import { ensureSeed, mintMachineToken } from "../packages/control-db/src/registr
 import { getTenantSecretValue } from "../packages/secrets/src/store.js";
 import { createServer } from "../apps/gateway/src/server.js";
 
-let owner, sandbox, token, srv, port, savedAnthropic, savedOpenAI;
+let owner, sandbox, token, srv, port, savedAnthropic, savedOpenAI, savedGemini;
 
 test.before(async () => {
   savedAnthropic = process.env.ANTHROPIC_API_KEY;
   savedOpenAI = process.env.OPENAI_API_KEY;
   delete process.env.ANTHROPIC_API_KEY;
   delete process.env.OPENAI_API_KEY;
+  savedGemini = process.env.GEMINI_API_KEY;
+  delete process.env.GEMINI_API_KEY;
   openDb();
   ({ owner, sandbox } = ensureSeed("local"));
   const m = mintMachineToken(owner.id, sandbox.id, ["*"], { label: "profile-test" });
@@ -28,6 +30,7 @@ test.after(() => {
   closeDb();
   if (savedAnthropic) process.env.ANTHROPIC_API_KEY = savedAnthropic;
   if (savedOpenAI) process.env.OPENAI_API_KEY = savedOpenAI;
+  if (savedGemini) process.env.GEMINI_API_KEY = savedGemini;
 });
 
 async function api(path, { method = "GET", body, auth = true } = {}) {
@@ -54,7 +57,7 @@ test("GET /api/profile returns default provider state without secrets", async ()
   assert.equal(data.profile.llmProvider, "claude");
   assert.equal(data.profile.onboardingCompleted, false);
   assert.equal(data.profile.keyConfigured, false);
-  assert.deepEqual(data.profile.providers.map((p) => p.id), ["claude", "claude-code", "openai", "codex"]);
+  assert.deepEqual(data.profile.providers.map((p) => p.id), ["claude", "claude-code", "openai", "codex", "gemini", "gemini-cli"]);
   // The two subscription providers are keyless: they carry no secret name, because their
   // credential is an OAuth login rather than anything anyone pastes into a settings box.
   const byId = Object.fromEntries(data.profile.providers.map((p) => [p.id, p]));
@@ -62,6 +65,17 @@ test("GET /api/profile returns default provider state without secrets", async ()
   assert.equal(byId["claude-code"].billing, "subscription");
   assert.equal(byId["claude-code"].secretName, null);
   assert.equal(byId["claude-code"].configured, false, "nothing is connected on a fresh tenant");
+  assert.equal(byId["gemini"].secretName, "GEMINI_API_KEY");
+  assert.equal(byId["gemini-cli"].billing, "subscription");
+  assert.equal(byId["gemini-cli"].secretName, null);
+  // No model chosen yet: calls use the catalogue's default, and the profile says which.
+  assert.equal(data.profile.llmModel, null);
+  assert.equal(data.profile.effectiveModel, "claude-sonnet-5-5");
+  // The API-key Claude provider offers Claude models, not the OpenAI catalogue.
+  assert.ok(byId["claude"].models.includes("claude-opus-5-5"));
+  assert.ok(!byId["claude"].models.some((m) => m.startsWith("gpt")));
+  assert.equal(byId["claude"].defaultModel, "claude-sonnet-5-5");
+  assert.ok(byId["gemini-cli"].catalogue.every((m) => m.tier && m.note));
   assert.ok(!JSON.stringify(data).includes("sk-test"), "profile response must not leak key material");
 });
 
@@ -116,4 +130,53 @@ test("POST /api/profile rejects unknown providers", async () => {
   });
   assert.equal(status, 400);
   assert.equal(data.ok, false);
+});
+
+// ---- the model selector -----------------------------------------------------
+
+test("POST /api/profile saves a catalogued model for its provider", async () => {
+  const { status, data } = await api("/api/profile", {
+    method: "POST", body: { llmProvider: "claude", llmModel: "claude-opus-5-5" },
+  });
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.equal(data.profile.llmModel, "claude-opus-5-5");
+  assert.equal(data.profile.effectiveModel, "claude-opus-5-5");
+});
+
+test("POST /api/profile refuses a catalogued model that belongs to another provider", async () => {
+  const { status, data } = await api("/api/profile", {
+    method: "POST", body: { llmProvider: "claude", llmModel: "gpt-5" },
+  });
+  assert.equal(status, 400);
+  assert.deepEqual(data.providers, ["openai", "codex"]);
+  // Nothing was written by the refused request.
+  assert.equal((await api("/api/profile")).data.profile.llmModel, "claude-opus-5-5");
+});
+
+test("POST /api/profile accepts a typed-in model the catalogue has never heard of", async () => {
+  const { status, data } = await api("/api/profile", {
+    method: "POST", body: { llmProvider: "claude", llmModel: "claude-next-preview" },
+  });
+  assert.equal(status, 200);
+  assert.equal(data.profile.effectiveModel, "claude-next-preview");
+});
+
+test("POST /api/profile refuses a model id no provider could be sent", async () => {
+  const { status } = await api("/api/profile", { method: "POST", body: { llmModel: "two words" } });
+  assert.equal(status, 400);
+});
+
+test("switching provider drops a model from the old one, and null resets to the default", async () => {
+  await api("/api/profile", { method: "POST", body: { llmProvider: "claude", llmModel: "claude-haiku-5-5" } });
+  const switched = await api("/api/profile", { method: "POST", body: { llmProvider: "gemini-cli" } });
+  assert.equal(switched.data.profile.llmModel, null);
+  assert.equal(switched.data.profile.effectiveModel, "gemini-3.8-flash-medium");
+
+  // A bare tiered id counts as its catalogue tier on both Gemini providers.
+  const bare = await api("/api/profile", { method: "POST", body: { llmModel: "gemini-3.8-flash" } });
+  assert.equal(bare.status, 200);
+
+  const reset = await api("/api/profile", { method: "POST", body: { llmModel: null } });
+  assert.equal(reset.data.profile.llmModel, null);
+  await api("/api/profile", { method: "POST", body: { llmProvider: "claude" } });
 });

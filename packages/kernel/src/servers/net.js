@@ -312,6 +312,57 @@ export function netServer(deps) {
           }
         },
       },
+
+      // The agent's way into Braiwser — the same browser the desktop's Browser is.
+      // For pages that need JavaScript to show anything, where fetch returns an
+      // empty shell. Same egress policy, same private-address refusal (per
+      // request, redirects and sub-resources included), and localhost:<port> is
+      // this machine's exposed port only with ports.access, as for a person.
+      browse: {
+        description: "Open a page in Braiwser (a real Chromium) and return its rendered text and title — for pages that need JavaScript. Egress-policy gated like fetch; localhost:<port> is this machine's exposed port.",
+        inputSchema: {
+          type: "object", required: ["url"],
+          properties: { url: { type: "string" }, maxChars: { type: "number" } },
+        },
+        async handler(ctx, a) {
+          if (sandboxId) checkRateLimit(sandboxId, rateConfig);
+          const { inspectRuntime, loadDriver, BraiwserSessions, normalizeAddress } = await import("../../../braiwser/src/index.js");
+          const { exposedPorts } = await import("./ports.js");
+          const { authorize } = await import("../capabilities.js");
+          const status = inspectRuntime();
+          if (!status.ready) throw new Error("Braiwser is not installed on this host yet — open the Browser once (it installs itself) or run `npm run braiwser:install`.");
+          await browseSlot.acquire();
+          const mgr = new BraiwserSessions({
+            loadDriver: () => loadDriver(status), policyFor: () => policy, maxSessions: 1, maxPerSandbox: 1,
+            resolvePort: async (_sbx, port) => {
+              if (!authorize(ctx.heldPatterns ?? [], "ports", "access")) throw new Error("ports.access is not held");
+              if (!exposedPorts(ctx.sandbox)[String(port)]) throw new Error(`port ${port} is not exposed`);
+              return ctx.cell.endpoint(port);
+            },
+          });
+          try {
+            const s = await mgr.open({ sandboxId: sandboxId ?? "agent", windowId: "agent" });
+            const nav = await s.navigate(normalizeAddress(a.url));
+            const blocked = s.recentBlock();
+            if (blocked) throw new Error(`browse refused: ${blocked.reason}`);
+            const read = await s.page().readText({ maxChars: Math.max(1, Math.min(200_000, Number(a.maxChars) || 64_000)) });
+            return { url: read.url, title: read.title, status: nav.status ?? null, outcome: nav.outcome, text: read.text, truncated: read.total > read.text.length };
+          } finally {
+            await mgr.closeAll();
+            browseSlot.release();
+          }
+        },
+      },
     },
   };
 }
+
+// Each browse is a Chromium; a host runs a few at once, the rest wait their turn.
+const browseSlot = (() => {
+  let free = Number(process.env.SANDBOXOS_BRAIWSER_AGENT_CONCURRENCY ?? 2);
+  const waiting = [];
+  return {
+    acquire: () => (free > 0 ? (free--, Promise.resolve()) : new Promise((r) => waiting.push(r))),
+    release: () => { const next = waiting.shift(); if (next) next(); else free++; },
+  };
+})();

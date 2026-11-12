@@ -15,8 +15,8 @@ export const BUILTIN_APPS = [
   { id: "assistant", name: "Assistant",     icon: "assistant", hue: "#b98cff", window: { w: 440, h: 340 }, needs: [] },
   { id: "metrics",   name: "Observability", icon: "metrics",   hue: "#43d17f", window: { w: 400, h: 280 }, needs: ["metrics.*"] },
   { id: "media",     name: "Media",         icon: "media",     hue: "#ff8f5e", window: { w: 420, h: 320 }, needs: ["fs.list"] },
-  { id: "browser",   name: "Browser",       icon: "browser",   hue: "#3ec8ff", window: { w: 520, h: 360 }, needs: ["ports.list"] },
-  { id: "settings",  name: "Settings",      icon: "settings",  hue: "#9fb0c0", window: { w: 400, h: 300 }, needs: [] },
+  { id: "browser",   name: "Braiwser",      icon: "browser",   hue: "#3ec8ff", window: { w: 780, h: 520 }, needs: ["net.browse", "ports.list"] },
+  { id: "settings",  name: "Settings",      icon: "settings",  hue: "#9fb0c0", window: { w: 480, h: 420 }, needs: [] },
   { id: "studio",    name: "OS Studio",     icon: "layers",    hue: "#35d6c4", window: { w: 640, h: 420 }, needs: ["desktop.*"] },
   // The machine's own work, on the desktop rather than in a console: a desktop
   // that sends you elsewhere to restart a dev server is a demo of a desktop
@@ -55,7 +55,7 @@ export const BUILTIN_DISTROS = [
   },
   {
     id: "research", name: "Research Box", hue: "#3ec8ff", theme: "tide",
-    description: "Browser · Notes · Assistant · citations",
+    description: "Braiwser · Notes · Assistant · citations",
     apps: ["browser", "notes", "assistant"], widgets: ["clock", "calendar"],
   },
   {

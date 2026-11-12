@@ -242,7 +242,7 @@ const jobs = {
           ? h("div.ops-ports", null,
               h("span.dim", "answering now:"),
               ...openPorts.map((p) => h("button.app-btn", {
-                title: `Open :${p.port} in the Browser`,
+                title: `Open :${p.port} in Braiwser`,
                 onclick: () => ctx.launch?.("browser", { port: Number(p.port), path: "/" }),
               }, `:${p.port}`, p.name ? h("span.dim", ` ${p.name}`) : null)))
           : null,
@@ -366,7 +366,7 @@ const ports = {
           oncontextmenu: (e) => {
             e.preventDefault();
             menu({ x: e.clientX, y: e.clientY }, [
-              { label: "Open in the Browser", run: () => preview(Number(p.port)) },
+              { label: "Open in Braiwser", run: () => preview(Number(p.port)) },
               { label: "Copy the URL", run: () => navigator.clipboard?.writeText(urlFor(p.port)).then(() => toast("URL copied", { timeout: 1800 })) },
               // The URL is only reachable by someone who can reach this machine,
               // so "share this port" is really "give that person access" — which

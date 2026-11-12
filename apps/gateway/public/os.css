@@ -1229,6 +1229,38 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
 .browser-empty code { font-family: var(--mono); color: var(--os-sand); }
 .port-list { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
 .app-bar select.hist { max-width: 110px; }
+/* Braiwser — the Browser: a frame of a page that runs next to the Gateway. */
+.braiwser .braiwser-bar { gap: 4px; }
+.braiwser .braiwser-bar .app-btn { min-width: 26px; justify-content: center; }
+.braiwser-address { flex: 1; min-width: 80px; font-family: var(--mono); font-size: 11.5px; }
+.braiwser-tabs { display: flex; gap: 2px; padding: 3px 6px 0; border-bottom: 1px solid var(--os-line); overflow-x: auto; }
+.braiwser-tabs[hidden] { display: none; }
+.braiwser-tab { display: flex; align-items: center; gap: 6px; max-width: 200px; padding: 4px 6px 4px 10px; font-size: 11px; color: var(--os-text-2);
+  border: 1px solid var(--os-line); border-bottom: 0; border-radius: 6px 6px 0 0; cursor: pointer; white-space: nowrap; }
+.braiwser-tab span { overflow: hidden; text-overflow: ellipsis; }
+.braiwser-tab.active { background: var(--os-chip); color: var(--os-text); }
+.braiwser-tab-x { border: 0; background: none; color: var(--os-text-3); cursor: pointer; padding: 0 2px; font-size: 13px; line-height: 1; }
+.braiwser-body { position: relative; overflow: hidden; background: #fff; }
+.braiwser-view { position: absolute; inset: 0; outline: none; display: flex; align-items: flex-start; justify-content: flex-start; }
+.braiwser-view:focus-visible { box-shadow: inset 0 0 0 2px var(--os-accent-line); }
+.braiwser-frame { display: block; width: 100%; height: 100%; object-fit: contain; object-position: top left; user-select: none; cursor: default; }
+.braiwser-frame:not([src]) { visibility: hidden; }
+.braiwser-overlay { position: absolute; inset: 0; overflow: auto; background: var(--os-bg-1); }
+.braiwser-overlay[hidden] { display: none; }
+.braiwser-start { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 48px 18px 24px; text-align: center; color: var(--os-text-2); }
+.braiwser-start p { margin: 0; font-size: 12px; line-height: 1.6; max-width: 460px; }
+.braiwser-start code { font-family: var(--mono); color: var(--os-sand); word-break: break-all; }
+.braiwser-brand { display: flex; align-items: center; gap: 8px; font-size: 18px; color: var(--os-text); }
+.braiwser-search { width: min(520px, 100%); padding: 9px 14px; border-radius: 999px; font-size: 13px; }
+.braiwser-section { display: flex; flex-direction: column; align-items: center; gap: 6px; font-size: 10.5px; }
+.braiwser-recent { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; max-width: 560px; }
+.braiwser-recent .app-btn { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.braiwser-hint { font-size: 10.5px !important; color: var(--os-text-3); }
+.braiwser-notice { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); max-width: 80%; padding: 7px 12px; border-radius: 8px;
+  background: var(--os-panel); border: 1px solid var(--os-line-loud); color: var(--os-text); font-size: 11.5px; box-shadow: 0 6px 24px rgba(0,0,0,.25); }
+.braiwser-notice[hidden] { display: none; }
+.braiwser-spinner { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--os-line); border-top-color: var(--os-accent); animation: braiwser-spin .9s linear infinite; }
+@keyframes braiwser-spin { to { transform: rotate(360deg); } }
 .stat .s { font-size: 10px; color: var(--os-text-3); margin-top: 2px; font-family: var(--mono); }
 .spark-label { padding: 6px 12px 2px; font-size: 9.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--os-text-3); font-weight: 700; }
 .spark-label a { color: var(--os-accent); text-decoration: none; text-transform: none; letter-spacing: 0; font-weight: 600; }

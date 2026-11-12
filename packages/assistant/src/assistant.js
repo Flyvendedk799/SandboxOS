@@ -17,18 +17,15 @@
 
 import { authorize } from "../../kernel/src/capabilities.js";
 import { hasOs, loadOs, summarizeDoc, READ_ONLY_DESKTOP_TOOLS } from "../../os/src/index.js";
+import { credentialHeaders, resolveLlmCredential, systemFor } from "../../llm/src/providers.js";
+// Endpoints live in wires.js, read lazily and overridable from the environment, so the
+// turn loop can be pointed at a stub provider in tests without mocking fetch itself.
 import {
-  baseUrlFor, credentialHeaders, resolveLlmCredential, systemFor,
-} from "../../llm/src/providers.js";
-import { CODEX_BASE_URL } from "../../ai-auth/src/clients.js";
+  codexBody, codexEvents, decodeToolName, encodeToolName, geminiBody, geminiEvents, geminiToolResult,
+  protocolOf, responsesAssistant, responsesUser, shapeTools, urlFor,
+} from "../../llm/src/wires.js";
 import { describeProviderError } from "../../ai-auth/src/errors.js";
 import { anthropicEvents, openaiEvents } from "./stream.js";
-
-// Endpoints are read lazily and overridable so the turn loop can be pointed at a
-// stub provider in tests without mocking fetch itself.
-const CLAUDE_API_URL = () => process.env.SANDBOXOS_ANTHROPIC_URL || "https://api.anthropic.com/v1/messages";
-const OPENAI_API_URL = () => process.env.SANDBOXOS_OPENAI_URL || "https://api.openai.com/v1/chat/completions";
-const CODEX_URL = () => process.env.SANDBOXOS_CODEX_URL || `${CODEX_BASE_URL}/chat/completions`;
 
 /** How many model→tools→model round trips one turn may take. */
 const MAX_STEPS = () => Number(process.env.SANDBOXOS_ASSISTANT_MAX_STEPS ?? 12);
@@ -39,12 +36,9 @@ const MAX_TOKENS = () => Number(process.env.SANDBOXOS_ASSISTANT_MAX_TOKENS ?? 20
 /** A tool result longer than this is truncated before going back to the model. */
 const MAX_RESULT_CHARS = 20_000;
 
-/** Anthropic tool names allow [a-zA-Z0-9_-], so "server.tool" is encoded. */
-export const encodeName = (server, tool) => `${server}__${tool}`;
-export const decodeName = (n) => {
-  const i = n.indexOf("__");
-  return i === -1 ? [n, ""] : [n.slice(0, i), n.slice(i + 2)];
-};
+/** Tool names allow [a-zA-Z0-9_-], so "server.tool" is encoded (see wires.js). */
+export const encodeName = (server, tool, credential = null) => encodeToolName(credential, server, tool);
+export const decodeName = (n) => decodeToolName(n);
 
 /** The desktop map, when this machine has a desktop and the caller may see it. */
 function desktopContext(sandbox, servers, heldPatterns) {
@@ -96,23 +90,92 @@ export function systemPrompt(sandbox, servers, heldPatterns = null, { propose = 
 /**
  * Tool definitions for the tools these patterns actually authorize.
  *
- * Keyed on the *wire*, not the provider: a Codex subscription and an OpenAI key speak
- * the same tool shape even though they bill entirely differently. Passing "claude" or
- * "anthropic" both select the Anthropic shape.
+ * Keyed on the *protocol*, not the provider: a ChatGPT-via-Codex subscription speaks
+ * the Responses shape, an OpenAI key the chat-completions shape, and Gemini takes the
+ * Anthropic shape here (toCodeAssistRequest converts it). Pass a resolved credential
+ * to get that right — and the `mcp__` names a Claude subscription needs — or a wire
+ * name ("claude"/"anthropic", "openai", "responses", "gemini").
  */
-export function toolDefs(allTools, patterns, wire) {
+export function toolDefs(allTools, patterns, wireOrCredential) {
+  const credential = typeof wireOrCredential === "object" && wireOrCredential
+    ? wireOrCredential
+    : wireOrCredential === "responses" ? { provider: "codex", wire: "openai" }
+      : wireOrCredential === "openai" ? { provider: "openai", wire: "openai" }
+        : wireOrCredential === "gemini" ? { provider: "gemini", wire: "gemini" }
+          : { provider: "claude", wire: "anthropic" };
   const allowed = allTools.filter((t) => {
     const dot = t.name.indexOf(".");
     return !!authorize(patterns, t.name.slice(0, dot), t.name.slice(dot + 1));
   });
-  return allowed.map((t) => {
+  return shapeTools(credential, allowed.map((t) => {
     const dot = t.name.indexOf(".");
-    const name = encodeName(t.name.slice(0, dot), t.name.slice(dot + 1));
-    const schema = t.inputSchema ?? { type: "object", properties: {} };
-    return wire === "openai"
-      ? { type: "function", function: { name, description: t.description ?? t.name, parameters: schema } }
-      : { name, description: t.description ?? t.name, input_schema: schema };
-  });
+    return {
+      name: encodeName(t.name.slice(0, dot), t.name.slice(dot + 1), credential),
+      description: t.description ?? t.name,
+      schema: t.inputSchema ?? { type: "object", properties: {} },
+    };
+  }));
+}
+
+// ---- history across protocols -----------------------------------------------
+//
+// A conversation is persisted in the shape of whichever provider answered it, and the
+// model picker makes switching provider mid-conversation an ordinary thing to do. A
+// Claude transcript sent to Gemini is a 400, so turns in another protocol's shape are
+// carried over as their text — the tool calls inside them were the other model's, and
+// cannot be replayed to this one anyway.
+
+function shapeOf(m) {
+  if (Array.isArray(m?.parts)) return "gemini";
+  if (m?.type === "function_call" || m?.type === "function_call_output") return "responses";
+  if (m?.role === "tool" || m?.tool_calls) return "chat";
+  if (Array.isArray(m?.content)) {
+    if (m.content.some((b) => b?.type === "input_text" || b?.type === "output_text")) return "responses";
+    return "anthropic";
+  }
+  return "any";
+}
+
+function textOf(m) {
+  if (typeof m?.content === "string") return m.content;
+  if (Array.isArray(m?.content)) {
+    return m.content.filter((b) => typeof b?.text === "string" && b.type !== "tool_result").map((b) => b.text).join("\n");
+  }
+  if (Array.isArray(m?.parts)) return m.parts.filter((p) => typeof p.text === "string" && !p.thought).map((p) => p.text).join("");
+  return "";
+}
+
+function userMessage(protocol, text) {
+  switch (protocol) {
+    case "chat": return { role: "user", content: text };
+    case "responses": return responsesUser(text);
+    case "gemini": return { role: "user", parts: [{ text }] };
+    default: return { role: "user", content: [{ type: "text", text }] };
+  }
+}
+
+function assistantText(protocol, text) {
+  switch (protocol) {
+    case "chat": return { role: "assistant", content: text };
+    case "responses": return responsesAssistant(text);
+    case "gemini": return { role: "model", parts: [{ text }] };
+    default: return { role: "assistant", content: [{ type: "text", text }] };
+  }
+}
+
+/** The history in this protocol's shape, with foreign turns reduced to their text. */
+export function adaptHistory(history, protocol) {
+  const out = [];
+  for (const m of history ?? []) {
+    const shape = shapeOf(m);
+    if (shape === protocol || (shape === "any" && protocol !== "gemini")) { out.push(m); continue; }
+    if (m?.role === "tool" || m?.type) continue; // another model's tool traffic
+    const text = textOf(m).trim();
+    if (!text) continue;
+    const assistant = m.role === "assistant" || m.role === "model";
+    out.push(assistant ? assistantText(protocol, text) : userMessage(protocol, text));
+  }
+  return out;
 }
 
 /** Truncate a tool result so one `cat` of a big file cannot blow the context. */
@@ -155,18 +218,21 @@ async function providerError(res, credential, model) {
  * @returns {Promise<{messages: object[], stopped: string}>} the appended turns
  */
 export async function runTurn({ kernel, sandbox, principalId, heldPatterns, history = [], input, emit, signal, model, propose = false }) {
-  const credential = await resolveLlmCredential(sandbox.tenant_id);
+  // The model: this request's own, else the tenant's saved choice, else the catalogue default.
+  const credential = await resolveLlmCredential(sandbox.tenant_id, null, { model });
   if (!credential.configured) {
     emit({ type: "error", error: credential.error });
     return { messages: [], stopped: "no_credential" };
   }
 
+  const chosen = credential.model;
+  const protocol = protocolOf(credential);
   const proposed = [];   // review mode: the desktop changes the model asked for
   // What this turn cost, in the only unit we can count honestly. The caller
   // records it; a price depends on a plan we may not be able to see (T3.5).
-  const usage = { provider: credential.provider, model: model ?? credential.modelDefault, tokens: 0 };
+  const usage = { provider: credential.provider, model: chosen, tokens: 0 };
   const servers = [...kernel.servers.keys()];
-  const defs = toolDefs(kernel.listTools(), heldPatterns, credential.wire);
+  const defs = toolDefs(kernel.listTools(), heldPatterns, credential);
   const maxSteps = MAX_STEPS();
   const deadline = Date.now() + MAX_MS();
   const maxTokens = MAX_TOKENS();
@@ -174,10 +240,8 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
 
   // The transcript we hand back to the caller to persist, in provider shape.
   const appended = [];
-  const messages = [...history];
-  messages.push(credential.wire === "openai"
-    ? { role: "user", content: input }
-    : { role: "user", content: [{ type: "text", text: input }] });
+  const messages = adaptHistory(history, protocol);
+  messages.push(userMessage(protocol, input));
   appended.push(messages.at(-1));
 
   /** Write the turn's captured desktop changes as one proposal, once. */
@@ -193,7 +257,7 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
       : { type: "error", error: `could not queue the proposal: ${r.error}` });
   }
 
-  emit({ type: "turn_start", provider: credential.provider, model: model ?? credential.modelDefault, tools: defs.length, propose });
+  emit({ type: "turn_start", provider: credential.provider, model: chosen, tools: defs.length, propose });
 
   for (let step = 0; step < maxSteps; step += 1) {
     if (signal?.aborted) { await flushProposal(); emit({ type: "stopped", reason: "cancelled" }); return { messages: appended, stopped: "cancelled", usage }; }
@@ -203,29 +267,37 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
     emit({ type: "step", step: step + 1 });
 
     // ── Ask the model, streaming ────────────────────────────────────────────
-    const isOpenAI = credential.wire === "openai";
-    const chosen = model ?? credential.modelDefault;
-    const url = baseUrlFor(credential, CLAUDE_API_URL(), OPENAI_API_URL(), CODEX_URL());
+    const system = systemPrompt(sandbox, servers, heldPatterns, { propose });
+    const url = urlFor(credential, chosen, { stream: true });
     const headers = credentialHeaders(credential);
-    const body = isOpenAI
-      ? {
-          model: chosen,
-          stream: true,
-          stream_options: { include_usage: true },
-          messages: [{ role: "system", content: systemPrompt(sandbox, servers, heldPatterns, { propose }) }, ...messages],
-          ...(defs.length ? { tools: defs, tool_choice: "auto" } : {}),
-        }
-      : {
-          model: chosen,
-          max_tokens: 4096,
-          stream: true,
-          // On a subscription token the Claude Code identity block has to come first
-          // and stand alone, or Sonnet and Opus are refused with a 429 the plan has
-          // not earned. systemFor is what puts it there.
-          system: systemFor(credential, systemPrompt(sandbox, servers, heldPatterns, { propose })),
-          messages,
-          ...(defs.length ? { tools: defs } : {}),
-        };
+    let body;
+    if (protocol === "chat") {
+      body = {
+        model: chosen,
+        stream: true,
+        stream_options: { include_usage: true },
+        messages: [{ role: "system", content: system }, ...messages],
+        ...(defs.length ? { tools: defs, tool_choice: "auto" } : {}),
+      };
+    } else if (protocol === "responses") {
+      body = codexBody(chosen, { system, input: messages, tools: defs });
+    } else if (protocol === "gemini") {
+      body = geminiBody(credential, chosen, { system, contents: messages, tools: defs });
+    } else {
+      // No temperature, no `thinking`, no forced tool_choice, no prefill: each is a 400
+      // on the 5.x models. On a subscription token the Claude Code identity block has to
+      // come first and stand alone, or Sonnet and Opus are refused with a 429 the plan
+      // has not earned. systemFor is what puts it there.
+      body = {
+        model: chosen,
+        // Streamed, so a high cap costs nothing up front; thinking counts against it.
+        max_tokens: 32000,
+        stream: true,
+        system: systemFor(credential, system),
+        messages,
+        ...(defs.length ? { tools: defs } : {}),
+      };
+    }
 
     const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal });
     if (!res.ok || !res.body) throw await providerError(res, credential, chosen);
@@ -235,8 +307,14 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
     /** id → { id, name, args } accumulated across delta frames. */
     const calls = new Map();
     const order = [];
+    /** Gemini only: the model's parts, kept whole for their thought signatures. */
+    const modelParts = [];
 
-    for await (const ev of (isOpenAI ? openaiEvents(res) : anthropicEvents(res))) {
+    const events = protocol === "chat" ? openaiEvents(res)
+      : protocol === "responses" ? codexEvents(res)
+        : protocol === "gemini" ? geminiEvents(res, credential)
+          : anthropicEvents(res);
+    for await (const ev of events) {
       if (signal?.aborted) break;
       switch (ev.type) {
         case "text":
@@ -246,13 +324,16 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
         case "tool_start":
           calls.set(ev.id, { id: ev.id, name: ev.name, args: "" });
           order.push(ev.id);
-          emit({ type: "tool_start", id: ev.id, name: ev.name.replace("__", ".") });
+          emit({ type: "tool_start", id: ev.id, name: decodeName(ev.name).join(".") });
           break;
         case "tool_args": {
           const c = calls.get(ev.id);
           if (c) c.args += ev.partial;
           break;
         }
+        case "gemini_part":
+          modelParts.push(ev.part);
+          break;
         case "usage":
           tokens += (ev.input ?? 0) + (ev.output ?? 0);
           usage.tokens = tokens;
@@ -275,21 +356,31 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
       return { ...c, parsedArgs: args };
     });
 
-    if (isOpenAI) {
-      messages.push({
-        role: "assistant",
-        content: text || null,
-        ...(parsed.length
-          ? { tool_calls: parsed.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.args || "{}" } })) }
-          : {}),
-      });
+    // A turn with neither text nor tool calls is not recorded: an empty assistant
+    // message is refused by every one of these APIs on the *next* turn.
+    const before = messages.length;
+    if (protocol === "chat") {
+      if (text || parsed.length) {
+        messages.push({
+          role: "assistant",
+          content: text || null,
+          ...(parsed.length
+            ? { tool_calls: parsed.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.args || "{}" } })) }
+            : {}),
+        });
+      }
+    } else if (protocol === "responses") {
+      if (text) messages.push(responsesAssistant(text));
+      for (const c of parsed) messages.push({ type: "function_call", call_id: c.id, name: c.name, arguments: c.args || "{}" });
+    } else if (protocol === "gemini") {
+      if (modelParts.length) messages.push({ role: "model", parts: modelParts });
     } else {
       const content = [];
       if (text) content.push({ type: "text", text });
       for (const c of parsed) content.push({ type: "tool_use", id: c.id, name: c.name, input: c.parsedArgs });
-      messages.push({ role: "assistant", content: content.length ? content : [{ type: "text", text: "" }] });
+      if (content.length) messages.push({ role: "assistant", content });
     }
-    appended.push(messages.at(-1));
+    appended.push(...messages.slice(before));
 
     // ── No tools requested: the turn is over ────────────────────────────────
     if (!parsed.length) {
@@ -316,7 +407,7 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
           note: "Review mode is on: this change is queued for the person to apply or discard. Carry on as if it had been made, and say what you proposed.",
         }));
         emit({ type: "tool_result", id: c.id, ok: true, server, tool, result: { proposed: true }, error: null });
-        results.push({ id: c.id, payload });
+        results.push({ id: c.id, name: c.name, payload });
         continue;
       }
 
@@ -325,19 +416,23 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
       });
       const payload = r.ok ? clip(JSON.stringify(r.result)) : `Error: ${r.error}`;
       emit({ type: "tool_result", id: c.id, ok: !!r.ok, server, tool, result: r.ok ? r.result : null, error: r.ok ? null : r.error });
-      results.push({ id: c.id, payload });
+      results.push({ id: c.id, name: c.name, payload });
     }
 
-    if (isOpenAI) {
+    const resultsAt = messages.length;
+    if (protocol === "chat") {
       for (const r of results) messages.push({ role: "tool", tool_call_id: r.id, content: r.payload });
-      appended.push(...messages.slice(-results.length));
+    } else if (protocol === "responses") {
+      for (const r of results) messages.push({ type: "function_call_output", call_id: r.id, output: r.payload });
+    } else if (protocol === "gemini") {
+      messages.push({ role: "user", parts: results.map((r) => geminiToolResult(r.name, r.payload)) });
     } else {
       messages.push({
         role: "user",
         content: results.map((r) => ({ type: "tool_result", tool_use_id: r.id, content: r.payload })),
       });
-      appended.push(messages.at(-1));
     }
+    appended.push(...messages.slice(resultsAt));
   }
 
   await flushProposal();
@@ -348,7 +443,30 @@ export async function runTurn({ kernel, sandbox, principalId, heldPatterns, hist
 /** Flatten a provider-shaped transcript into what a UI wants to render. */
 export function renderTranscript(messages) {
   const out = [];
+  const toolName = (n) => decodeName(n ?? "").join(".");
   for (const m of messages) {
+    // The Responses API's items (Codex).
+    if (m.type === "function_call") {
+      out.push({ role: "assistant", kind: "tool_call", id: m.call_id, name: toolName(m.name), args: safeParse(m.arguments) });
+      continue;
+    }
+    if (m.type === "function_call_output") {
+      out.push({ role: "tool", kind: "tool_result", id: m.call_id, text: String(m.output ?? "") });
+      continue;
+    }
+    // Gemini's parts.
+    if (Array.isArray(m.parts)) {
+      const role = m.role === "model" ? "assistant" : "user";
+      for (const part of m.parts) {
+        if (typeof part.text === "string" && part.text && !part.thought) out.push({ role, kind: "text", text: part.text });
+        else if (part.functionCall) out.push({ role: "assistant", kind: "tool_call", id: null, name: toolName(part.functionCall.name), args: part.functionCall.args ?? {} });
+        else if (part.functionResponse) {
+          const r = part.functionResponse.response?.result;
+          out.push({ role: "tool", kind: "tool_result", id: null, text: typeof r === "string" ? r : JSON.stringify(r ?? "") });
+        }
+      }
+      continue;
+    }
     if (m.role === "tool") {
       // OpenAI tool results are a role of their own; handled below so they are
       // not also emitted as plain text.
@@ -359,14 +477,14 @@ export function renderTranscript(messages) {
       if (m.content) out.push({ role: m.role, kind: "text", text: m.content });
     } else if (Array.isArray(m.content)) {
       for (const block of m.content) {
-        if (block.type === "text" && block.text) out.push({ role: m.role, kind: "text", text: block.text });
-        else if (block.type === "tool_use") out.push({ role: "assistant", kind: "tool_call", id: block.id, name: block.name.replace("__", "."), args: block.input });
+        if ((block.type === "text" || block.type === "input_text" || block.type === "output_text") && block.text) out.push({ role: m.role, kind: "text", text: block.text });
+        else if (block.type === "tool_use") out.push({ role: "assistant", kind: "tool_call", id: block.id, name: toolName(block.name), args: block.input });
         else if (block.type === "tool_result") out.push({ role: "tool", kind: "tool_result", id: block.tool_use_id, text: String(block.content ?? "") });
       }
     }
     if (m.role === "assistant" && m.tool_calls) {
       for (const c of m.tool_calls) {
-        out.push({ role: "assistant", kind: "tool_call", id: c.id, name: (c.function?.name ?? "").replace("__", "."), args: safeParse(c.function?.arguments) });
+        out.push({ role: "assistant", kind: "tool_call", id: c.id, name: toolName(c.function?.name), args: safeParse(c.function?.arguments) });
       }
     }
   }

@@ -323,6 +323,9 @@ const MIGRATIONS = [
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_sandboxes_vanity ON sandboxes(vanity_domain) WHERE vanity_domain IS NOT NULL",
   "ALTER TABLE tenant_quotas ADD COLUMN max_disk_mb    INTEGER NOT NULL DEFAULT 1024",
   "ALTER TABLE tenant_quotas ADD COLUMN network_egress TEXT    NOT NULL DEFAULT 'allow'",
+  // The tenant's chosen model. Nullable: NULL means "the provider's catalogue default",
+  // which moves forward with the catalogue instead of pinning a model that will age.
+  "ALTER TABLE tenant_profiles ADD COLUMN llm_model TEXT",
 ];
 
 // Backlog #14 (migration hardening): only swallow the benign "column/table already

@@ -56,22 +56,37 @@ async function loadContext() {
 
 async function onboard(profile) {
   const providers = profile?.profile?.providers ?? [{ id: "claude", label: "Claude" }, { id: "openai", label: "OpenAI" }];
+  // One flat list (the dialog draws a plain select): "the provider's default", then every
+  // provider's catalogue, each entry naming its provider. Choosing a model chooses its
+  // provider too, so the two fields cannot disagree.
+  const modelOptions = [
+    { value: "", label: "The provider's default (recommended)" },
+    ...providers.flatMap((p) => (p.catalogue ?? []).filter((m) => !m.previous).map((m) => ({
+      value: `${p.id}|${m.id}`, label: `${p.label ?? p.id} — ${m.label} · ${m.tier}`,
+    }))),
+  ];
   const got = await dialog({
     title: "Finish setting up your machine",
-    message: "Natural-language commands and AI agents need a provider key. You can skip this and add one later from Settings — everything else works without it.",
+    message: "Natural-language commands and AI agents need a provider: an API key, or a Claude or Google subscription you connect in Settings. You can skip this and choose later — everything else works without it.",
     fields: [
       { name: "provider", label: "Provider", type: "select", value: profile?.profile?.llmProvider ?? "claude",
         options: providers.map((p) => ({ value: p.id, label: p.label ?? p.id })) },
-      { name: "apiKey", label: "API key", type: "password", placeholder: "paste your key", hint: "Stored encrypted; never returned to the browser." },
+      { name: "model", label: "Model", type: "select", value: "", options: modelOptions,
+        hint: "Light, balanced or heavy. Any model can be changed or typed in later in Settings." },
+      { name: "apiKey", label: "API key", type: "password", placeholder: "paste your key", hint: "For an API-key provider. Stored encrypted; never returned to the browser." },
     ],
     confirmLabel: "Save and continue",
   });
+
+  const [modelProvider, ...modelRest] = String(got?.model ?? "").split("|");
+  const llmProvider = (modelRest.length ? modelProvider : null) ?? got?.provider ?? profile?.profile?.llmProvider ?? "claude";
 
   // Dismissing the dialog still completes onboarding — it should not reappear on
   // every load once the user has decided to skip it.
   try {
     const r = await api.post("/api/profile", {
-      llmProvider: got?.provider ?? profile?.profile?.llmProvider ?? "claude",
+      llmProvider,
+      ...(modelRest.length ? { llmModel: modelRest.join("|") } : {}),
       ...(got?.apiKey?.trim() ? { apiKey: got.apiKey.trim() } : {}),
       completeOnboarding: true,
     });

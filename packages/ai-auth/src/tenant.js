@@ -9,6 +9,7 @@
 
 import { hostSecret } from "../../secrets/src/store.js";
 import { ClaudeAccountStore } from "./account-store.js";
+import { AntigravityAccountStore } from "./antigravity-account-store.js";
 import { ApiKeyStore } from "./key-store.js";
 import { TenantCredentialStore } from "./store.js";
 
@@ -32,4 +33,9 @@ export function claudeAccounts(tenantId) {
 /** The tenant's stored API keys, falling back to the host environment. */
 export function apiKeys(tenantId) {
   return new ApiKeyStore({ store: new TenantCredentialStore(tenantId), secret: secret() });
+}
+
+/** The tenant's connected Google subscription (the Antigravity login), keyed by principal. */
+export function antigravityAccounts(tenantId) {
+  return new AntigravityAccountStore({ store: new TenantCredentialStore(tenantId), secret: secret() });
 }
