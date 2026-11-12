@@ -994,6 +994,74 @@ const settings = {
       if (section === "machine") render();
     }
 
+    // AI: provider and model, from ai-auth's catalogue — what the Assistant, agents
+    // and natural-language commands run against. Read outside `render` for the same
+    // reason as the allowance; the fields a person types into live here too, so a
+    // repaint from another window's change does not eat a half-typed model id.
+    let ai = null;
+    let aiAt = 0;
+    const aiTyped = h("input", { placeholder: "or type any model id", spellcheck: "false", autocomplete: "off", style: { width: "190px", fontFamily: "var(--mono)" } });
+    async function loadAi(force = false) {
+      if (!force && Date.now() - aiAt < 10_000) return;
+      aiAt = Date.now();
+      const [p, claude, google] = await Promise.all([
+        api.get("/api/profile").catch((e) => ({ error: e.message })),
+        api.get("/api/claude-code").catch(() => null),
+        api.get("/api/antigravity").catch(() => null),
+      ]);
+      ai = { p, claude, google };
+      if (section === "ai") render();
+    }
+    async function saveAi(body, title = "Saved") {
+      try {
+        const r = await api.post("/api/profile", { ...body, completeOnboarding: true });
+        ai = { ...ai, p: r };
+        toast(title, { body: `Using ${r.profile.effectiveModel}`, kind: "ok" });
+        render();
+        return true;
+      } catch (e) { toastError("Could not save", e); return false; }
+    }
+    async function setKey(p) {
+      const got = await dialog({
+        title: `${p.label} API key`,
+        message: "Stored encrypted for your account and never shown again. Saving it also switches to this provider.",
+        fields: [{ name: "key", label: "API key", type: "password", placeholder: "paste the key" }],
+        confirmLabel: "Save key",
+      });
+      if (got?.key?.trim()) { await saveAi({ llmProvider: p.id, apiKey: got.key.trim() }, `${p.label} key saved`); loadAi(true); }
+    }
+    // A subscription is the same paste-the-code login the CLI performs: open the
+    // approval page, approve, paste the code back. Nobody handles a token.
+    async function connectSubscription(kind) {
+      const google = kind === "google";
+      const route = google ? "/api/antigravity" : "/api/claude-code";
+      let started;
+      try { started = await api.post(`${route}/login`, {}); } catch (e) { return toastError("Could not start the login", e); }
+      const got = await dialog({
+        title: google ? "Connect a Google account (Gemini)" : "Connect a Claude subscription",
+        message: "Open the link, approve, and paste the code it shows you back here.",
+        fields: [
+          { name: "code", label: "Authorization code", placeholder: google ? "4/0A…" : "code#state", hint: "The whole URL works too." },
+          ...(google ? [{ name: "projectId", label: "Google Cloud project (optional)", placeholder: "my-project-id", hint: "Only if your license needs one." }] : []),
+        ],
+        confirmLabel: "Connect",
+        render: () => h("p", null, h("a", { href: started.url, target: "_blank", rel: "noreferrer noopener" }, "Open the approval page")),
+      });
+      if (!got?.code?.trim()) return;
+      try {
+        await api.post(`${route}/login/complete`, { code: got.code.trim(), ...(got.projectId?.trim() ? { projectId: got.projectId.trim() } : {}) });
+        toast(google ? "Google account connected" : "Claude subscription connected", { kind: "ok" });
+        await saveAi({ llmProvider: google ? "gemini-cli" : "claude-code" }, "Switched to the subscription");
+        loadAi(true);
+      } catch (e) { toastError("Could not complete the login", e); }
+    }
+    async function disconnectSubscription(kind) {
+      const google = kind === "google";
+      if (!await confirmDialog(google ? "Disconnect the Google account?" : "Disconnect the Claude subscription?", "You can connect again at any time.")) return;
+      try { await api.del(google ? "/api/antigravity" : "/api/claude-code"); toast("Disconnected", { kind: "ok" }); loadAi(true); }
+      catch (e) { toastError("Could not disconnect", e); }
+    }
+
     // Scheduled snapshots are cron jobs, so they are read from the scheduler
     // rather than from the document: the desktop holds the checkpoints, the
     // scheduler holds the intention to make more of them.
@@ -1267,11 +1335,64 @@ const settings = {
           "Every setting on this page is a ", h("code", "desktop.*"), " call — the same ones an agent makes. ⌘? shows the keyboard."),
       ];
 
+      const aiSection = () => {
+        if (!ai) return [h("div.dim", { style: { padding: "11px", fontSize: "11px" } }, "Reading your AI settings…")];
+        if (ai.p?.error) return [h("div.dim", { style: { padding: "11px", fontSize: "11px" } }, `AI settings are unavailable: ${ai.p.error}`)];
+        const prof = ai.p.profile;
+        const providers = prof.providers ?? [];
+        const current = providers.find((p) => p.id === prof.llmProvider);
+        const usable = providers.filter((p) => p.configured || p.id === prof.llmProvider);
+        // One group per provider that can make a call (and the current one, so a choice
+        // never vanishes), each opening with "default", which follows the catalogue.
+        const picker = h("select", { style: { maxWidth: "260px" } }, ...usable.map((p) => {
+          const known = (p.catalogue ?? []).some((m) => m.id === prof.llmModel);
+          const def = (p.catalogue ?? []).find((m) => m.id === p.defaultModel);
+          return h("optgroup", { label: `${p.label}${p.configured ? "" : " — not connected"}` },
+            h("option", { value: `${p.id}|`, selected: p.id === prof.llmProvider && !prof.llmModel }, `Default — ${def?.label ?? p.defaultModel ?? "provider default"}`),
+            ...(p.catalogue ?? []).map((m) => h("option", { value: `${p.id}|${m.id}`, selected: p.id === prof.llmProvider && m.id === prof.llmModel },
+              `${m.label} · ${m.tier}${m.previous ? " · previous" : ""}`)),
+            p.id === prof.llmProvider && prof.llmModel && !known ? h("option", { value: `${p.id}|${prof.llmModel}`, selected: true }, `${prof.llmModel} · typed in`) : null);
+        }));
+        picker.addEventListener("change", () => {
+          const [provider, ...rest] = picker.value.split("|");
+          saveAi({ llmProvider: provider, llmModel: rest.join("|") || null }, "Model changed");
+        });
+        const spec = (current?.catalogue ?? []).find((m) => m.id === prof.effectiveModel);
+        // Short, because the window is narrow; the provider's own sentence is the tooltip.
+        const status = (p) => (p.billing === "subscription" ? (p.configured ? `connected${p.plan ? ` · ${p.plan}` : ""}` : "not connected") : (p.configured ? "key set" : "no key"));
+        const action = (p) => {
+          if (p.id === "claude-code") return ai.claude?.connected
+            ? h("button.app-btn", { onclick: () => disconnectSubscription("claude") }, "Disconnect")
+            : h("button.app-btn.primary", { onclick: () => connectSubscription("claude") }, "Connect");
+          if (p.id === "gemini-cli") return ai.google?.connected
+            ? h("button.app-btn", { onclick: () => disconnectSubscription("google") }, "Disconnect")
+            : h("button.app-btn.primary", { onclick: () => connectSubscription("google") }, "Connect");
+          if (p.billing === "subscription") return h("span.dim", { style: { fontSize: "10.5px" } }, "signed in on the host");
+          return h("button.app-btn", { onclick: () => setKey(p) }, p.configured ? "Replace key" : "Add key");
+        };
+        return [
+          label("Model"),
+          row("Using", h("span.v", `${current?.label ?? prof.llmProvider} · ${spec?.label ?? prof.effectiveModel}`)),
+          row("Choose", usable.length ? picker : h("span.dim", "connect a provider below first")),
+          spec ? h("div.dim", { style: { padding: "0 11px 4px", fontSize: "11px", lineHeight: "1.5" } }, `${spec.tier} — ${spec.note}`) : null,
+          row("Other model", h("span", { style: { display: "flex", gap: "6px" } }, aiTyped,
+            h("button.app-btn", { onclick: async () => { const id = aiTyped.value.trim(); if (id && await saveAi({ llmModel: id }, "Model changed")) aiTyped.value = ""; } }, "Use"))),
+          label("Providers"),
+          ...providers.map((p) => row(h("span", null, p.label, p.id === prof.llmProvider ? h("span.dim", " · in use") : null),
+            h("span", { style: { display: "flex", gap: "8px", alignItems: "center" } },
+              h("span.v", { class: p.configured ? "ok" : "", title: p.detail ?? "" }, status(p)), action(p),
+              p.configured && p.id !== prof.llmProvider ? h("button.app-btn", { onclick: () => saveAi({ llmProvider: p.id }, `Switched to ${p.label}`) }, "Use") : null))),
+          h("div.dim", { style: { padding: "8px 11px 10px", fontSize: "11px", lineHeight: "1.6" } },
+            "The Assistant, agents and natural-language commands run on this. The list is ai-auth's catalogue — light, balanced or heavy; a subscription meters each model on its own allowance, so a lighter one often still answers when a heavy one is refused. Keys are stored encrypted and never returned."),
+        ];
+      };
+
       fill(body,
-        h("div.chip-row", { style: { padding: "4px 6px 8px" } }, tab("desktop", "Desktop"), tab("machine", "Machine")),
-        h("div.settings-col", null, ...(section === "machine" ? machineSection : desktopSection)));
+        h("div.chip-row", { style: { padding: "4px 6px 8px" } }, tab("desktop", "Desktop"), tab("ai", "AI"), tab("machine", "Machine")),
+        h("div.settings-col", null, ...(section === "machine" ? machineSection : section === "ai" ? aiSection() : desktopSection)));
       // The allowance is read when the tab that shows it is on screen.
       if (section === "machine") loadLimits();
+      if (section === "ai") loadAi();
     }
 
     render();

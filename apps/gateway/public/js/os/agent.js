@@ -227,7 +227,7 @@ export function createAgentPanel({ onClose, quick = QUICK, title = "Build agent"
     } catch (e) {
       say("agent", `I could not finish that: ${e.message}`);
       if (/HTTP 4/.test(e.message)) {
-        say("agent", "If no provider key is configured yet, add one in Settings — the rest of the OS works without it.");
+        say("agent", "If no AI provider is connected yet, connect one in Settings → AI (a key, or a Claude or Google subscription) — the rest of the OS works without it.");
       }
     } finally {
       setBusy(false);
