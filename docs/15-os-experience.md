@@ -740,7 +740,7 @@ An app id resolves to one descriptor shape whatever kind it is:
 
 | kind | what it is |
 |---|---|
-| `builtin` | drawn by code we shipped — Files, Terminal, Console, Notes, Assistant, Observability, Media, Browser, Settings, Studio, and the machine's own work: Jobs, Ports, Agents, Secrets, Sync, Access, Audit, plus the Manual |
+| `builtin` | drawn by code we shipped — Files, Terminal, Console, Notes, Assistant, Observability, Media, Braiwser (the Browser), Settings, Studio, and the machine's own work: Jobs, Ports, Agents, Secrets, Sync, Access, Audit, plus the Manual |
 | `bundle` | HTML/CSS/JS the user or their agent wrote, served by this machine |
 | `url` | a service somewhere else (typically an exposed port) |
 | `alias` | another app under a different name — `open` resolves it, the window wears the alias's title |
@@ -759,11 +759,20 @@ terminal counts as activity, so the idle reaper does not hibernate the Cell unde
 Tide status badges when the machine has a workspace, "Open with…" and drag-and-drop
 upload. **Notes** is a folder of notes with a Markdown preview, still nothing but
 `fs.*`. **Media** is a grid with a lightbox, plays audio and video the browser can
-play (and says when it cannot), and notices when the folder changes. **Browser**
-has **quick access**: it scans what is listening inside the machine and opens any
-of it with one click (that click is `ports.expose` — nobody has to know the word),
-remembers ports and paths in its props, and says clearly what to do when nothing is
-listening. **Console** keeps a transcript. **Observability** has load and
+play (and says when it cannot), and notices when the folder changes. **Braiwser**
+is the Browser: a real Chromium running next to the Gateway, driven through
+[Braiwser](https://github.com/Flyvendedk799/Braiwser)'s own driver, with the window
+showing frames of the page and sending back clicks, typing and scrolling. It works
+on a brand-new machine with nothing configured — type an address or a search and
+go. `localhost:<port>` is *this machine's* port (same checks as the `/p/<port>`
+preview, made per request), so previewing a dev server is just typing its port, and
+its start page lists what is listening with one-click open (that click is
+`ports.expose` — nobody has to know the word). Private network addresses are never
+opened, and it follows the machine's `net` egress policy. The host installs the
+pinned Braiwser revision (`packages/braiwser/runtime.json`) once, by itself, the
+first time anyone opens it (`npm run braiwser:install` does it ahead of time;
+`SANDBOXOS_BRAIWSER_AUTOINSTALL=0` turns the automatic install off). Using it needs
+the `net.browse` capability, which an owner holds. **Console** keeps a transcript. **Observability** has load and
 memory sparklines, recent calls, and a link into the audit explorer. **Settings** has
 a whole Desktop section — theme, motion, reduced motion, layout and tiling presets,
 gap and grid, dock, menu bar, notifications, associations — so a machine can be

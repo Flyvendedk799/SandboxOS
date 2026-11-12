@@ -59,6 +59,10 @@ import { runTurn, renderTranscript } from "../../../packages/assistant/src/assis
 import { Scheduler } from "../../../packages/scheduler/src/scheduler.js";
 import { upgradeWebSocket } from "../../../packages/pty/src/index.js";
 import { attachSession } from "../../../packages/kernel/src/pty-sessions.js";
+import {
+  BraiwserSessions, BraiwserError, inspectRuntime, installRuntime, installState, autoInstallEnabled,
+  loadDriver as loadBraiwserDriver, pin as braiwserPin,
+} from "../../../packages/braiwser/src/index.js";
 
 /** The host's single Cell Scheduler (wake/hibernate/budget). Exported for the
  *  Gateway's background loops (idle reaper + cron tick) in index.js. */
@@ -66,6 +70,57 @@ export const scheduler = new Scheduler({
   maxRunning: Number(process.env.SANDBOXOS_MAX_RUNNING ?? 4),
   idleMs: Number(process.env.SANDBOXOS_IDLE_MS ?? 10 * 60 * 1000),
 });
+
+// ── Braiwser ────────────────────────────────────────────────────────────────
+// The Browser app is Braiwser: a real Chromium per open window, running next to
+// the Gateway and driven through Braiwser's own driver (packages/braiwser). A
+// window's `localhost:<port>` is that Sandbox's port — through the same checks as
+// the /p/<port> preview, made at request time, so revoking a grant or closing a
+// port takes effect on the next request rather than the next window.
+const braiwserOwners = new Map(); // sandboxId → principalId that last opened a window
+export const braiwser = new BraiwserSessions({
+  loadDriver: () => loadBraiwserDriver(),
+  maxSessions: Number(process.env.SANDBOXOS_BRAIWSER_MAX ?? 4),
+  maxPerSandbox: Number(process.env.SANDBOXOS_BRAIWSER_PER_SANDBOX ?? 2),
+  idleMs: Number(process.env.SANDBOXOS_BRAIWSER_IDLE_MS ?? 3 * 60_000),
+  policyFor: (sandboxId) => {
+    const sb = braiwserSandbox(sandboxId);
+    return sb ? (loadManifest(sb).servers?.net ?? null) : null;
+  },
+  resolvePort: async (sandboxId, port) => {
+    const sb = braiwserSandbox(sandboxId);
+    const principalId = braiwserOwners.get(sandboxId);
+    if (!sb || !principalId) throw new Error("This machine is not available.");
+    if (!authorize(grantsFor(principalId, sb.id), "ports", "access")) throw new Error("You do not hold ports.access on this machine.");
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("That is not a port.");
+    if (!exposedPorts(sb)[String(port)]) {
+      throw new Error(`Nothing on this machine's port ${port} is open to the browser. Start something there and open it from Braiwser's start page, or expose it in Ports.`);
+    }
+    scheduler.touch(sb.id);
+    return getCell(sb).endpoint(port);
+  },
+});
+const braiwserSandboxes = new Map(); // sandboxId → slug, so a moved slug is re-read
+function braiwserSandbox(sandboxId) {
+  const slug = braiwserSandboxes.get(sandboxId);
+  const sb = slug ? getSandboxBySlug(slug) : null;
+  return sb && sb.id === sandboxId ? sb : null;
+}
+
+/** What the Browser window needs to know before it can show anything. Starts the
+ *  one-time runtime install on a machine that has none (unless turned off). */
+function braiwserStatus() {
+  const runtime = inspectRuntime();
+  let install = installState();
+  if (!runtime.ready && !install.installing && !install.failed && autoInstallEnabled()) {
+    installRuntime().catch(() => {});
+    install = installState();
+  }
+  return {
+    ready: runtime.ready, reason: runtime.ready ? null : runtime.reason,
+    revision: braiwserPin.revision, autoInstall: autoInstallEnabled(), install,
+  };
+}
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 const cellBackend = () => (config.cellBackend === "local" ? "local" : "docker");
@@ -1298,6 +1353,63 @@ async function handle(req, res) {
     }
     return proxyToCell(req, res, ep, rest + url.search, prefix);
   }
+  // ── Braiwser ─────────────────────────────────────────────────────────────
+  //   GET    /:slug/braiwser/status            runtime + one-time install state
+  //   POST   /:slug/braiwser/install           (re)try the install after a failure
+  //   POST   /:slug/braiwser/:win/open         {width,height,url}
+  //   GET    /:slug/braiwser/:win/frame        image/jpeg; page state in X-Braiwser-State
+  //   POST   /:slug/braiwser/:win/{navigate,input,resize,tab}
+  //   DELETE /:slug/braiwser/:win
+  if (action === "braiwser") {
+    if (!authorize(held, "net", "browse")) return sendJson(res, 403, { ok: false, error: "denied: net.browse" });
+    const sub = segments[3] ?? "";
+    if (sub === "status" && req.method === "GET") return sendJson(res, 200, { ok: true, ...braiwserStatus() });
+    if (sub === "install" && req.method === "POST") {
+      if (!inspectRuntime().ready) installRuntime().catch(() => {});
+      return sendJson(res, 202, { ok: true, ...braiwserStatus() });
+    }
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(sub)) return sendJson(res, 404, { ok: false, error: "not found" });
+    const key = BraiwserSessions.key(sandbox.id, sub);
+    const op = segments[4] ?? "";
+    try {
+      if (op === "open" && req.method === "POST") {
+        if (!inspectRuntime().ready) return sendJson(res, 503, { ok: false, code: "BRAIWSER_UNAVAILABLE", ...braiwserStatus() });
+        const body = await readBody(req);
+        braiwserOwners.set(sandbox.id, principal.id);
+        braiwserSandboxes.set(sandbox.id, sandbox.slug);
+        const rec = await braiwser.open({ sandboxId: sandbox.id, windowId: sub, width: body.width, height: body.height, url: body.url });
+        if (body.width && body.height) await rec.resize(body.width, body.height).catch(() => {});
+        return sendJson(res, 200, { ok: true, ...(await rec.describe()) });
+      }
+      if (op === "" && req.method === "DELETE") return sendJson(res, 200, { ok: true, closed: await braiwser.close(key) });
+      const rec = braiwser.get(key);
+      if (!rec) return sendJson(res, 404, { ok: false, code: "NO_SESSION", error: "this window has no browser open" });
+      braiwserOwners.set(sandbox.id, principal.id);
+      if (op === "frame" && req.method === "GET") {
+        const f = await rec.frame({ quality: url.searchParams.get("q") });
+        const { bytes, ...state } = f;
+        const etag = `"${crypto.createHash("sha1").update(bytes).digest("base64url").slice(0, 22)}"`;
+        const headers = {
+          "Content-Type": "image/jpeg", "Cache-Control": "no-store", ETag: etag,
+          "X-Braiwser-State": encodeURIComponent(JSON.stringify(state)),
+        };
+        if (req.headers["if-none-match"] === etag) { res.writeHead(304, headers); return res.end(); }
+        res.writeHead(200, { ...headers, "Content-Length": bytes.length });
+        return res.end(bytes);
+      }
+      if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method not allowed" });
+      const body = await readBody(req);
+      if (op === "navigate") return sendJson(res, 200, { ok: true, ...(await rec.navigate(body.url)) });
+      if (op === "input") return sendJson(res, 200, { ok: true, ...(await rec.input(body)) });
+      if (op === "resize") { await rec.resize(body.width, body.height); return sendJson(res, 200, { ok: true }); }
+      if (op === "tab") return sendJson(res, 200, { ok: true, ...(await rec.tab(body.op, body.id)) });
+      return sendJson(res, 404, { ok: false, error: "not found" });
+    } catch (e) {
+      const status = e instanceof BraiwserError ? e.status : (e?.code === "BRAIWSER_UNAVAILABLE" ? 503 : 500);
+      return sendJson(res, status, { ok: false, code: e?.code ?? "BRAIWSER_ERROR", error: e?.message ?? "browser error" });
+    }
+  }
+
   const kernel = await getKernel(sandbox);
 
   // POST /:slug/exec — run one Command Central line.

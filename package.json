@@ -18,6 +18,7 @@
     "test:better-sqlite3": "SANDBOXOS_DB_DRIVER=better-sqlite3 node --test --no-warnings",
     "tunnel": "echo 'Expose the spine publicly:' && echo '  cloudflared tunnel --url http://localhost:'${SANDBOXOS_PORT:-3939}",
     "smoke": "node scripts/browser-smoke.mjs",
+    "braiwser:install": "node scripts/install-braiwser-runtime.mjs",
     "bench": "node scripts/bench.mjs",
     "day": "node scripts/day.mjs",
     "release-check": "node scripts/release-check.mjs",

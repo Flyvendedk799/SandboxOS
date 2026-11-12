@@ -15,6 +15,9 @@ const home = path.join(os.tmpdir(), `sandboxos-smoke-${crypto.randomUUID().slice
 process.env.SANDBOXOS_HOME = home;
 process.env.SANDBOXOS_CELL_BACKEND = "local";
 process.env.SANDBOXOS_PASSWORD = "test";
+// The Browser is Braiwser. A smoke never installs it: point SANDBOXOS_BRAIWSER_ROOT
+// at an installed runtime to drive a real page, otherwise the setup screen is checked.
+process.env.SANDBOXOS_BRAIWSER_AUTOINSTALL ??= "0";
 
 const { openDb, closeDb } = await import("../packages/control-db/src/db.js");
 const { ensureSeed, createSession, grantsFor } = await import("../packages/control-db/src/registry.js");
@@ -153,25 +156,29 @@ try {
   check(/[$#] ?$/m.test(termText.trim()) || /\$|#/.test(termText), `the shell shows a prompt (${JSON.stringify(termText.slice(-60))})`);
   check(await page.$(".term-tab"), "the Terminal has tabs");
 
-  // Browser quick access: a service that is merely listening shows up, and one click opens it.
+  // Braiwser: a service that is merely listening shows up on its start page, one
+  // click exposes it, and the page is then shown from a real Chromium.
   const http = await import("node:http");
-  const svc = http.createServer((_req, r) => { r.writeHead(200, { "Content-Type": "text/html" }); r.end("<h1 id=hello>hello from the cell</h1>"); });
+  const svc = http.createServer((_req, r) => { r.writeHead(200, { "Content-Type": "text/html" }); r.end("<title>hello cell</title><h1 id=hello>hello from the cell</h1>"); });
   await new Promise((r) => svc.listen(0, "127.0.0.1", r));
   const svcPort = svc.address().port;
   await desktop("open", { app: "browser" });
-  await page.waitForSelector(".browser-empty", { timeout: 8_000 });
-  await page.waitForFunction((p) => [...document.querySelectorAll(".browser-empty .app-btn")].some((b) => b.textContent.includes(`:${p}`)), svcPort, { timeout: 10_000 });
-  check(true, "a listening port appears in quick access without being exposed first");
-  await page.click(`.browser-empty .app-btn:has-text(":${svcPort} — open")`);
-  await page.waitForSelector(`.os-window iframe[title="port ${svcPort}"]`, { timeout: 8_000 });
-  await page.waitForTimeout(800);
-  const exposedNow = (await page.evaluate(async () => (await fetch(`/${location.pathname.split("/")[1]}/mcp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server: "ports", tool: "list", args: {} }) }).then((r) => r.json())).result.ports.map((p) => p.port)));
-  check(exposedNow.includes(svcPort), "one click exposed the port through ports.expose");
-  const frameOk = await page.frames().some((f) => f.url().includes(`/p/${svcPort}/`));
-  check(frameOk, "and the window shows the service through the Gateway proxy");
-  // Tidy: the service goes away, so the window pointing at it goes too.
+  await page.waitForSelector(".braiwser-start", { timeout: 8_000 });
+  const bStatus = await page.evaluate(async () => (await fetch(`/${location.pathname.split("/")[1]}/braiwser/status`)).json());
+  if (!bStatus.ready) {
+    check(await page.isVisible(".braiwser-start >> text=Braiwser"), "without a runtime, Braiwser says how it gets one instead of an empty page");
+  } else {
+    await page.waitForFunction((p) => [...document.querySelectorAll(".braiwser-start .app-btn")].some((b) => b.textContent.includes(`:${p}`)), svcPort, { timeout: 15_000 });
+    check(true, "a listening port appears on Braiwser's start page without being exposed first");
+    await page.click(`.braiwser-start .app-btn:has-text(":${svcPort} — running now")`);
+    await page.waitForFunction(() => document.querySelector(".braiwser-overlay")?.hidden && document.querySelector(".braiwser-frame")?.getAttribute("src"), null, { timeout: 30_000 });
+    await page.waitForFunction((p) => document.querySelector(".braiwser-address")?.value.includes(`localhost:${p}`), svcPort, { timeout: 15_000 });
+    check(true, "and Braiwser shows the service at localhost:<port>, from a real Chromium");
+    const exposedNow = (await page.evaluate(async () => (await fetch(`/${location.pathname.split("/")[1]}/mcp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server: "ports", tool: "list", args: {} }) }).then((r) => r.json())).result.ports.map((p) => p.port)));
+    check(exposedNow.includes(svcPort), "one click exposed the port through ports.expose");
+  }
   for (const w of (await desktop("state")).doc.windows.filter((x) => x.app === "browser" || x.app === "terminal")) await desktop("close", { id: w.id });
-  await kernel.call({ principalId: owner.id, heldPatterns: held, server: "ports", tool: "unexpose", args: { port: svcPort } });
+  await kernel.call({ principalId: owner.id, heldPatterns: held, server: "ports", tool: "unexpose", args: { port: svcPort } }).catch(() => {});
   svc.close();
 
   // A custom app actually RUNS. This is the assertion whose absence hid a real

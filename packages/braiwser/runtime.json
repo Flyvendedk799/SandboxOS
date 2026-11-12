@@ -1,0 +1,6 @@
+{
+  "repository": "https://github.com/Flyvendedk799/Braiwser.git",
+  "revision": "38a597368b47069eed400e82a350e55dca3e9ed2",
+  "driver": "src/main/services/browser/drivers/playwright.js",
+  "playwrightCore": "1.64.0"
+}

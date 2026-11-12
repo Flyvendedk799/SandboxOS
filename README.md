@@ -138,7 +138,7 @@ of them is revertible from the revision history.
   thing folds into a stack: same document, one front window, dock along the bottom.
 - **Apps** — sixteen built in. The desk: Files, **Terminal** (a real PTY whose
   sessions outlive the window — close it, reopen it, the build is still running),
-  Console, Notes, Assistant, Observability, Media, Browser, Settings. And the
+  Console, Notes, Assistant, Observability, Media, Braiwser (the browser), Settings. And the
   machine's own work, so a console is never required: **Jobs** (supervised processes,
   live logs, the cron schedule), **Ports**, **Agents**, **Secrets**, **Sync** (Tide),
   **Access** (who can reach this machine) and **Audit** (every call, hash-chain

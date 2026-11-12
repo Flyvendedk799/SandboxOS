@@ -1,8 +1,8 @@
 // builtins.js — the applications the OS ships with.
 //
 // Each is a small, real client of the Kernel: Files calls `fs.*`, Console runs a
-// Command Central line, Observability calls `metrics.*`, Browser proxies an
-// exposed port. None of them has a private channel — everything they do, an agent
+// Command Central line, Observability calls `metrics.*`, Browser drives a
+// Braiwser session. None of them has a private channel — everything they do, an agent
 // could do, and every call lands in the same audit log.
 //
 // A built-in and a custom app are the same thing to the window manager. These are
@@ -663,98 +663,302 @@ const media = {
   },
 };
 
-// ── Browser ─────────────────────────────────────────────────────────────────
+// ── Browser (Braiwser) ──────────────────────────────────────────────────────
+
+// The Browser is Braiwser: a real Chromium running next to the Gateway, driven
+// through Braiwser's own driver. This window is a view onto it — it shows frames
+// of the page and sends back what you do — so it works on a brand-new machine with
+// nothing configured: type an address, or a search, and go. `localhost:<port>` is
+// this machine's port (the same rule as the Ports panel), which is all there is to
+// "previewing a dev server". The page never runs in this tab, so it cannot see
+// your SandboxOS session.
+
+const BRAIWSER_HOME = "about:blank";
+const SETUP_STEPS = { starting: "Starting", clone: "Fetching Braiwser", dependencies: "Installing Braiwser", chromium: "Downloading Chromium", ready: "Ready" };
+
+/** A keydown as Braiwser human input: printable text, or a named key/chord. */
+function keyInput(e) {
+  const mods = [e.ctrlKey && "Control", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Meta"].filter(Boolean);
+  const named = { " ": "Space", Enter: "Enter", Tab: "Tab", Escape: "Escape", Backspace: "Backspace", Delete: "Delete",
+    ArrowUp: "ArrowUp", ArrowDown: "ArrowDown", ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight",
+    Home: "Home", End: "End", PageUp: "PageUp", PageDown: "PageDown" }[e.key];
+  if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) return { kind: "text", text: e.key };
+  if (named) return { kind: "key", key: [...mods.filter((m) => !(m === "Shift" && named === "Space")), named].join("+") };
+  if (/^[A-Za-z0-9]$/.test(e.key) && (e.ctrlKey || e.metaKey || e.altKey)) return { kind: "key", key: [...mods, e.key.toLowerCase()].join("+") };
+  return null;
+}
 
 const browser = {
-  mount(host, win) {
-    // Ports proxied through the Gateway. The window remembers which port and
-    // which paths you visited in its props, so a re-opened Browser lands back
-    // where you were — on any tab, tomorrow.
-    const bar = h("div.app-bar");
-    const body = h("div.app-body", { style: { padding: 0 } });
-    fill(host, h("div.app", null, bar, body));
-    let ports = [];
-    let port = win.props?.port ? String(win.props.port) : "";
-    let path = win.props?.path ?? "/";
-    let history = Array.isArray(win.props?.history) ? win.props.history.slice(-20) : [];
-    const persist = () => call("windowSet", { id: win.id, props: { port, path, history } }).catch(() => {});
+  mount(host, win, ctx) {
+    // An older window (or the first-run flow) may remember a port rather than an
+    // address; both mean the same page now.
+    let address = win.props?.url ?? (win.props?.port ? `http://localhost:${win.props.port}${win.props.path ?? "/"}` : BRAIWSER_HOME);
+    let recent = Array.isArray(win.props?.recent) ? win.props.recent.slice(-12) : [];
+    const persist = () => call("windowSet", { id: win.id, props: { url: address, recent } }).catch(() => {});
+    const base = `/${slug}/braiwser`;
+    const wid = encodeURIComponent(win.id);
 
-    // Quick access: what is *listening* right now, exposed or not. One click
-    // exposes it (the same ports.expose the Console would run) and opens it —
-    // nobody should have to know what "expose" means to see their dev server.
-    let listening = [];
-    async function scan() {
-      const [r, sc] = await Promise.all([api.tryMcp("ports", "list", {}), api.tryMcp("ports", "scan", {})]);
-      ports = r?.ports ?? [];
-      listening = (sc?.listening ?? []).filter((l) => !ports.some((p) => Number(p.port) === Number(l.port)));
-      paintBar();
-      if (port && !ports.some((p) => String(p.port) === port)) note(`Port ${port} is not exposed any more. Pick it below and it comes back.`);
-      else if (port) show(port, path, { record: false });
-      else empty();
+    // ── chrome ──
+    const back = h("button.app-btn", { title: "Back", onclick: () => send({ kind: "back" }) }, "◀");
+    const fwd = h("button.app-btn", { title: "Forward", onclick: () => send({ kind: "forward" }) }, "▶");
+    const reload = h("button.app-btn", { title: "Reload", onclick: () => send({ kind: "reload" }) }, icon("refresh", 12));
+    const homeBtn = h("button.app-btn", { title: "Start page", onclick: () => go(BRAIWSER_HOME) }, "⌂");
+    const addr = h("input.braiwser-address", { value: address === BRAIWSER_HOME ? "" : address, placeholder: "Search, or type an address — localhost:3000 is this machine", spellcheck: "false", autocomplete: "off" });
+    addr.addEventListener("keydown", (e) => { if (e.key === "Enter") { go(addr.value); addr.blur(); } });
+    addr.addEventListener("focus", () => addr.select());
+    const newTab = h("button.app-btn", { title: "New tab", onclick: () => tabOp("new") }, "+");
+    const bar = h("div.app-bar.braiwser-bar", null, back, fwd, reload, homeBtn, addr, newTab);
+    const tabsEl = h("div.braiwser-tabs");
+    const img = h("img.braiwser-frame", { alt: "", draggable: "false" });
+    const view = h("div.braiwser-view", { tabindex: "0", title: "" }, img);
+    const overlay = h("div.braiwser-overlay");
+    const notice = h("div.braiwser-notice", { hidden: true });
+    const body = h("div.app-body.braiwser-body", { style: { padding: 0 } }, view, overlay, notice);
+    fill(host, h("div.app.braiwser", null, bar, tabsEl, body));
+
+    let stopped = false, opened = false, etag = null, lastUrl = null, objectUrl = null;
+    let size = { w: 0, h: 0 }, busyUntil = 0, timer = null, statusTimer = null;
+    const kick = (ms = 2500) => { busyUntil = Date.now() + ms; schedule(0); };
+
+    async function req(path, opts = {}) {
+      const res = await fetch(`${base}/${wid}/${path}`, { method: opts.body ? "POST" : (opts.method ?? "GET"),
+        headers: opts.body ? { "Content-Type": "application/json" } : {}, body: opts.body ? JSON.stringify(opts.body) : undefined });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 404 && data.code === "NO_SESSION") { opened = false; await start(); throw new Error("reopened"); }
+      if (!res.ok) throw Object.assign(new Error(data.error ?? res.statusText), { code: data.code });
+      return data;
+    }
+    const send = (input) => { if (!opened) return; kick(); req("input", { body: input }).catch(() => {}); };
+    async function tabOp(op, id) { if (!opened) return; kick(); await req("tab", { body: { op, id } }).catch((e) => toastError("Tab", e)); }
+
+    function remember(u) {
+      if (!u || u === BRAIWSER_HOME || u.startsWith("about:")) return;
+      recent = [...recent.filter((r) => r !== u), u].slice(-12);
+    }
+    async function go(input) {
+      const text = String(input ?? "").trim();
+      if (!text || text === BRAIWSER_HOME) { address = BRAIWSER_HOME; addr.value = ""; persist(); showStart(); }
+      if (!opened) { address = text || BRAIWSER_HOME; persist(); return start(); }
+      kick(6000);
+      try {
+        const r = await req("navigate", { body: { url: text || BRAIWSER_HOME } });
+        address = r.url; remember(r.url); persist();
+        if (r.outcome && !["ready", "cancelled"].includes(r.outcome) && r.url !== BRAIWSER_HOME) flash(`That page did not finish loading (${r.outcome}).`);
+      } catch (e) { if (e.message !== "reopened") toastError("Could not open that address", e); }
     }
 
-    async function quickOpen(p) {
-      const already = ports.some((x) => String(x.port) === String(p));
-      if (!already) {
-        try { await api.mcp("ports", "expose", { port: Number(p), name: `port-${p}` }); }
-        catch (e) { toastError(`Could not open port ${p}`, e); return; }
-        const r = await api.tryMcp("ports", "list", {});
-        ports = r?.ports ?? [];
-        listening = listening.filter((l) => Number(l.port) !== Number(p));
+    function flash(text) {
+      fill(notice, text); notice.hidden = false;
+      clearTimeout(flash.t); flash.t = setTimeout(() => { notice.hidden = true; }, 6000);
+    }
+
+    // ── start page: what you can open without knowing anything ──
+    // A dev server started after the window opened appears without a click: the
+    // start page rescans quietly while it is showing, and repaints only on change.
+    let startKey = null, rescan = null;
+    async function showStart({ quiet = false } = {}) {
+      clearTimeout(rescan);
+      if (!quiet) { overlay.hidden = false; startKey = null; }
+      const [exposed, scan] = await Promise.all([api.tryMcp("ports", "list", {}), api.tryMcp("ports", "scan", {})]);
+      if (address !== BRAIWSER_HOME || stopped || overlay.hidden) return;
+      rescan = setTimeout(() => showStart({ quiet: true }), 6000);
+      const ports = exposed?.ports ?? [];
+      const listening = (scan?.listening ?? []).filter((l) => !ports.some((p) => Number(p.port) === Number(l.port)));
+      const key = JSON.stringify([ports.map((p) => [p.port, p.name]), listening.map((l) => l.port), recent]);
+      if (quiet && key === startKey) return;
+      startKey = key;
+      const search = h("input.braiwser-search", { placeholder: "Search the web or type an address", spellcheck: "false", autocomplete: "off" });
+      search.addEventListener("keydown", (e) => { if (e.key === "Enter") go(search.value); });
+      const prev = overlay.querySelector(".braiwser-search");
+      const hadFocus = prev && document.activeElement === prev;
+      if (prev) search.value = prev.value;
+      const portBtn = (p, label, needsExpose) => h("button.app-btn" + (needsExpose ? ".primary" : ""), {
+        onclick: async () => {
+          if (needsExpose) {
+            try { await api.mcp("ports", "expose", { port: Number(p), name: `port-${p}` }); }
+            catch (e) { return toastError(`Could not open port ${p}`, e); }
+          }
+          go(`http://localhost:${p}/`);
+        },
+      }, label);
+      fill(overlay, h("div.braiwser-start", null,
+        h("div.braiwser-brand", null, icon("browser", 22), h("b", "Braiwser")),
+        search,
+        listening.length || ports.length ? h("div.braiwser-section", null,
+          h("span.dim", "On this machine"),
+          h("div.port-list", null,
+            ...listening.map((l) => portBtn(l.port, `:${l.port} — running now`, true)),
+            ...ports.map((p) => portBtn(p.port, `:${p.port}${p.name ? ` · ${p.name}` : ""}`, false)))) : h("p.dim.braiwser-hint", null,
+          "Start a dev server, a notebook or a preview in the Terminal and it appears here — or type ", h("code", "localhost:<port>"), " above."),
+        recent.length ? h("div.braiwser-section", null, h("span.dim", "Recent"),
+          h("div.braiwser-recent", null, ...[...recent].reverse().slice(0, 8).map((u) => h("button.app-btn", { title: u, onclick: () => go(u) }, u.replace(/^https?:\/\//, "").slice(0, 60))))) : null,
+        h("p.dim.braiwser-hint", null, "Pages run in Braiwser on this machine's host, not in your tab. Private network addresses are not opened; this machine's ports are, at ", h("code", "http://localhost:<port>"), ".")));
+      if (hadFocus) search.focus();
+      else if (!quiet) setTimeout(() => { if (!stopped && document.activeElement === document.body) search.focus(); }, 0);
+    }
+
+    // ── setup: a new host installs the pinned Braiwser once ──
+    function showSetup(st) {
+      overlay.hidden = false;
+      const inst = st.install ?? {};
+      const failed = inst.failed && !inst.installing;
+      fill(overlay, h("div.braiwser-start", null,
+        h("div.braiwser-brand", null, icon("browser", 22), h("b", "Braiwser")),
+        failed ? h("p", null, "Braiwser could not be set up on this host: ", h("code", inst.error ?? "unknown error"))
+          : !st.autoInstall && !inst.installing ? h("p", null, "Braiwser is not installed on this host yet. An operator can install it with ", h("code", "npm run braiwser:install"), ".")
+            : h("p", null, `Setting up Braiwser on this machine — ${SETUP_STEPS[inst.step] ?? "starting"}… This happens once per host and takes a minute or two.`),
+        failed || !st.autoInstall ? h("button.app-btn.primary", { onclick: () => api.post(`${base}/install`).then(poll).catch((e) => toastError("Install", e)) }, "Try again") : h("div.braiwser-spinner"),
+        h("p.dim.braiwser-hint", null, "Until then, this machine's open ports can still be viewed directly:"),
+        h("div.port-list", null, h("button.app-btn", { onclick: openPortsDirect }, "Show ports"))));
+    }
+    async function openPortsDirect(ev) {
+      const r = await api.tryMcp("ports", "list", {});
+      const ports = r?.ports ?? [];
+      if (!ports.length) return toast("No ports are open yet", { body: "Expose one from the Ports app." });
+      menu({ x: ev.clientX, y: ev.clientY }, ports.map((p) => ({ label: `:${p.port}${p.name ? ` · ${p.name}` : ""}`, run: () => window.open(`/${slug}/p/${p.port}/`, "_blank", "noopener") })));
+    }
+
+    async function poll() {
+      clearTimeout(statusTimer);
+      let st;
+      try { st = await api.get(`${base}/status`); } catch (e) {
+        fill(overlay, h("div.braiwser-start", null, h("p", null, e.status === 403 ? "This machine's grants do not include net.browse, so it cannot open Braiwser." : `Braiwser is unavailable: ${e.message}`)));
+        overlay.hidden = false; return;
       }
-      show(String(p), "/");
+      if (stopped) return;
+      if (!st.ready) { showSetup(st); statusTimer = setTimeout(poll, st.install?.installing ? 2000 : 8000); return; }
+      start();
     }
 
-    function paintBar() {
-      const select = h("select", null,
-        h("option", { value: "" }, ports.length || listening.length ? "choose a port…" : "nothing listening"),
-        ...ports.map((p) => h("option", { value: String(p.port), selected: String(p.port) === port }, `${p.port}${p.name ? ` · ${p.name}` : ""}`)),
-        ...listening.map((l) => h("option", { value: `new:${l.port}` }, `${l.port} · running now — open it`)));
-      select.addEventListener("change", () => (select.value.startsWith("new:") ? quickOpen(select.value.slice(4)) : show(select.value, "/")));
-      const pathEl = h("input", { value: path, placeholder: "/", style: { flex: "1", fontFamily: "var(--mono)" }, title: "Path on the service" });
-      pathEl.addEventListener("keydown", (e) => { if (e.key === "Enter") show(port, pathEl.value.trim() || "/"); });
-      const hist = h("select.hist", { title: "History" }, h("option", { value: "" }, "history"),
-        ...[...history].reverse().map((hh) => h("option", { value: `${hh.port}${hh.path}` }, `:${hh.port}${hh.path}`)));
-      hist.addEventListener("change", () => { const m = /^(\d+)(.*)$/.exec(hist.value); if (m) show(m[1], m[2] || "/"); hist.value = ""; });
-      fill(bar, select, pathEl, history.length ? hist : null,
-        h("button.app-btn", { onclick: () => show(port, path, { record: false }), title: "Reload" }, icon("refresh", 12)),
-        h("button.app-btn", { onclick: () => port && window.open(`/${slug}/p/${port}${path}`, "_blank"), title: "Open in a tab", disabled: !port }, icon("browser", 12)),
-        h("button.app-btn", { onclick: scan, title: "Look for running services again" }, "Rescan"));
+    async function start() {
+      if (stopped) return;
+      const rect = body.getBoundingClientRect();
+      size = { w: Math.round(rect.width), h: Math.round(rect.height) };
+      try {
+        const r = await fetch(`${base}/${wid}/open`, { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ width: size.w || 1024, height: size.h || 640, url: address }) });
+        const data = await r.json().catch(() => ({}));
+        if (r.status === 503) return poll();
+        if (!r.ok) { overlay.hidden = false; fill(overlay, h("div.braiwser-start", null, h("p", null, data.error ?? "Braiwser could not start."), h("button.app-btn", { onclick: start }, "Try again"))); return; }
+        opened = true;
+        if (address === BRAIWSER_HOME && (!data.url || data.url === BRAIWSER_HOME)) showStart(); else overlay.hidden = true;
+        kick(4000);
+      } catch (e) { toastError("Braiwser", e); }
     }
 
-    function empty() {
-      const any = ports.length || listening.length;
-      fill(body, h("div.browser-empty", null,
-        icon("browser", 26),
-        h("h3", any ? "Quick access" : "Nothing is listening yet"),
-        listening.length ? h("div.port-list", null,
-          h("span.dim", { style: { width: "100%", fontSize: "10.5px" } }, "Running inside this machine right now — one click opens it:"),
-          ...listening.map((l) => h("button.app-btn.primary", { onclick: () => quickOpen(l.port) }, `:${l.port} — open`))) : null,
-        ports.length ? h("div.port-list", null,
-          h("span.dim", { style: { width: "100%", fontSize: "10.5px" } }, "Already reachable:"),
-          ...ports.map((p) => h("button.app-btn", { onclick: () => show(String(p.port), "/") }, `:${p.port}${p.name ? ` ${p.name}` : ""}`))) : null,
-        h("p", null, any
-          ? "Opening a port here makes it reachable through the Gateway at this machine's address — WebSockets included, so a dev server's hot reload works."
-          : "Start something that listens on a port — a dev server, a notebook, a preview — and it shows up here as soon as it does. Nothing to configure."),
-        h("button.app-btn", { onclick: scan }, "Look again")));
+    // ── frames ──
+    function schedule(ms) {
+      clearTimeout(timer);
+      if (stopped) return;
+      timer = setTimeout(tick, ms);
     }
-    function note(text) { fill(body, h("div.browser-empty", null, icon("browser", 26), h("p", text))); }
-
-    function show(p, nextPath = "/", { record = true } = {}) {
-      if (!p) { port = ""; persist(); paintBar(); empty(); return; }
-      port = String(p);
-      path = nextPath.startsWith("/") ? nextPath : `/${nextPath}`;
-      if (record) history = [...history.filter((hh) => !(hh.port === port && hh.path === path)), { port, path, at: Date.now() }].slice(-20);
-      persist();
-      paintBar();
-      fill(body, h("iframe", { src: `/${slug}/p/${port}${path}`, style: { width: "100%", height: "100%", border: "0" }, title: `port ${port}` }));
+    async function tick() {
+      if (stopped || !opened) return;
+      // Nobody is looking: a hidden tab or a minimised window costs nothing.
+      if (document.hidden || !body.isConnected || body.offsetParent === null) return schedule(1000);
+      try {
+        const res = await fetch(`${base}/${wid}/frame`, { headers: etag ? { "If-None-Match": etag } : {} });
+        if (res.status === 404) { opened = false; etag = null; return start(); }
+        if (res.ok || res.status === 304) {
+          const state = JSON.parse(decodeURIComponent(res.headers.get("X-Braiwser-State") || "%7B%7D"));
+          if (res.status === 200) {
+            etag = res.headers.get("ETag");
+            const blob = await res.blob();
+            const next = URL.createObjectURL(blob);
+            img.onload = () => { if (objectUrl && objectUrl !== next) URL.revokeObjectURL(objectUrl); objectUrl = next; };
+            img.src = next;
+            img.dataset.w = state.width; img.dataset.h = state.height;
+          }
+          applyState(state);
+        }
+      } catch { /* the next tick tries again */ }
+      schedule(Date.now() < busyUntil ? 120 : 700);
     }
 
-    scan();
-    // A dev server started after the window opened should appear without a
-    // click: rescan quietly while nothing is shown.
-    const rescan = setInterval(() => { if (!port && !document.hidden) scan(); }, 6000);
-    return () => clearInterval(rescan);
+    function applyState(st) {
+      if (st.url && st.url !== lastUrl) {
+        lastUrl = st.url;
+        if (st.url !== BRAIWSER_HOME) { address = st.url; remember(st.url); persist(); overlay.hidden = true; }
+        else if (address === BRAIWSER_HOME && overlay.hidden) showStart();
+      }
+      if (document.activeElement !== addr) addr.value = st.url && st.url !== BRAIWSER_HOME ? st.url : "";
+      if (st.blocked) flash(st.blocked.reason);
+      const active = (st.tabs ?? []).find((t) => t.id === st.activeTab);
+      ctx?.setTitle?.(active?.title ? `${active.title} — Braiwser` : "Braiwser");
+      const tabs = st.tabs ?? [];
+      tabsEl.hidden = tabs.length < 2;
+      if (tabs.length >= 2) {
+        fill(tabsEl, ...tabs.map((t) => h("div.braiwser-tab" + (t.id === st.activeTab ? ".active" : ""), { title: t.url, onclick: () => tabOp("switch", t.id) },
+          h("span", (t.title || t.url.replace(/^https?:\/\//, "") || "New tab").slice(0, 40)),
+          h("button.braiwser-tab-x", { title: "Close tab", onclick: (e) => { e.stopPropagation(); tabOp("close", t.id); } }, "×"))));
+      }
+    }
+
+    // ── input: the frame is the page; map back to page pixels ──
+    const at = (e) => {
+      const r = img.getBoundingClientRect();
+      const w = Number(img.dataset.w) || img.naturalWidth, hh = Number(img.dataset.h) || img.naturalHeight;
+      if (!r.width || !r.height || !w || !hh) return null;
+      const x = Math.floor(((e.clientX - r.left) / r.width) * w), y = Math.floor(((e.clientY - r.top) / r.height) * hh);
+      return x >= 0 && y >= 0 && x < w && y < hh ? { x, y } : null;
+    };
+    img.addEventListener("click", (e) => { view.focus(); const p = at(e); if (p) send({ kind: "click", ...p }); });
+    img.addEventListener("dblclick", (e) => { const p = at(e); if (p) send({ kind: "dblclick", ...p }); });
+    img.addEventListener("contextmenu", (e) => { e.preventDefault(); const p = at(e); if (p) send({ kind: "contextmenu", ...p }); });
+    let lastMove = 0;
+    img.addEventListener("mousemove", (e) => {
+      if (Date.now() - lastMove < 150) return;
+      lastMove = Date.now(); const p = at(e);
+      if (p && opened) req("input", { body: { kind: "move", ...p } }).catch(() => {});
+    });
+    let wheel = { x: 0, y: 0 }, wheelTimer = null;
+    view.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      wheel.x += e.deltaX; wheel.y += e.deltaY;
+      if (!wheelTimer) wheelTimer = setTimeout(() => {
+        const clamp = (n) => Math.max(-4096, Math.min(4096, Math.round(n)));
+        send({ kind: "scroll", deltaX: clamp(wheel.x), deltaY: clamp(wheel.y) });
+        wheel = { x: 0, y: 0 }; wheelTimer = null;
+      }, 60);
+    }, { passive: false });
+    view.addEventListener("keydown", (e) => {
+      // Paste arrives as its own event with the text; let the browser raise it.
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "v") return;
+      const input = keyInput(e);
+      if (!input) return;
+      e.preventDefault(); e.stopPropagation();
+      send(input);
+    });
+    view.addEventListener("paste", (e) => {
+      const text = e.clipboardData?.getData("text/plain");
+      if (text) { e.preventDefault(); send({ kind: "text", text: text.slice(0, 4096) }); }
+    });
+
+    // The page is laid out at the window's size, not scaled into it.
+    const ro = new ResizeObserver(() => {
+      clearTimeout(ro.t);
+      ro.t = setTimeout(() => {
+        const r = body.getBoundingClientRect();
+        const next = { w: Math.round(r.width), h: Math.round(r.height) };
+        if (!opened || next.w < 50 || next.h < 50 || (Math.abs(next.w - size.w) < 4 && Math.abs(next.h - size.h) < 4)) return;
+        size = next; kick();
+        req("resize", { body: { width: next.w, height: next.h } }).catch(() => {});
+      }, 250);
+    });
+    ro.observe(body);
+
+    overlay.hidden = true;
+    poll();
+    if (address === BRAIWSER_HOME) showStart();
+
+    return () => {
+      stopped = true;
+      clearTimeout(timer); clearTimeout(statusTimer); clearTimeout(rescan); ro.disconnect();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      // Closing the window closes its browser. The desktop going away (a reload,
+      // another shell) does not: the window comes back and finds its page.
+      if (!os.doc?.windows?.some((w) => w.id === win.id)) fetch(`${base}/${wid}`, { method: "DELETE" }).catch(() => {});
+    };
   },
 };
 
