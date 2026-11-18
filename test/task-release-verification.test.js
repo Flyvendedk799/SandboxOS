@@ -101,7 +101,7 @@ test("BUDGETS canonical definitions match all 12 wire and write performance cons
   }
 
   const { results, failed } = await runBench({ silent: true });
-  assert.equal(failed, 0, `in-process runBench reported ${failed} budget failure(s)`);
+  assert.equal(failed, 0, JSON.stringify(results.filter(item => !item.ok)));
   assert.equal(results.length, 12, `expected 12 results from runBench, got ${results.length}`);
   for (const item of results) {
     assert.equal(item.ok, true, `budget exceeded for '${item.name}': value ${item.value} > budget ${item.budget} ${item.unit}`);
