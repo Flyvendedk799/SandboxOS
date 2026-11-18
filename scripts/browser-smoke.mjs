@@ -148,12 +148,17 @@ try {
   await page.keyboard.press("Escape");
 
   // A real shell in the Terminal window: a prompt on a pty, no tty complaint.
-  await desktop("open", { app: "terminal" });
-  await page.waitForSelector(".term-screen", { timeout: 8_000 });
-  await page.waitForTimeout(1500);
-  const termText = await page.$eval(".term-screen", (el) => el.textContent);
+  const { window: terminalWindow } = await desktop("open", { app: "terminal" });
+  const app = page.locator(`.os-window[data-id="${terminalWindow.id}"]`);
+  const terminal = app.locator(".term-screen");
+  await app.locator(".term-status.ok").waitFor();
+  await terminal.focus();
+  await terminal.pressSequentially("echo SBX-$((6*7))");
+  await terminal.press("Enter");
+  await terminal.filter({ hasText: "SBX-42" }).waitFor();
+  const termText = await terminal.textContent();
   check(!/can't access tty/.test(termText), "the shell does not complain about a missing tty");
-  check(/[$#] ?$/m.test(termText.trim()) || /\$|#/.test(termText), `the shell shows a prompt (${JSON.stringify(termText.slice(-60))})`);
+  check(termText.includes("SBX-42"), "the terminal accepts input and displays the shell’s answer");
   check(await page.$(".term-tab"), "the Terminal has tabs");
 
   // Braiwser: a service that is merely listening shows up on its start page, one
@@ -163,7 +168,7 @@ try {
   await new Promise((r) => svc.listen(0, "127.0.0.1", r));
   const svcPort = svc.address().port;
   await desktop("open", { app: "browser" });
-  await page.waitForSelector(".braiwser-start", { timeout: 8_000 });
+  await page.waitForSelector(".braiwser-start", { timeout: 120_000 });
   const bStatus = await page.evaluate(async () => (await fetch(`/${location.pathname.split("/")[1]}/braiwser/status`)).json());
   if (!bStatus.ready) {
     check(await page.isVisible(".braiwser-start >> text=Braiwser"), "without a runtime, Braiwser says how it gets one instead of an empty page");

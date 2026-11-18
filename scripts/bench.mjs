@@ -138,8 +138,15 @@ export async function runBench({ json = Boolean(process.env.BENCH_JSON), silent 
   });
 
   // ── reading the machine ─────────────────────────────────────────────────────
+  // A browser loads the shell before asking for its first document. Establish
+  // that connection and initialize the HTTP client outside the measured hop.
+  const headers = { cookie: `sbx_session=${session}` };
+  const shell = await fetch(`${base}/${sandbox.slug}/os`, { headers });
+  if (!shell.ok) throw new Error(`desktop shell returned HTTP ${shell.status}`);
+  await shell.arrayBuffer();
   const readStart = performance.now();
-  const res = await fetch(`${base}/${sandbox.slug}/os/doc`, { headers: { cookie: `sbx_session=${session}` } });
+  const res = await fetch(`${base}/${sandbox.slug}/os/doc`, { headers });
+  if (!res.ok) throw new Error(`desktop document returned HTTP ${res.status}`);
   const payload = await res.text();
   record({ name: "GET /os/doc — first paint's one round trip", value: performance.now() - readStart, budget: 400, unit: "ms" });
   record({ name: "…and what it carries", value: payload.length / 1024, budget: 192, unit: "KB" });

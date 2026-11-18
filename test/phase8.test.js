@@ -268,12 +268,13 @@ test("shell send exit terminates the shell and server closes the WS", async () =
   await withServer(async (port) => {
     const conn = await wsConnect(port, `/${sandbox.slug}/pty?token=${machineToken}`);
     assert.ok(conn);
-    await new Promise((r) => setTimeout(r, 150));
-    conn.send("exit 0\n");
-    // After the shell exits, the gateway should close the WebSocket.
-    await new Promise((r, j) => {
-      const t = setTimeout(() => j(new Error("close event timeout")), 3000);
-      conn.socket.on("close", () => { clearTimeout(t); r(); });
+    // Start the close check after the session can actually execute input.
+    conn.send("echo READY-$((6*7))\n");
+    await conn.waitFor("READY-42", 10000);
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("shell exited without closing the WebSocket")), 10000);
+      conn.socket.once("close", () => { clearTimeout(timer); resolve(); });
+      conn.send("exit 0\n");
     });
   });
 });

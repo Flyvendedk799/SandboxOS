@@ -54,11 +54,15 @@ function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; }
 }
 
-function writeJsonAtomic(file, value) {
+function writeAtomic(file, contents) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
+  fs.writeFileSync(tmp, contents);
   fs.renameSync(tmp, file);
+}
+
+function writeJsonAtomic(file, value) {
+  writeAtomic(file, JSON.stringify(value));
 }
 
 /**
@@ -109,7 +113,7 @@ function writeDoc(sandbox, doc, { op = "set", label = null, keepRev = false } = 
     for (const c of prior.checkpoints ?? []) if (!kept.has(c.id)) removeCheckpoint(sandbox, c.id);
   }
   if (prior && op !== "seed") pushHistory(sandbox, prior, label ?? op);
-  writeJsonAtomic(osPath(sandbox), next);
+  writeAtomic(osPath(sandbox), json);
   try { _cache.set(sandbox.id, { mtimeMs: fs.statSync(osPath(sandbox)).mtimeMs, doc: next }); }
   catch { _cache.delete(sandbox.id); }
 

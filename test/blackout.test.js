@@ -60,11 +60,15 @@ test.after(() => {
 });
 
 /** Read an SSE stream until `count` document events arrive, then let go. */
-async function watchDoc(atPort, count, { signal } = {}) {
+async function openEvents(atPort) {
   const res = await fetch(`http://127.0.0.1:${atPort}/${sandbox.slug}/os/events`, {
-    headers: { cookie: `sbx_session=${session}` }, signal,
+    headers: { cookie: `sbx_session=${session}` }, signal: AbortSignal.timeout(15000),
   });
-  const reader = res.body.getReader();
+  assert.equal(res.status, 200);
+  return res.body.getReader();
+}
+
+async function watchDoc(reader, count) {
   const dec = new TextDecoder();
   const revs = [];
   let hello = null;
@@ -122,12 +126,9 @@ test("the blackout: a job, a shell, three agent writes, and a new listener", asy
   await until(() => seen.includes("before-the-blackout"), "the shell to answer");
 
   // ── 2 · the tab closes: the stream goes, the session detaches ────────────
-  const ac = new AbortController();
-  const watching = watchDoc(port, 1, { signal: ac.signal });
-  await new Promise((r) => setTimeout(r, 150));
+  const stream = await openEvents(port);
   await ok("desktop", "open", { app: "notes" });         // one write the tab sees
-  const beforeDark = (await watching).revs.at(-1);
-  ac.abort();                                            // the tab is gone
+  const beforeDark = (await watchDoc(stream, 1)).revs.at(-1);
   shell.detach();                                        // …and so is the window
 
   // ── 3 · the dark: an agent works while nobody is watching ────────────────
@@ -149,7 +150,7 @@ test("the blackout: a job, a shell, three agent writes, and a new listener", asy
   ({ s: srv, port } = await listen());
 
   // ── 5 · coming back: hello says where the document is, and the shell is there
-  const { hello } = await watchDoc(port, 0, {});
+  const { hello } = await watchDoc(await openEvents(port), 0);
   assert.equal(hello.rev, afterDark, "the stream's hello carries the revision a client must catch up to");
   assert.notEqual(hello.rev, beforeDark, "which is not where the tab left off — that is the point");
 

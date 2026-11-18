@@ -6,17 +6,22 @@
 // 3. JSON reporting formatting (RELEASE_JSON=1, BENCH_JSON=1)
 // 4. Release check stage definitions and host report generation
 
-import "./_setup.js";
+import { TEST_HOME } from "./_setup.js";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import process from "node:process";
 import { BUDGETS, runBench } from "../scripts/bench.mjs";
 
-const runNode = (args, { env = {} } = {}) => new Promise((resolve) => {
+const runNode = (args, { env = {}, cwd } = {}) => new Promise((resolve) => {
+  const childEnv = { ...process.env, ...env };
+  delete childEnv.NODE_TEST_CONTEXT;
   const p = spawn(process.execPath, args, {
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, ...env },
+    cwd, env: childEnv,
   });
   let stdout = "";
   let stderr = "";
@@ -26,6 +31,18 @@ const runNode = (args, { env = {} } = {}) => new Promise((resolve) => {
     resolve({ code, stdout, stderr });
   });
 });
+
+// Give the child test runner a real suite without recursively invoking this
+// orchestrator test. The benchmark and release script are the shipping ones.
+const fixture = path.join(TEST_HOME, "release-check");
+test.before(() => {
+  fs.mkdirSync(fixture, { recursive: true });
+  fs.symlinkSync(fileURLToPath(new URL("../scripts", import.meta.url)), path.join(fixture, "scripts"), "junction");
+  const suite = new URL("./capabilities.test.js", import.meta.url);
+  fs.writeFileSync(path.join(fixture, "suite.test.mjs"), `import ${JSON.stringify(suite.href)};\n`);
+});
+test.after(() => fs.rmSync(fixture, { recursive: true, force: true }));
+const quick = (env = {}) => runNode(["scripts/release-check.mjs", "--quick"], { cwd: fixture, env });
 
 test("scripts/bench.mjs measures and passes all 12 wire and write performance budgets", async () => {
   const { code, stdout, stderr } = await runNode(["scripts/bench.mjs"], {
@@ -46,7 +63,7 @@ test("scripts/bench.mjs measures and passes all 12 wire and write performance bu
 });
 
 test("scripts/release-check.mjs with --quick passes and outputs valid headline counts", async () => {
-  const { code, stdout, stderr } = await runNode(["scripts/release-check.mjs", "--quick"]);
+  const { code, stdout, stderr } = await quick();
   assert.equal(code, 0, `release-check --quick failed: ${stderr}\n${stdout}`);
   assert.match(stdout, /the suite/, "must contain 'the suite'");
   assert.match(stdout, /the bench/, "must contain 'the bench'");
@@ -55,9 +72,7 @@ test("scripts/release-check.mjs with --quick passes and outputs valid headline c
 });
 
 test("scripts/release-check.mjs supports RELEASE_JSON=1 structured reporting", async () => {
-  const { code, stdout, stderr } = await runNode(["scripts/release-check.mjs", "--quick"], {
-    env: { RELEASE_JSON: "1" },
-  });
+  const { code, stdout, stderr } = await quick({ RELEASE_JSON: "1" });
   assert.equal(code, 0, `release-check with RELEASE_JSON=1 failed: ${stderr}\n${stdout}`);
   const data = JSON.parse(stdout);
   assert.equal(typeof data.at, "number");
@@ -70,6 +85,7 @@ test("scripts/release-check.mjs supports RELEASE_JSON=1 structured reporting", a
   const suite = data.stages.find((s) => s.key === "suite");
   assert.ok(suite, "suite stage must be present in report");
   assert.equal(suite.code, 0);
+  assert.match(suite.headline, /[1-9]\d* passing, 0 failing/);
 
   const bench = data.stages.find((s) => s.key === "bench");
   assert.ok(bench, "bench stage must be present in report");

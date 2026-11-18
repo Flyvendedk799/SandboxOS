@@ -1,4 +1,5 @@
 // Exercise the desktop workflows against a disposable gateway in real Chromium.
+// Set SANDBOXOS_BRAIWSER_ROOT to the installed runtime to verify remote JS frames.
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
