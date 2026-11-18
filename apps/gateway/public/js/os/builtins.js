@@ -917,6 +917,7 @@ const browser = {
     fill(host, h("div.app.braiwser", null, bar, tabsEl, body));
 
     let stopped = false, opened = false, etag = null, lastUrl = null, objectUrl = null;
+    let opening = null, pendingNavigation = null, lastTitle = win.title;
     let size = { w: 0, h: 0 }, busyUntil = 0, timer = null, statusTimer = null;
     const kick = (ms = 2500) => { busyUntil = Date.now() + ms; schedule(0); };
 
@@ -939,7 +940,12 @@ const browser = {
     async function go(input) {
       const text = String(input ?? "").trim();
       if (!text || text === BRAIWSER_HOME) { address = BRAIWSER_HOME; addr.value = ""; persist(); showStart(); }
-      if (!opened) { address = text || BRAIWSER_HOME; persist(); return start(); }
+      if (!opened) {
+        pendingNavigation = text || BRAIWSER_HOME;
+        address = pendingNavigation;
+        persist();
+        return start();
+      }
       kick(6000);
       try {
         const r = await req("navigate", { body: { url: text || BRAIWSER_HOME } });
@@ -1031,18 +1037,35 @@ const browser = {
       start();
     }
 
-    async function start() {
-      if (stopped) return;
+    function start() {
+      if (stopped || opened) return;
+      opening ??= openSession().finally(() => { opening = null; });
+      return opening;
+    }
+
+    async function openSession() {
       const rect = body.getBoundingClientRect();
       size = { w: Math.round(rect.width), h: Math.round(rect.height) };
       try {
         const r = await fetch(`${base}/${wid}/open`, { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ width: size.w || 1024, height: size.h || 640, url: address }) });
+          body: JSON.stringify({ width: size.w || 1024, height: size.h || 640, url: pendingNavigation ? BRAIWSER_HOME : address }) });
         const data = await r.json().catch(() => ({}));
-        if (stopped && ctx?.embedded) { if (r.ok) await fetch(`${base}/${wid}`, { method: "DELETE" }); return; }
-        if (r.status === 503 && data.code === "BRAIWSER_UNAVAILABLE") return poll();
+        if (stopped) {
+          if (r.ok && (ctx?.embedded || !os.doc?.windows?.some(w => w.id === win.id))) {
+            await fetch(`${base}/${wid}`, { method: "DELETE" });
+          }
+          return;
+        }
+        if (r.status === 503 && data.code === "BRAIWSER_UNAVAILABLE") { statusTimer = setTimeout(poll, 250); return; }
         if (!r.ok) { overlay.hidden = false; fill(overlay, h("div.braiwser-start", null, h("p", null, data.error ?? "Braiwser could not start."), h("button.app-btn", { onclick: start }, "Try again"))); return; }
         opened = true;
+        // Opening an existing session reattaches to its tab. A destination
+        // chosen while Chromium was launching still needs a navigation.
+        if (pendingNavigation !== null) {
+          const destination = pendingNavigation;
+          pendingNavigation = null;
+          await go(destination);
+        }
         if (address === BRAIWSER_HOME && (!data.url || data.url === BRAIWSER_HOME)) showStart(); else overlay.hidden = true;
         kick(4000);
       } catch (e) { toastError("Braiwser", e); }
@@ -1086,7 +1109,8 @@ const browser = {
       if (document.activeElement !== addr) addr.value = st.url && st.url !== BRAIWSER_HOME ? st.url : "";
       if (st.blocked) flash(st.blocked.reason);
       const active = (st.tabs ?? []).find((t) => t.id === st.activeTab);
-      ctx?.setTitle?.(active?.title ? `${active.title} — Braiwser` : "Braiwser");
+      const title = active?.title ? `${active.title} — Braiwser` : "Braiwser";
+      if (title !== lastTitle) { lastTitle = title; ctx?.setTitle?.(title); }
       const tabs = st.tabs ?? [];
       tabsEl.hidden = tabs.length < 2;
       if (tabs.length >= 2) {

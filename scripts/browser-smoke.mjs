@@ -167,18 +167,26 @@ try {
   const svc = http.createServer((_req, r) => { r.writeHead(200, { "Content-Type": "text/html" }); r.end("<title>hello cell</title><h1 id=hello>hello from the cell</h1>"); });
   await new Promise((r) => svc.listen(0, "127.0.0.1", r));
   const svcPort = svc.address().port;
-  await desktop("open", { app: "browser" });
-  await page.waitForSelector(".braiwser-start", { timeout: 120_000 });
+  const { window: browserWindow } = await desktop("open", { app: "browser" });
+  const browserApp = page.locator(`.os-window[data-id="${browserWindow.id}"]`);
+  const startPage = browserApp.locator(".braiwser-start");
+  await startPage.waitFor({ timeout: 120_000 });
   const bStatus = await page.evaluate(async () => (await fetch(`/${location.pathname.split("/")[1]}/braiwser/status`)).json());
   if (!bStatus.ready) {
-    check(await page.isVisible(".braiwser-start >> text=Braiwser"), "without a runtime, Braiwser says how it gets one instead of an empty page");
+    check(await startPage.getByText("Braiwser", { exact: true }).isVisible(), "without a runtime, Braiwser says how it gets one instead of an empty page");
   } else {
-    await page.waitForFunction((p) => [...document.querySelectorAll(".braiwser-start .app-btn")].some((b) => b.textContent.includes(`:${p}`)), svcPort, { timeout: 15_000 });
+    const listener = startPage.getByRole("button", { name: `:${svcPort} — running now`, exact: true });
+    await listener.waitFor();
     check(true, "a listening port appears on Braiwser's start page without being exposed first");
-    await page.click(`.braiwser-start .app-btn:has-text(":${svcPort} — running now")`);
-    await page.waitForFunction(() => document.querySelector(".braiwser-overlay")?.hidden && document.querySelector(".braiwser-frame")?.getAttribute("src"), null, { timeout: 30_000 });
-    await page.waitForFunction((p) => document.querySelector(".braiwser-address")?.value.includes(`localhost:${p}`), svcPort, { timeout: 15_000 });
-    check(true, "and Braiwser shows the service at localhost:<port>, from a real Chromium");
+    await listener.click();
+    await browserApp.locator(".braiwser-view img[src]").waitFor();
+    try {
+      await browserApp.locator(".os-title").filter({ hasText: "hello cell" }).waitFor({ timeout: 45_000 });
+    } catch (error) {
+      console.error("Browser window", await browserApp.innerText(), await browserApp.locator(".braiwser-address").inputValue());
+      throw error;
+    }
+    check(new URL(await browserApp.locator(".braiwser-address").inputValue()).port === String(svcPort), "and Braiwser displays the listening service's page and address");
     const exposedNow = (await page.evaluate(async () => (await fetch(`/${location.pathname.split("/")[1]}/mcp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server: "ports", tool: "list", args: {} }) }).then((r) => r.json())).result.ports.map((p) => p.port)));
     check(exposedNow.includes(svcPort), "one click exposed the port through ports.expose");
   }
