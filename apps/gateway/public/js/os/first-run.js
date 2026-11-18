@@ -15,7 +15,6 @@
 //     and the welcome folder is simply not written. Nothing here is a wall.
 
 import { h, fill, icon, api, toastError } from "../core.js";
-import { call } from "./client.js";
 
 const IDEA = [
   ["The desktop is a document",
@@ -32,7 +31,7 @@ const IDEA = [
  * Show the welcome screen. Resolves when the machine is set up (or the person
  * chose to skip), so the caller can render the desktop it produced.
  */
-export function firstRun(host, { seeds, onDone, viewport }) {
+export function firstRun(host, { seeds, onDone }) {
   return new Promise((resolve) => {
     let chosen = seeds[0]?.id ?? "dev";
     let busy = false;
@@ -58,7 +57,7 @@ export function firstRun(host, { seeds, onDone, viewport }) {
       fill(stepsEl, h("div.fr-step", null, h("span.fr-dot.on"), h("span", opts.skip ? "marking this machine set up…" : "setting up your machine…")));
       stepsEl.hidden = false;
       try {
-        const r = await api.mcp("desktop", "setup", opts.skip ? { skip: true } : { seed: chosen });
+        const r = await api.mcp("desktop", "setup", opts.skip ? { skip: true } : { seed: chosen, handsOn: true });
         // Print what actually happened, in the words the tool used.
         fill(stepsEl, ...(r.steps ?? []).map((st) => h("div.fr-step", { class: st.ok ? "" : "bad" },
           h("span.fr-dot", { class: st.ok ? "on" : "bad" }),
@@ -70,11 +69,7 @@ export function firstRun(host, { seeds, onDone, viewport }) {
           busy = false;
           return;
         }
-        await onDone?.(r);
-        // Tidy the windows the setup opened against this actual screen — through
-        // the client, so it commits against the revision the client now holds.
-        if (!opts.skip && viewport) await call("arrange", { preset: "grid", viewport }).catch(() => {});
-        resolve(r);
+        await finish(r);
       } catch (e) {
         busy = false;
         paint();
@@ -87,7 +82,7 @@ export function firstRun(host, { seeds, onDone, viewport }) {
     go.addEventListener("click", () => start());
 
     function paint() {
-      fill(go, busy ? "Setting up…" : `Start as ${seeds.find((s) => s.id === chosen)?.name ?? chosen}`);
+      fill(go, busy ? "Opening your project…" : "Edit my first page");
       go.disabled = busy;
       skip.disabled = busy;
       for (const el of panel.querySelectorAll(".fr-seed")) {
@@ -102,10 +97,12 @@ export function firstRun(host, { seeds, onDone, viewport }) {
       h("div.fr-head", null,
         h("span.fr-mark", null, icon("layers", 20)),
         h("div", null,
-          h("h1.fr-title", "One idea, and then it is yours"),
-          h("p.fr-sub", "Ninety seconds of reading, and a machine that is already doing something."))),
+          h("h1.fr-title", "Make your first page"),
+          h("p.fr-sub", "Change the headline, save it, and see your page update."))),
 
-      h("div.fr-idea", null, ...IDEA.map(([title, body], i) => h("div.fr-card", null,
+      h("div.fr-actions", null, go, skip),
+      stepsEl,
+      h("details", null, h("summary", "How this desktop works"), ...IDEA.map(([title, body], i) => h("div.fr-card", null,
         h("span.fr-n", String(i + 1)),
         h("b", title),
         h("p", body)))),
@@ -119,15 +116,13 @@ export function firstRun(host, { seeds, onDone, viewport }) {
           return b;
         }))),
 
-      h("div.fr-actions", null, go, skip),
-      stepsEl,
       h("p.fr-foot", null,
         "Setup writes a ", h("code", "welcome/"), " folder into your volume, serves it as a supervised job, and exposes its port under your slug. ",
         "All three are ordinary things you can open, edit and stop."));
 
     fill(host, h("div.fr-scrim", null, panel));
     paint();
-    panel.querySelector(".fr-seed")?.focus?.();
+    go.focus();
   });
 }
 

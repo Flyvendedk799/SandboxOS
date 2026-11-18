@@ -8,6 +8,7 @@
 import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
+import { trashFolder, trashTools } from "./trash.js";
 
 /** Resolve a Sandbox-relative path safely inside the volume root.
  *
@@ -94,7 +95,7 @@ async function canonicalLeafContained(root, p) {
 }
 
 /** Directories never worth walking for a content search or tree render. */
-const SKIP_DIRS = new Set([".git", "node_modules", ".cache", "dist", "build", ".next", "__pycache__", ".venv"]);
+const SKIP_DIRS = new Set([trashFolder, ".git", "node_modules", ".cache", "dist", "build", ".next", "__pycache__", ".venv"]);
 /** Files larger than this are skipped by fs.search (they are almost never source). */
 const MAX_SEARCH_BYTES = 2 * 1024 * 1024;
 
@@ -116,6 +117,7 @@ export function fsServer(cell) {
   return {
     name: "fs",
     tools: {
+      ...trashTools(cell, canonicalContained, safeResolve),
       list: {
         description: "List directory entries at a Sandbox path, with size and mtime.",
         inputSchema: { type: "object", properties: { path: { type: "string" } } },
@@ -126,6 +128,7 @@ export function fsServer(cell) {
           const entries = await fs.readdir(dir, { withFileTypes: true });
           const out = [];
           for (const e of entries) {
+            if (e.name === trashFolder && safeResolve(cell.root, args.path) === path.resolve(cell.root)) continue;
             // stat is best-effort: a broken symlink must still be listable.
             let size = 0, mtime = 0;
             try {
@@ -306,6 +309,7 @@ export function fsServer(cell) {
             entries.sort((a, b) => (a.isDirectory() === b.isDirectory() ? a.name.localeCompare(b.name) : a.isDirectory() ? -1 : 1));
             const out = [];
             for (const e of entries) {
+              if (e.name === trashFolder && depth === 1 && base === ".") continue;
               if (count >= limit) { truncated = true; break; }
               count += 1;
               const childRel = rel ? `${rel}/${e.name}` : e.name;
@@ -332,6 +336,7 @@ export function fsServer(cell) {
           properties: {
             query: { type: "string" },
             path: { type: "string" },
+            paths: { type: "boolean", description: "Also return file paths containing the search text." },
             regex: { type: "boolean", description: "Treat query as a regular expression." },
             caseSensitive: { type: "boolean" },
             include: { type: "string", description: "Only search files whose name matches this glob, e.g. *.js" },
@@ -348,20 +353,24 @@ export function fsServer(cell) {
             : new RegExp(args.query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flags);
           const includeRe = args.include ? globToRegExp(args.include) : null;
           const matches = [];
+          const paths = [];
+          const full = () => matches.length >= limit && (!args.paths || paths.length >= limit);
           let scanned = 0;
 
           async function walk(dir, rel, depth) {
-            if (matches.length >= limit || depth > 12) return;
+            if (full() || depth > 12) return;
             let entries;
             try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
             for (const e of entries) {
-              if (matches.length >= limit) return;
+              if (full()) return;
               if (SKIP_DIRS.has(e.name)) continue;
               const childRel = rel ? `${rel}/${e.name}` : e.name;
               const abs = path.join(dir, e.name);
               if (e.isDirectory()) { await walk(abs, childRel, depth + 1); continue; }
               if (!e.isFile()) continue;
               if (includeRe && !includeRe.test(e.name)) continue;
+              if (args.paths && paths.length < limit && childRel.toLowerCase().includes(args.query.toLowerCase())) paths.push(childRel);
+              if (matches.length >= limit) continue;
               let st;
               try { st = await fs.stat(abs); } catch { continue; }
               if (st.size > MAX_SEARCH_BYTES) continue;
@@ -371,7 +380,7 @@ export function fsServer(cell) {
               scanned += 1;
               const lines = text.split("\n");
               for (let i = 0; i < lines.length; i += 1) {
-                if (matches.length >= limit) return;
+                if (matches.length >= limit) break;
                 if (re.test(lines[i])) {
                   matches.push({ path: childRel, line: i + 1, text: lines[i].slice(0, 400) });
                 }
@@ -382,7 +391,7 @@ export function fsServer(cell) {
           const base = args.path ?? ".";
           const relBase = base === "." ? "" : base.replace(/^\.?\/*/, "").replace(/\/+$/, "");
           await walk(rootDir, relBase, 1);
-          return { query: args.query, scanned, matches, truncated: matches.length >= limit };
+          return { query: args.query, scanned, matches, ...(args.paths ? { paths } : {}), truncated: matches.length >= limit };
         },
       },
       readBytes: {

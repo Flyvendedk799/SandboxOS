@@ -352,7 +352,7 @@ export function desktopServer(deps) {
           "Reports every step and what this host could not do. skip:true just marks the machine set up; " +
           "keepDesktop:true does the project and the server without touching the desktop you already have.",
         inputSchema: obj({
-          seed: S, name: S,
+          seed: S, name: S, handsOn: { type: "boolean" },
           serve: { type: "boolean", description: "Start a static server for the project (default true)." },
           skip: { type: "boolean", description: "Mark first run done without changing anything." },
           keepDesktop: {
@@ -432,9 +432,17 @@ export function desktopServer(deps) {
                 // happens a few milliseconds later. Reporting "serving" and then
                 // handing over a dead job is the exact shape of a silent success,
                 // so look again before saying it worked.
-                await new Promise((r) => setTimeout(r, 700));
-                const after = await asMe("proc", "logs", { id: job.id, tail: 6 });
-                const alive = after.ok && after.result.state === "running";
+                const deadline = Date.now() + 15000;
+                let after, listening = false;
+                do {
+                  await new Promise(resolve => setTimeout(resolve, 250));
+                  after = await asMe("proc", "logs", { id: job.id, tail: 6 });
+                  if (!after.ok || after.result.state !== "running") break;
+                  const check = await asMe("ports", "check", { port, timeoutMs: 500 });
+                  if (!check.ok) break;
+                  listening = !!check.result?.up;
+                } while (!listening && Date.now() < deadline);
+                const alive = after.ok && after.result.state === "running" && listening;
                 // The *first* line that reads like a failure, not the last line
                 // printed: a crashed Node process signs off with its own version
                 // number, and reporting "Node.js v22.23.2" as the reason a server
@@ -442,6 +450,7 @@ export function desktopServer(deps) {
                 const said = (after.result?.logs ?? []).map((l) => l.text).filter(Boolean);
                 const why = alive ? null
                   : (said.find((t) => /error|EADDRINUSE|EACCES|not found|denied|refused/i.test(t))
+                    ?? (after.result?.state === "running" ? `the server has not answered on port ${port}` : null)
                     ?? said[0]
                     ?? `it exited with code ${after.result?.code ?? "?"}`);
                 if (!step(`serve the project with ${found.label} on :${port}`, alive, why)) {
@@ -469,8 +478,17 @@ export function desktopServer(deps) {
                 z: ++d.zTop, ws: d.activeWorkspace, min: false, max: false,
               });
             };
-            if (port) open("browser", { port, path: "/" }, { x: 60, y: 60, w: 620, h: 420 });
-            if (!keepDesktop) {
+            if (a.handsOn && !keepDesktop) {
+              // Keep the preset's apps within reach while giving the editor the whole viewport.
+              for (const w of d.windows) w.min = true;
+              let editor = d.windows.find(w => w.ws === d.activeWorkspace && w.app === "files");
+              if (!editor) { open("files"); editor = d.windows.at(-1); }
+              Object.assign(editor, { min: false, max: true, z: ++d.zTop, props: {
+                path: "welcome", file: "welcome/index.html", welcomeEdit: true,
+                ...(port ? { previewPort: port, previewRoot: "welcome" } : {}),
+              } });
+            } else if (port) open("browser", { port, path: "/" }, { x: 60, y: 60, w: 620, h: 420 });
+            if (!keepDesktop && !a.handsOn) {
               // The seed already opened a Files window in most cases; point that
               // one at the welcome folder rather than stacking a second one on it.
               const existingFiles = d.windows.find((w) => w.app === "files");

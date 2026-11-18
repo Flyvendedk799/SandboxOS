@@ -13,10 +13,6 @@
 import { h, fill, api, fmtBytes, slug } from "../core.js";
 import { call } from "./client.js";
 
-const pad2 = (n) => String(n).padStart(2, "0");
-const timeStr = () => { const d = new Date(); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
-const dayStr = () => new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
-
 /** Run `fn` now and on an interval; returns a stopper. */
 function loop(fn, ms) {
   let alive = true;
@@ -34,11 +30,17 @@ const bar = (label, value, pct, color) => h("div.w-bar", null,
 // ── the widgets ─────────────────────────────────────────────────────────────
 
 const clock = {
-  mount(host) {
-    const t = h("div.w-clock", timeStr());
-    const d = h("div.w-day", dayStr());
-    fill(host, t, d);
-    return loop(() => { t.textContent = timeStr(); d.textContent = dayStr(); }, 10_000);
+  mount(host, widget) {
+    const props = widget.props ?? {};
+    const time = h("div.w-clock");
+    const day = h("div.w-day");
+    fill(host, time, day);
+    let zone = props.timeZone || undefined;
+    try { new Intl.DateTimeFormat([], { timeZone: zone }); } catch { zone = undefined; }
+    const formatTime = new Intl.DateTimeFormat([], { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: props.hour12 ? "h12" : "h23" });
+    time.title = formatTime.resolvedOptions().timeZone;
+    const formatDay = new Intl.DateTimeFormat([], { timeZone: zone, weekday: "long", month: "long", day: "numeric" });
+    return loop(() => { const now = new Date(); time.textContent = formatTime.format(now); day.textContent = formatDay.format(now); }, 10000);
   },
 };
 
@@ -69,17 +71,18 @@ const load = {
 };
 
 const calendar = {
-  mount(host) {
+  mount(host, widget) {
     // Local, and only local: no calendar service, so no egress and nothing to
     // be honest about being unavailable. Month navigation is a view, not a write.
     const now = new Date();
     let y = now.getFullYear(), mo = now.getMonth();
     const stop = (e) => e.stopPropagation();
     function paint() {
-      const first = new Date(y, mo, 1).getDay();
+      const monday = widget.props?.weekStart === "monday";
+      const first = (new Date(y, mo, 1).getDay() + (monday ? 6 : 0)) % 7;
       const days = new Date(y, mo + 1, 0).getDate();
       const isNow = y === now.getFullYear() && mo === now.getMonth();
-      const cells = ["S", "M", "T", "W", "T", "F", "S"].map((d) => h("span.dow", d));
+      const cells = (monday ? ["M", "T", "W", "T", "F", "S", "S"] : ["S", "M", "T", "W", "T", "F", "S"]).map((d) => h("span.dow", d));
       for (let i = 0; i < first; i += 1) cells.push(h("span"));
       for (let i = 1; i <= days; i += 1) cells.push(h("span", { class: isNow && i === now.getDate() ? "today" : "" }, String(i)));
       fill(host,
@@ -139,11 +142,11 @@ const weather = {
 };
 
 const audit = {
-  mount(host) {
+  mount(host, widget) {
     const feed = h("div.w-feed");
     fill(host, h("div.w-label", "Audit feed"), feed);
     return loop(async () => {
-      const r = await api.get(`/${slug}/audit?limit=6`);
+      const r = await api.get(`/${slug}/audit?limit=${Number(widget.props?.rows) || 6}`);
       const rows = (r.events ?? []).map((e) => h("div.line", null,
         h("span", { class: e.result_kind ?? e.resultKind }, e.result_kind ?? e.resultKind),
         h("span.what", `${e.server}.${e.tool}`)));
@@ -165,7 +168,7 @@ const jobs = {
     return loop(async () => {
       const r = await api.tryMcp("proc", "jobs", {});
       if (!r) { fill(list, h("span.dim", { style: { fontSize: "10px" } }, "proc.jobs unavailable")); return; }
-      const rows = (r.jobs ?? []).slice(0, 6).map((j) => h("div.line", null,
+      const rows = (r.jobs ?? []).slice(0, Number(widget.props?.rows) || 6).map((j) => h("div.line", null,
         h("span", { class: j.state === "running" ? "ok" : "denied" }, j.state ?? "?"),
         h("span.what", j.name ?? j.cmd ?? j.id),
         h("span.acts", null,

@@ -18,6 +18,8 @@ import { KEY_ACTIONS, prettyChord } from "./lib/keys.js";
 
 /** Who can still interrupt you while do-not-disturb is on. */
 const NOTIFY_SOURCES = [["agents", "agents"], ["procs", "processes"], ["apps", "apps"], ["system", "the system"]];
+import { projectControls } from "./project-run.js";
+import { droppedPaths } from "./folder-upload.js";
 import { mountTerminal } from "./terminal.js";
 import { OPS_APPS } from "./ops.js";
 import { HELP_APP } from "./help.js";
@@ -35,15 +37,119 @@ export function appFor(path) {
 
 const files = {
   mount(host, win, ctx) {
+    const initialFile = win.props?.file;
     let cwd = win.props?.path ?? ".";
     let openPath = null;
     let entries = [];
 
+    let navigation = 0;
+    let lastLocation = { path: win.props?.path ?? ".", file: win.props?.file ?? null };
+    function recordLocation(file) {
+      if (lastLocation.path === cwd && lastLocation.file === file) return;
+      lastLocation = { path: cwd, file };
+      call("windowSet", { id: win.id, props: lastLocation }).catch(() => {});
+    }
+    let saving = false;
+    let guideHeadline = !!win.props?.welcomeEdit;
+    const hint = h("div.project-hint", { hidden: true }, "Change the text inside <h1>, then press Save.");
+    const drafts = new Map();
+    const draftKey = (path) => JSON.stringify(["sbx.draft", slug, os.snap?.viewerId, path]);
+    const draft = (path) => {
+      if (drafts.has(path)) return drafts.get(path);
+      try { return localStorage.getItem(draftKey(path)); } catch { return null; }
+    };
+    let warned = false;
+    function setDraft(path, value) {
+      if (value == null) drafts.delete(path); else drafts.set(path, value);
+      try {
+        if (value == null) localStorage.removeItem(draftKey(path));
+        else localStorage.setItem(draftKey(path), value);
+      } catch {
+        if (!warned) toast("Draft held in this window", { body: "Browser storage is full or unavailable. Save before closing." });
+        warned = true;
+      }
+    }
     const crumbs = h("div.path");
     const listEl = h("div.file-list");
     const paneEl = h("div.file-pane");
     const saveBtn = h("button.app-btn", { onclick: () => save(), disabled: true }, "Save");
+    const uploads = h("div.uploads", { role: "status" });
     const drop = h("div.app-body", { style: { display: "flex" } }, listEl, paneEl);
+    const previewBtn = h("button.app-btn", { title: "Open beside editor", onclick: choosePreview }, "Preview");
+    let previewRoot = win.props?.previewRoot ?? cwd;
+    let previewPort = Number(win.props?.previewPort) || 0;
+    const preview = h("iframe.project-preview", { title: "Live project preview", sandbox: "allow-same-origin", hidden: true });
+    const interactive = h("div.interactive-preview", { hidden: true });
+    let stopBrowser = null, reloadBrowser = null;
+    const modeButton = h("button.app-btn", { onclick: () => setInteractive(!stopBrowser) }, "Run JavaScript");
+    const previewPane = h("div.project-preview-pane", { hidden: true },
+      h("div.preview-mode", null, h("span", "Page preview"),
+        h("button.app-btn", { title: "Refresh preview", onclick: refreshPreview }, icon("refresh", 12)), modeButton), preview, interactive);
+    drop.append(previewPane);
+    function setInteractive(on) {
+      stopBrowser?.();
+      stopBrowser = null; reloadBrowser = null;
+      interactive.hidden = !on;
+      preview.hidden = on;
+      modeButton.textContent = on ? "Static preview" : "Run JavaScript";
+      if (on) {
+        stopBrowser = browser.mount(interactive, { id: win.id + "-preview-" + Math.random().toString(36).slice(2), props: { port: previewPort } }, {
+          embedded: true, bindReload: fn => { reloadBrowser = fn; },
+        });
+      } else {
+        fill(interactive);
+        if (previewPort) preview.src = `/${slug}/p/${previewPort}/`;
+      }
+    }
+    function showPreview(port, root) {
+      previewPort = port;
+      previewRoot = root.split("/").filter(part => part && part !== ".").join("/") || ".";
+      previewPane.hidden = false;
+      setInteractive(false);
+      previewBtn.title = "Close preview";
+      previewBtn.setAttribute("aria-pressed", "true");
+      drop.classList.add("has-preview");
+    }
+    const project = projectControls({
+      openPreview: async (port, root) => {
+        showPreview(port, root);
+        await call("windowSet", { id: win.id, props: { previewPort, previewRoot } });
+      },
+      logs: job => ctx.launch("jobs", { job }),
+    });
+    if (previewPort) showPreview(previewPort, previewRoot);
+    async function choosePreview() {
+      if (!previewPane.hidden) {
+        stopBrowser?.(); stopBrowser = null; reloadBrowser = null;
+        fill(interactive);
+        previewPane.hidden = true;
+        previewBtn.title = "Open beside editor";
+        previewBtn.setAttribute("aria-pressed", "false");
+        preview.removeAttribute("src");
+        drop.classList.remove("has-preview");
+        call("windowSet", { id: win.id, props: { previewPort: null } }).catch(() => {});
+        return;
+      }
+      try {
+        const { ports } = await api.mcp("ports", "list", {});
+        if (!ports.length) { toast("No exposed ports", { body: "Run a project and expose its port to preview it here." }); return; }
+        const picked = await dialog({ title: "Open beside editor", fields: [
+          { name: "port", label: "Served project", type: "select", options: ports.map((p) => ({ value: String(p.port), label: (p.name || "Project") + " · " + p.port })) },
+          { name: "root", label: "Project folder", value: cwd },
+        ], confirmLabel: "Open preview" });
+        if (!picked) return;
+        showPreview(Number(picked.port), picked.root.trim() || ".");
+        await call("windowSet", { id: win.id, props: { previewRoot, previewPort } });
+      } catch (err) { toastError("Could not open preview", err); }
+    }
+    function refreshPreview() {
+      if (reloadBrowser) reloadBrowser(); else if (previewPort) preview.src = preview.src;
+    }
+    function reloadPreview(e) {
+      if (previewPane.hidden || !(previewRoot === "." || e.detail.path.startsWith(previewRoot + "/"))) return;
+      refreshPreview();
+    }
+    window.addEventListener("sbx-file-saved", reloadPreview);
     // Dual pane: a second listing, for moving things between two places.
     let dual = !!win.props?.dual;
     const listEl2 = h("div.file-list.second", { hidden: !dual });
@@ -64,15 +170,17 @@ const files = {
     }
 
     fill(host, h("div.app", null,
-      h("div.app-bar", null,
+      h("div.app-bar.files-toolbar", null,
         h("button.app-btn", { title: "Up a level", onclick: () => go(dirname(cwd)) }, icon("back", 12)),
         crumbs,
         saveBtn,
-        h("button.app-btn", { title: "New…", onclick: (e) => newMenu(e.currentTarget) }, icon("plus", 12)),
+        previewBtn,
+        h("button.app-btn", { title: "Files menu", onclick: (e) => newMenu(e.currentTarget) }, "File ▾"),
         h("button.app-btn", { title: dual ? "One pane" : "Two panes", onclick: () => { dual = !dual; listEl2.hidden = !dual; call("windowSet", { id: win.id, props: { dual } }).catch(() => {}); if (dual) go2(cwd2); } }, icon("split", 12)),
         h("button.app-btn", { title: "Refresh", onclick: () => go(cwd) }, icon("refresh", 12)),
       ),
-      drop,
+      hint,
+      project.el, uploads, drop,
     ));
 
     async function go2(path) {
@@ -98,17 +206,25 @@ const files = {
 
     // ── listing ─────────────────────────────────────────────────────────────
 
-    async function go(path) {
+    async function go(path, file = null, line = null) {
+      const ticket = ++navigation;
+      project.clear();
       cwd = path || ".";
       openPath = null;
-      call("windowSet", { id: win.id, props: { path: cwd } }).catch(() => {});
+      paneEl._ta = null; fill(paneEl); saveBtn.disabled = true; hint.hidden = true;
+      entries = []; fill(listEl);
+      recordLocation(file);
       crumbs.textContent = cwd === "." ? "/" : `/${cwd}`;
       try {
         const [r] = await Promise.all([api.mcp("fs", "list", { path: cwd }), tideStatus()]);
+        if (ticket !== navigation) return;
         entries = [...r.entries].sort((a, b) =>
           (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "dir" ? -1 : 1));
         paint();
+        project.load(cwd, entries.some(e => e.name === project.profile));
+        if (file) await open(file, line);
       } catch (e) {
+        if (ticket !== navigation) return;
         fill(listEl, h("div.dim", { style: { padding: "10px", fontSize: "11px" } }, e.message));
       }
     }
@@ -125,7 +241,7 @@ const files = {
           onclick: () => (e.type === "dir" ? go(p) : open(p)),
           ondblclick: () => { if (e.type !== "dir") launchWith(p); },
           oncontextmenu: (ev) => { ev.preventDefault(); rowMenu(ev, e, p); },
-        }, h("span", e.type === "dir" ? `${e.name}/` : e.name),
+        }, h("span", e.type === "dir" ? `${e.name}/` : e.name + (draft(p) != null ? " •" : "")),
           // The badge is a button, and it goes where the change lives: Sync, on
           // the workspace it belongs to (T1.4). A badge that only tells you
           // something changed leaves you to go and find it.
@@ -142,6 +258,7 @@ const files = {
     function rowMenu(ev, entry, p) {
       const owner = entry.type === "file" ? appFor(p) : null;
       menu({ x: ev.clientX, y: ev.clientY }, [
+        entry.type === "dir" ? { label: "Project run settings…", run: async () => { await go(p); await project.configure(p); } } : null,
         entry.type === "file" && owner
           ? { label: `Open in ${appName(owner)}`, icon: "window", run: () => launchWith(p) }
           : null,
@@ -149,7 +266,7 @@ const files = {
         { label: "Download", icon: "save", disabled: entry.type === "dir", run: () => window.open(fileUrl(p, true), "_blank") },
         "-",
         { label: "Rename…", run: () => rename(p, entry.name) },
-        { label: "Delete", icon: "trash", danger: true, run: () => remove(p, entry) },
+        { label: "Move to Trash", icon: "trash", run: () => remove(p, entry) },
       ].filter(Boolean));
     }
 
@@ -184,7 +301,12 @@ const files = {
 
     // ── viewing and editing ─────────────────────────────────────────────────
 
-    async function open(path) {
+    async function open(path, line = null) {
+      const ticket = ++navigation;
+      hint.hidden = true;
+      paneEl._ta = null;
+      fill(paneEl);
+      recordLocation(path);
       openPath = path;
       saveBtn.disabled = true;
       paint();
@@ -195,36 +317,68 @@ const files = {
       try {
         const r = await api.mcp("fs", "read", { path });
         const ta = h("textarea.note-editor", { spellcheck: "false", style: { fontFamily: "var(--mono)", fontSize: "11px" } });
-        ta.value = r.content;
-        ta.addEventListener("input", () => { saveBtn.disabled = false; });
+        if (ticket !== navigation) return;
+        const recovered = draft(path);
+        ta.value = recovered ?? r.content;
+        ta.dataset.path = path;
+        saveBtn.disabled = saving || recovered == null;
+        ta.addEventListener("input", () => {
+          const wasDirty = draft(path) != null;
+          setDraft(path, ta.value);
+          saveBtn.disabled = saving;
+          if (!wasDirty) paint();
+        });
         ta.addEventListener("keydown", (e) => {
           if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); save(ta); }
         });
         paneEl._ta = ta;
         fill(paneEl, ta);
+        hint.hidden = !win.props?.welcomeEdit || path !== "welcome/index.html";
+        if (guideHeadline && !hint.hidden && recovered == null) {
+          const match = /<h1>([^<]*)<\/h1>/i.exec(ta.value);
+          if (match) { ta.focus(); ta.setSelectionRange(match.index + 4, match.index + 4 + match[1].length); }
+        }
+        guideHeadline = false;
+        if (line) {
+          const lines = ta.value.split("\n");
+          const start = lines.slice(0, line - 1).reduce((offset, text) => offset + text.length + 1, 0);
+          ta.focus();
+          ta.setSelectionRange(start, start + (lines[line - 1]?.length ?? 0));
+          ta.scrollTop = Math.max(0, (line - 3) * (parseFloat(getComputedStyle(ta).lineHeight) || 16));
+        }
       } catch (e) {
+        if (ticket !== navigation) return;
         fill(paneEl, h("div.dim", { style: { padding: "12px", fontSize: "11px" } },
           `${e.message}. Binary files can still be downloaded from the right-click menu.`));
       }
     }
 
     async function save(ta = paneEl._ta) {
-      if (!openPath || !ta) return;
+      if (!ta || saving || ta.dataset.path !== openPath) return;
+      const path = openPath, content = ta.value;
+      saving = true;
+      saveBtn.disabled = true;
       try {
-        await api.mcp("fs", "write", { path: openPath, content: ta.value });
-        saveBtn.disabled = true;
-        ctx.notify?.(`Saved ${basename(openPath)}`);
+        await api.mcp("fs", "write", { path, content });
+        if (draft(path) === content) setDraft(path, null);
+        paint();
+        window.dispatchEvent(new CustomEvent("sbx-file-saved", { detail: { path } }));
+        ctx.notify?.(`Saved ${basename(path)}`);
       } catch (e) { toastError("Could not save", e); }
+      finally { saving = false; saveBtn.disabled = !paneEl._ta || draft(openPath) == null; }
     }
 
     // ── mutating ────────────────────────────────────────────────────────────
 
     function newMenu(anchor) {
       menu(anchor, [
+        { label: "Open Trash…", run: showTrash },
+        { label: "Configure this project…", run: () => project.configure(cwd) },
         { label: "New file…", icon: "plus", run: () => create("file") },
         { label: "New folder…", icon: "files", run: () => create("dir") },
         "-",
-        { label: "Upload…", icon: "up", run: pickUpload },
+        { label: "Upload…", icon: "up", run: () => pickUpload(false) },
+        { label: "Upload folder…", icon: "up", run: () => pickUpload(true) },
       ]);
     }
 
@@ -254,34 +408,70 @@ const files = {
     }
 
     async function remove(p, entry) {
-      if (!await confirmDialog(`Delete ${entry.name}?`, entry.type === "dir" ? "The folder and everything in it." : "This cannot be undone.")) return;
       try {
-        await api.mcp("fs", "remove", { path: p, recursive: entry.type === "dir" });
-        if (openPath === p) { openPath = null; fill(paneEl); }
-        go(cwd);
-      } catch (e) { toastError("Could not delete", e); }
+        const result = await api.mcp("fs", "trash", { path: p });
+        const notice = toast(`Moved ${entry.name} to Trash`, { timeout: 10000 });
+        notice?.append(h("button.app-btn", { onclick: async () => {
+          if (await restoreItem(result.id)) notice.remove();
+        } }, "Undo"));
+        go(cwd, openPath === p ? null : openPath);
+      } catch (e) { toastError("Could not move to Trash", e); }
+    }
+
+    async function restoreItem(id) {
+      try {
+        const item = await api.mcp("fs", "restore", { id });
+        toast("Restored " + item.path);
+        if (host.isConnected) go(cwd, openPath);
+        return true;
+      } catch (err) { toastError("Could not restore item", err); return false; }
+    }
+
+    async function showTrash() {
+      try {
+        const { items } = await api.mcp("fs", "trashList", {});
+        if (!items.length) { toast("Trash is empty"); return; }
+        const picked = await dialog({ title: "Trash", fields: [{ name: "id", label: "Restore to original location", type: "select",
+          options: items.map(i => ({ value: i.id, label: i.path + " · " + new Date(i.deletedAt).toLocaleString() })) }], confirmLabel: "Restore" });
+        if (picked) await restoreItem(picked.id);
+      } catch (err) { toastError("Could not open Trash", err); }
     }
 
     // ── upload ──────────────────────────────────────────────────────────────
 
-    function pickUpload() {
+    function pickUpload(folder) {
       const input = h("input", { type: "file", multiple: true, style: { display: "none" } });
-      input.addEventListener("change", () => upload([...input.files]));
+      if (folder) input.setAttribute("webkitdirectory", "");
+      const target = cwd;
+      input.addEventListener("change", () => upload(Array.from(input.files, file => ({ path: file.webkitRelativePath || file.name, file })), target));
       host.append(input);
       input.click();
       setTimeout(() => input.remove(), 60_000);
     }
 
-    async function upload(fileList) {
-      if (!fileList.length) return;
-      // Bytes go over the raw file endpoint, not through JSON: a 40 MB video has
-      // no business being base64 inside an MCP envelope.
-      for (const f of fileList) {
-        try { await api.uploadFile(join(cwd, f.name), f); }
-        catch (e) { toastError(`Could not upload ${f.name}`, e); }
+    async function upload(items, target) {
+      if (!items.length) return;
+      const row = h("div.project-status");
+      uploads.append(row);
+      async function run(pending) {
+        const failures = [];
+        let done = items.length - pending.length;
+        for (const item of pending) {
+          row.textContent = `Uploading to /${target === "." ? "" : target} · ${done}/${items.length} · ${item.path}`;
+          try {
+            const dest = join(target, item.path);
+            if (item.file) await api.uploadFile(dest, item.file);
+            else await api.mcp("fs", "mkdir", { path: dest });
+            done++;
+          } catch (e) { failures.push({ item, error: e.message }); }
+        }
+        fill(row, `${done}/${items.length} uploaded`,
+          failures.length ? h("button.app-btn", { title: failures.map(f => f.item.path + ": " + f.error).join("\n"),
+            onclick: () => run(failures.map(f => f.item)) }, `Retry ${failures.length} failed`) : null,
+          h("button.app-btn", { onclick: () => row.remove() }, "Dismiss"));
+        if (target === cwd) go(cwd, openPath);
       }
-      toast(`Uploaded ${fileList.length} file${fileList.length > 1 ? "s" : ""}`, { kind: "ok" });
-      go(cwd);
+      await run(items);
     }
 
     drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("dropping"); });
@@ -289,13 +479,23 @@ const files = {
     drop.addEventListener("drop", (e) => {
       e.preventDefault();
       drop.classList.remove("dropping");
-      upload([...(e.dataTransfer?.files ?? [])]);
+      const target = cwd;
+      droppedPaths(e.dataTransfer).then(items => upload(items, target)).catch(err => toastError("Could not read dropped folder", err));
     });
 
-    go(cwd);
+    async function restoreLocation() {
+      if (initialFile) return go(dirname(initialFile), initialFile, win.props?.line);
+      const location = cwd;
+      if (location !== ".") {
+        const info = await api.tryMcp("fs", "stat", { path: location });
+        if (navigation) return;
+        if (info?.type === "file") return go(dirname(location), location);
+      }
+      return go(location);
+    }
+    restoreLocation();
     if (dual) go2(cwd2);
-    if (win.props?.path && extname(win.props.path)) open(win.props.path);
-    return () => {};
+    return () => { navigation++; stopBrowser?.(); project.clear(); window.removeEventListener("sbx-file-saved", reloadPreview); };
   },
 };
 
@@ -694,7 +894,7 @@ const browser = {
     // address; both mean the same page now.
     let address = win.props?.url ?? (win.props?.port ? `http://localhost:${win.props.port}${win.props.path ?? "/"}` : BRAIWSER_HOME);
     let recent = Array.isArray(win.props?.recent) ? win.props.recent.slice(-12) : [];
-    const persist = () => call("windowSet", { id: win.id, props: { url: address, recent } }).catch(() => {});
+    const persist = () => !ctx?.embedded && call("windowSet", { id: win.id, props: { url: address, recent } }).catch(() => {});
     const base = `/${slug}/braiwser`;
     const wid = encodeURIComponent(win.id);
 
@@ -729,6 +929,7 @@ const browser = {
       return data;
     }
     const send = (input) => { if (!opened) return; kick(); req("input", { body: input }).catch(() => {}); };
+    ctx?.bindReload?.(() => send({ kind: "reload" }));
     async function tabOp(op, id) { if (!opened) return; kick(); await req("tab", { body: { op, id } }).catch((e) => toastError("Tab", e)); }
 
     function remember(u) {
@@ -838,6 +1039,7 @@ const browser = {
         const r = await fetch(`${base}/${wid}/open`, { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ width: size.w || 1024, height: size.h || 640, url: address }) });
         const data = await r.json().catch(() => ({}));
+        if (stopped && ctx?.embedded) { if (r.ok) await fetch(`${base}/${wid}`, { method: "DELETE" }); return; }
         if (r.status === 503 && data.code === "BRAIWSER_UNAVAILABLE") return poll();
         if (!r.ok) { overlay.hidden = false; fill(overlay, h("div.braiwser-start", null, h("p", null, data.error ?? "Braiwser could not start."), h("button.app-btn", { onclick: start }, "Try again"))); return; }
         opened = true;

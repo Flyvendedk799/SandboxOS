@@ -63,7 +63,6 @@ startBroker({
         const { seeds } = await api.mcp("desktop", "setupSeeds", {});
         await firstRun(host, {
           seeds,
-          viewport: { w: window.innerWidth, h: window.innerHeight - 64 },
           onDone: () => loadOs(),
         });
       } catch (e) {

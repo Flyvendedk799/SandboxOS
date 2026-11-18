@@ -58,6 +58,19 @@ export function createScreen({ ctx = {} } = {}) {
     ]);
   }
 
+  const trialBar = h("div.trial-bar", { hidden: true }, h("span", "Gallery trial · expires after 24 hours away"),
+    ...[["keep", "Keep this desktop"], ["discard", "Back to mine"]].map(([action, label]) =>
+      h("button.app-btn", { onclick: async () => {
+        const buttons = trialBar.querySelectorAll("button");
+        buttons.forEach(b => b.disabled = true);
+        try {
+          const result = await api.post("trial/" + action, {});
+          if (action === "keep") location.reload();
+          else location.replace("/" + encodeURIComponent(result.origin) + "/studio");
+        } catch (err) { toastError("Could not finish trial", err); buttons.forEach(b => b.disabled = false); }
+      } }, label)));
+  el.prepend(trialBar);
+
   // ── overlay plumbing ──────────────────────────────────────────────────────
   let openOverlay = null;
 
@@ -138,6 +151,7 @@ export function createScreen({ ctx = {} } = {}) {
       icon("bell", 14),
       unread ? h("span.os-badge", { class: dnd ? "quiet" : "" }, String(unread)) : null);
 
+    trialBar.hidden = !os.snap?.trial;
     menubar.hidden = !d.shell.menubar.visible;
     fill(menubar,
       h("button.start", { title: "Applications", onclick: () => toggleOverlay("launcher", launcher) }, "⇌"),
@@ -302,25 +316,6 @@ export function createScreen({ ctx = {} } = {}) {
 
   // ── spotlight ─────────────────────────────────────────────────────────────
 
-  /** File paths, fetched once per spotlight open and filtered locally. */
-  let fileIndex = null;
-  async function indexFiles() {
-    if (fileIndex) return fileIndex;
-    try {
-      const r = await api.mcp("fs", "tree", { path: ".", depth: 4, limit: 1200 });
-      const out = [];
-      const walk = (nodes) => {
-        for (const n of nodes ?? []) {
-          if (n.type === "dir") walk(n.children);
-          else out.push(n.path);
-        }
-      };
-      walk(r.tree ?? r.children ?? r.entries);
-      fileIndex = out;
-    } catch { fileIndex = []; }
-    return fileIndex;
-  }
-
   /** The machine's whole tool catalogue, fetched once per page like the files. */
   let toolIndex = null;
   async function indexTools() {
@@ -404,13 +399,14 @@ export function createScreen({ ctx = {} } = {}) {
     function paint() {
       const q = input.value.trim().toLowerCase();
       const matched = q ? all.filter((r) => r.name.toLowerCase().includes(q) || r.sub.toLowerCase().includes(q)) : all;
-      const fileRows = q.length >= 2
-        ? (fileIndex ?? []).filter((p) => p.toLowerCase().includes(q)).slice(0, 5).map((p) => ({
-            name: p.split("/").pop(), sub: p, icon: "files",
-            run: () => { rememberFile(p); launch(appFor(p) ?? "files", { path: p }); },
-          }))
-        : [];
-      rows = [...matched.slice(0, 8 - fileRows.length), ...fileRows];
+      const fileRows = [...paths.slice(0, 4).map(p => ({
+        name: p.split("/").pop(), sub: p, icon: "files",
+        run: () => { rememberFile(p); launch("files", { file: p }); },
+      })), ...matches.slice(0, 4).map(m => ({
+        name: m.text.trim() || m.path, sub: m.path + " · line " + m.line, icon: "files",
+        run: () => { rememberFile(m.path); launch("files", { file: m.path, line: m.line }); },
+      }))];
+      rows = [...matched.slice(0, Math.max(2, 10 - fileRows.length)), ...fileRows];
       cursor = Math.min(cursor, Math.max(0, rows.length - 1));
       fill(results, ...(rows.length ? rows.map((r, i) => h("button.spot-row", {
         class: i === cursor ? "on" : "",
@@ -420,15 +416,34 @@ export function createScreen({ ctx = {} } = {}) {
         : [h("div.dim", { style: { padding: "12px", fontSize: "11.5px" } }, "Nothing matches.")]));
     }
 
-    input.addEventListener("input", paint);
+    let paths = [], matches = [], searchTimer, generation = 0;
+    function search() {
+      const ticket = ++generation;
+      clearTimeout(searchTimer);
+      const query = input.value.trim();
+      paths = []; matches = []; cursor = 0;
+      paint();
+      if (!query) return;
+      searchTimer = setTimeout(async () => {
+        if (!input.isConnected) return;
+        try {
+          const result = await api.mcp("fs", "search", { query, paths: true, limit: 6 });
+          if (ticket !== generation || !input.isConnected) return;
+          paths = result.paths ?? []; matches = result.matches ?? [];
+          paint();
+        } catch (err) {
+          if (ticket === generation && input.isConnected) results.append(h("div.project-status", "File search: " + err.message));
+        }
+      }, 180);
+    }
+    input.addEventListener("input", search);
     input.addEventListener("keydown", (e) => {
       if (e.key === "ArrowDown") { e.preventDefault(); cursor = Math.min(rows.length - 1, cursor + 1); paint(); }
       else if (e.key === "ArrowUp") { e.preventDefault(); cursor = Math.max(0, cursor - 1); paint(); }
       else if (e.key === "Enter") { e.preventDefault(); const r = rows[cursor]; hideOverlay(); r?.run(); }
       else if (e.key === "Escape") hideOverlay();
     });
-    paint();
-    indexFiles().then(paint);
+    search();
     indexTools().then(() => { all.length = 0; all.push(...actions()); paint(); });
     setTimeout(() => { input.focus(); input.select?.(); }, 0);
 

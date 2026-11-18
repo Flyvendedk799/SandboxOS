@@ -1668,3 +1668,21 @@ html.os-calm .os-dock, html.os-calm .dock-app, html.os-calm .os-snap-ghost, html
 /* A time column wide enough for the longest time it will hold, so the rows read
    down as well as across. */
 .row-line .sz.when { min-width: 76px; }
+
+.project-hint, .project-status { padding: 5px 10px; color: var(--os-text-2); font-size: 12px; }
+.project-preview-pane { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; border-left: 1px solid var(--os-line); }
+.preview-mode { display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 4px 8px; }
+.project-preview-pane .project-preview, .interactive-preview { flex: 1; min-height: 0; }
+.project-preview-pane .project-preview { background: white; }
+.has-preview .file-list { width: min(14%, 150px); }
+@media (max-width: 680px) {
+  .app-body.has-preview { flex-wrap: wrap; }
+  .has-preview .file-pane { height: 50%; }
+  .has-preview .project-preview-pane { flex-basis: 100%; height: 50%; }
+}
+.project-controls { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.project-controls > span:first-child { font-family: var(--mono); overflow-wrap: anywhere; }
+.trial-bar { display: flex; flex: none; gap: 8px; align-items: center; justify-content: center; flex-wrap: wrap; padding: 5px; background: var(--os-surface); font-size: 12px; }
+.files-toolbar { flex-wrap: wrap; gap: 5px; }
+.files-toolbar .path { min-width: 3em; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.preview-mode > span { flex: 1; }

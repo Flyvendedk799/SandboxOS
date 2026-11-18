@@ -84,6 +84,13 @@ CREATE TABLE IF NOT EXISTS sandboxes (
   vanity_domain TEXT UNIQUE
 );
 
+CREATE TABLE IF NOT EXISTS desktop_trials (
+  sandbox_id TEXT PRIMARY KEY REFERENCES sandboxes(id) ON DELETE CASCADE,
+  owner_id TEXT NOT NULL,
+  origin_slug TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+
 -- Capability grants: a principal may invoke tools matching <pattern> on a Sandbox.
 -- Pattern grammar: "server.tool", "server.*", "*". Default-deny: no row => no access.
 CREATE TABLE IF NOT EXISTS grants (
