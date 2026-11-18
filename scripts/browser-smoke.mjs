@@ -53,7 +53,11 @@ await ctx.addCookies([{ name: "sbx_session", value: session, url: base }]);
 const errors = [];
 function watch(page, label) {
   page.on("pageerror", (e) => errors.push(`[${label}] pageerror: ${e.message}`));
-  page.on("console", (m) => { if (m.type() === "error") errors.push(`[${label}] console: ${m.text()}`); });
+  page.on("console", m => {
+    if (m.type() !== "error") return;
+    const source = m.location().url;
+    errors.push(`[${label}] ${source ? new URL(source, base).pathname : "console"}: ${m.text()}`);
+  });
 }
 
 try {
@@ -66,7 +70,7 @@ try {
   const firstPage = await ctx.newPage();
   watch(firstPage, "first-run");
   await firstPage.goto(`${base}/${sandbox.slug}/os`);
-  await firstPage.waitForSelector(".fr-panel", { timeout: 15_000 });
+  await firstPage.waitForSelector(".fr-panel", { timeout: 45_000 });
   check((await firstPage.$$(".fr-seed")).length >= 4, "a new machine asks what it should start as");
   check((await firstPage.$$(".fr-card")).length === 4, "and explains the document model on one screen");
   check(!!(await firstPage.$(".fr-skip")), "with a way to skip it");

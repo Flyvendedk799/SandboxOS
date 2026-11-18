@@ -918,6 +918,8 @@ const browser = {
 
     let stopped = false, opened = false, etag = null, lastUrl = null, objectUrl = null;
     let opening = null, pendingNavigation = null, lastTitle = win.title;
+    const frameRequests = new AbortController();
+    let capturing = false;
     let size = { w: 0, h: 0 }, busyUntil = 0, timer = null, statusTimer = null;
     const kick = (ms = 2500) => { busyUntil = Date.now() + ms; schedule(0); };
 
@@ -1078,11 +1080,15 @@ const browser = {
       timer = setTimeout(tick, ms);
     }
     async function tick() {
-      if (stopped || !opened) return;
+      if (stopped || !opened || capturing) return;
       // Nobody is looking: a hidden tab or a minimised window costs nothing.
       if (document.hidden || !body.isConnected || body.offsetParent === null) return schedule(1000);
+      capturing = true;
       try {
-        const res = await fetch(`${base}/${wid}/frame`, { headers: etag ? { "If-None-Match": etag } : {} });
+        const res = await fetch(`${base}/${wid}/frame`, {
+          headers: etag ? { "If-None-Match": etag } : {}, signal: frameRequests.signal,
+        });
+        if (stopped) return;
         if (res.status === 404) { opened = false; etag = null; return start(); }
         if (res.ok || res.status === 304) {
           const state = JSON.parse(decodeURIComponent(res.headers.get("X-Braiwser-State") || "%7B%7D"));
@@ -1097,6 +1103,7 @@ const browser = {
           applyState(state);
         }
       } catch { /* the next tick tries again */ }
+      finally { capturing = false; }
       schedule(Date.now() < busyUntil ? 120 : 700);
     }
 
@@ -1178,7 +1185,7 @@ const browser = {
     if (address === BRAIWSER_HOME) showStart();
 
     return () => {
-      stopped = true;
+      stopped = true; frameRequests.abort();
       clearTimeout(timer); clearTimeout(statusTimer); clearTimeout(rescan); ro.disconnect();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       // Closing the window closes its browser. The desktop going away (a reload,
