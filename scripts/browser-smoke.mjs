@@ -153,7 +153,7 @@ try {
   const terminal = app.locator(".term-screen");
   await app.locator(".term-status.ok").waitFor();
   await terminal.focus();
-  await terminal.pressSequentially("echo SBX-$((6*7))");
+  await terminal.pressSequentially(`node -p "['SBX', 6 * 7].join('-')"`);
   await terminal.press("Enter");
   await terminal.filter({ hasText: "SBX-42" }).waitFor();
   const termText = await terminal.textContent();
