@@ -9,7 +9,7 @@ import { ensureSeed, purgeExpiredSessions, verifyAuditChain } from "../../../pac
 import { resolveBackend } from "../../../packages/cell/src/cell.js";
 import { seedVolume } from "../../../packages/cell/src/seed.js";
 import { cronTick } from "../../../packages/scheduler/src/cron-runner.js";
-import { createServer, scheduler, braiwser } from "./server.js";
+import { createServer, scheduler, braiwser, reapDesktopTrials } from "./server.js";
 import { stopAllProcsEverywhere } from "../../../packages/kernel/src/servers/proc.js";
 import { killAllSessionsEverywhere, reapIdleSessions } from "../../../packages/kernel/src/pty-sessions.js";
 import { killAllHosted } from "../../../packages/kernel/src/marketplace-pool.js";
@@ -63,6 +63,7 @@ try {
 // Background loops: fire due cron jobs, hibernate idle Cells (single-host budget),
 // and purge expired session/machine tokens so stale credential rows don't accumulate (backlog #2).
 setInterval(() => cronTick().catch((e) => console.error("cron:", e.message)), 1000).unref();
+setInterval(() => reapDesktopTrials().catch(e => console.error("desktop trials:", e.message)), 60_000).unref();
 setInterval(() => scheduler.reapIdle().catch((e) => console.error("reaper:", e.message)), 30_000).unref();
 setInterval(() => { try { reapIdleSessions(); } catch (e) { console.error("pty reaper:", e.message); } }, 5 * 60_000).unref();
 setInterval(() => braiwser.reap().catch((e) => console.error("braiwser reaper:", e.message)), 30_000).unref();

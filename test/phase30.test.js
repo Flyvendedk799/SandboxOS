@@ -99,10 +99,13 @@ test("summarizeDoc and silhouetteSvg run on a bare document, no Kernel needed", 
 // ── F3 · two clients, one agent, one revision ───────────────────────────────
 
 /** Read an SSE stream into a list of parsed events until `count` documents arrive. */
-async function collect(count, signal) {
-  const res = await fetch(`http://127.0.0.1:${port}/${sandbox.slug}/os/events`, { headers: { Authorization: `Bearer ${token}` }, signal });
+async function openStream() {
+  const res = await fetch(`http://127.0.0.1:${port}/${sandbox.slug}/os/events`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000) });
   assert.equal(res.status, 200);
-  const reader = res.body.getReader();
+  return res.body.getReader();
+}
+
+async function collect(count, reader) {
   const dec = new TextDecoder();
   const revs = [];
   let buf = "";
@@ -119,19 +122,16 @@ async function collect(count, signal) {
       if (ev.doc) revs.push(ev.doc.rev);
     }
   }
+  await reader.cancel();
   return revs;
 }
 
 test("two event-stream clients and an agent converge on the same revision, in order", async () => {
-  const ac = new AbortController();
-  const a = collect(3, ac.signal);
-  const b = collect(3, ac.signal);
-  await new Promise((r) => setTimeout(r, 150)); // let both streams say hello
+  const [a, b] = await Promise.all([openStream(), openStream()]);
   const w = (await ok("open", { app: "notes" })).window;
   await ok("move", { id: w.id, x: 10, y: 10 });
   await ok("themeSet", { theme: "tide" });
-  const [ra, rb] = await Promise.all([a, b]);
-  ac.abort();
+  const [ra, rb] = await Promise.all([collect(3, a), collect(3, b)]);
   assert.deepEqual(ra, rb, "both clients saw the same revisions");
   assert.deepEqual(ra, [...ra].sort((x, y) => x - y), "in ascending order");
   assert.equal(ra.at(-1), (await ok("state")).rev, "ending at the current document");
@@ -163,12 +163,9 @@ test("a gesture and an agent race: the conditional write loses honestly, the oth
 test("an out-of-order event can never rewind the desktop (the client rule, pinned server-side)", async () => {
   // The server only ever emits ascending revisions from one bus; the client
   // additionally drops anything older than what it holds. Pin the first half.
-  const ac = new AbortController();
-  const p = collect(4, ac.signal);
-  await new Promise((r) => setTimeout(r, 100));
+  const reader = await openStream();
   for (let i = 0; i < 4; i += 1) await ok("layoutSet", { gap: 8 + i });
-  const revs = await p;
-  ac.abort();
+  const revs = await collect(4, reader);
   for (let i = 1; i < revs.length; i += 1) assert.ok(revs[i] > revs[i - 1]);
   await ok("layoutSet", { gap: 12 });
 });
@@ -226,7 +223,7 @@ test("the interactive shell runs on a real pty: job control on, no tty warning, 
   assert.ok(!/can't access tty/.test(text), `no busybox/dash tty complaint: ${JSON.stringify(text.slice(0, 200))}`);
   assert.match(text, /\/dev\/(pts\/\d+|ttys?\d+)/, `tty(1) names a pseudo-terminal: ${JSON.stringify(text.slice(0, 300))}`);
   assert.match(text, /41 133/, `stty size reflects the resize the client asked for: ${JSON.stringify(text.slice(-200))}`);
-  assert.match(text, /JOBS=[a-zA-Z]*m/, "the shell has job control (m in $-)");
+  assert.match(text, /JOBS=[a-zA-Z0-9]*m/, "the shell has job control (m in $-)");
 });
 
 // ── Deploys are visible ─────────────────────────────────────────────────────

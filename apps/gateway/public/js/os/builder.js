@@ -6,7 +6,7 @@
 // the change lands. That is why the Studio and the running OS can be open in two
 // tabs, or the agent can be building while you are, without either going stale.
 
-import { h, fill, icon, api, dialog, confirmDialog, menu, toast, toastError, fmtBytes } from "../core.js";
+import { h, fill, icon, api, slug, dialog, confirmDialog, menu, toast, toastError, fmtBytes } from "../core.js";
 import { os, call, select, selected, loadOs, tint, onOs } from "./client.js";
 import { iconName, ICON_NAMES } from "./sprite.js";
 import { dropSession } from "./frames.js";
@@ -140,6 +140,13 @@ export function createBuilder({ onOpenCode } = {}) {
       preview && !d.builtin ? h("div.dim", { style: { fontSize: "10.5px", margin: "2px 0 8px" } },
         `${preview.windows?.length ?? 0} windows · ${preview.widgets?.length ?? 0} widgets · ${preview.apps ?? 0} custom apps${preview.tools ? ` · ${preview.tools} with tools` : ""}`) : null,
       h("div", { style: { display: "flex", gap: "6px" } },
+        h("button.ghost", { onclick: async e => {
+          const button = e.currentTarget; button.disabled = true;
+          try {
+            const trial = await api.post("/api/sandboxes", { name: d.name, trial: { origin: slug, distro: d.id } });
+            location.assign("/" + trial.slug + "/os");
+          } catch (err) { toastError("Could not start trial", err); button.disabled = false; }
+        } }, "Try this desktop"),
         h("button.ghost", { style: { flex: "1" }, onclick: () => fork(d) }, "Fork this distro"),
         d.mine && !d.builtin ? h("button.ghost", { title: "Who can see it", onclick: () => visibilityMenu(d) }, icon("eye", 13)) : null),
     );
@@ -961,6 +968,33 @@ export function createInspector() {
     pinSel?.addEventListener("change", () => call("widgetSet", { id, pin: pinSel.value }));
 
     // Props: the free-form part of an element, edited as JSON with the ceiling stated.
+    const controls = [];
+    if (kind === "widget") {
+      const props = item.props ?? {};
+      const field = (key, label, input, read) => {
+        input.setAttribute("aria-label", label);
+        input.addEventListener("change", () => {
+          if (!input.reportValidity()) return;
+          call("widgetSet", { id, props: { [key]: read(input.value) } }).catch(e => toastError("Could not update widget", e));
+        });
+        controls.push(h("label.field", null, label, input));
+      };
+      const choice = (key, label, values, active, read = v => v) => field(key, label,
+        h("select", null, ...values.map(([value, name]) => h("option", { value, selected: value === active }, name))), read);
+      if (item.kind === "clock") {
+        const zones = new Set(["UTC", ...(Intl.supportedValuesOf?.("timeZone") ?? []), ...(props.timeZone ? [props.timeZone] : [])]);
+        choice("timeZone", "Time zone", [["", "Local time"], ...Array.from(zones, z => [z, z])], props.timeZone ?? "");
+        choice("hour12", "Clock format", [["24", "24 hours"], ["12", "12 hours"]], props.hour12 ? "12" : "24", v => v === "12");
+      }
+      if (item.kind === "calendar") choice("weekStart", "First day of week", [["sunday", "Sunday"], ["monday", "Monday"]], props.weekStart ?? "sunday");
+      if (item.kind === "weather") {
+        field("place", "Location label", h("input", { value: props.place ?? "Copenhagen" }), v => v.trim());
+        for (const [key, label, max, fallback] of [["lat", "Latitude", 90, 55.6761], ["lon", "Longitude", 180, 12.5683]]) {
+          field(key, label, h("input", { type: "number", step: "any", required: true, min: -max, max, value: props[key] ?? fallback }), Number);
+        }
+      }
+      if (["jobs", "audit"].includes(item.kind)) field("rows", "Rows to show", h("input", { type: "number", required: true, min: 1, max: 25, value: props.rows ?? 6 }), Number);
+    }
     const propsTa = h("textarea", { rows: 5, spellcheck: "false" });
     propsTa.value = JSON.stringify(item.props ?? {}, null, 2);
     const propsNote = h("span.dim", { style: { fontSize: "10.5px" } }, `${JSON.stringify(item.props ?? {}).length} of 8192 bytes`);
@@ -994,7 +1028,8 @@ export function createInspector() {
       h("div.field", null, h("label", "Workspace"), wsSel),
       pinSel ? h("div.field", null, h("label", "Pin"), pinSel) : null,
       zRow, winFlags, appLine,
-      h("div.field", null, h("label", "Props (JSON)"), propsTa, h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "4px" } }, propsNote, propsBtn)),
+      ...controls,
+      h("details.field", null, h("summary", "Props (JSON)"), propsTa, h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "4px" } }, propsNote, propsBtn)),
       h("button.ghost.wide.danger", {
         onclick: () => call(kind === "widget" ? "widgetRemove" : "close", { id }).catch((e) => toastError("Could not delete", e)),
       }, kind === "widget" ? "Remove widget" : "Close window"),

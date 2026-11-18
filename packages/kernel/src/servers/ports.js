@@ -155,7 +155,20 @@ export function portsServer(deps) {
           // Each strategy belongs to a kind of machine, and a machine that has
           // none of them is told which were tried: a scan that found nothing and
           // a scan that could not look are different answers.
+          const macLocal = cell.backend === "local" && process.platform === "darwin";
           const strategies = [
+            // BSD netstat uses dots between the address and port and lists
+            // connections alongside listeners. Only take the local LISTEN column.
+            ...(macLocal ? [{
+              needs: "BSD netstat",
+              cmd: "/usr/sbin/netstat -an -p tcp",
+              parse(out) {
+                for (const line of out.split("\n")) {
+                  const fields = line.trim().split(/\s+/);
+                  if (fields[5] === "LISTEN") add(Number(fields[3].split(".").at(-1)));
+                }
+              },
+            }] : []),
             // `ss` on modern distros, `netstat` on older/busybox images.
             {
               needs: "ss/netstat",

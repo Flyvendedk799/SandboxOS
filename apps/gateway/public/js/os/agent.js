@@ -52,6 +52,9 @@ export function createAgentPanel({ onClose, quick = QUICK, title = "Build agent"
   const input = h("textarea", { rows: 1, placeholder: "Ask the agent to build or restyle…" });
   const send = h("button.send", { title: "Send" }, icon("send", 15));
   let chatId = null;
+  const lastKey = "sbx.chat." + slug + "." + title;
+  const picker = h("select", { "aria-label": "Recent chats" });
+  const newChat = h("button.chip", { onclick: () => selectChat(null) }, "New chat");
   let busy = false;
   const liveTools = new Map();
   let liveText = null;
@@ -63,6 +66,7 @@ export function createAgentPanel({ onClose, quick = QUICK, title = "Build agent"
       h("span.spacer"),
       onClose ? h("button.rail-btn", { style: { width: "24px", height: "24px" }, onclick: onClose }, icon("x", 13)) : null,
     ),
+    h("div.quick-row", null, picker, newChat),
     log,
     proposalsEl,
     h("div.quick-row", ...(review ? [reviewBtn] : []), ...quick.map((q) => h("button.chip", { onclick: () => submit(q) }, q))),
@@ -180,12 +184,15 @@ export function createAgentPanel({ onClose, quick = QUICK, title = "Build agent"
     if (chatId) return chatId;
     const r = await api.post(`/${slug}/chats`, {});
     chatId = r.chat.id;
+    remember();
+    picker.append(h("option", { value: chatId }, r.chat.title || "Current conversation"));
+    picker.value = chatId;
     return chatId;
   }
 
   function setBusy(v) {
     busy = v;
-    send.disabled = v;
+    send.disabled = v; picker.disabled = v; newChat.disabled = v;
     send.replaceChildren(v ? h("span.spinner") : icon("send", 15));
   }
 
@@ -234,7 +241,7 @@ export function createAgentPanel({ onClose, quick = QUICK, title = "Build agent"
     }
   }
 
-  function handle(ev) {
+  function handle(ev, replay = false) {
     switch (ev.type) {
       case "text":
         if (!liveText) liveText = say("agent", "");
@@ -262,8 +269,17 @@ export function createAgentPanel({ onClose, quick = QUICK, title = "Build agent"
           if (link) {
             card.classList.add("linked");
             card.querySelector(".hd").append(h("button.reveal", { onclick: () => link.run() }, link.label));
-            if (link.auto) link.run();
+            if (link.auto && !replay) link.run();
           }
+        }
+        if (ev.ok !== false && !ev.result?.proposed) {
+          const { server, tool } = card.dataset;
+          const args = card._args ?? {};
+          const path = server === "fs" && ["read", "write", "append", "writeBytes", "copy", "move"].includes(tool) && (args.to || args.path);
+          const app = server === "desktop" && (["appDefine", "appWrite"].includes(tool) ? args.id : tool === "open" && args.app);
+          if (path || app) card.append(h("button.app-btn", { onclick: () =>
+            call("open", path ? { app: "files", props: { file: path } } : { app })
+              .catch(e => toastError("Could not open result", e)) }, path ? "Open file" : "Open app"));
         }
         break;
       }
@@ -278,6 +294,52 @@ export function createAgentPanel({ onClose, quick = QUICK, title = "Build agent"
         break;
     }
   }
+
+  function remember() {
+    try { if (chatId) localStorage.setItem(lastKey, chatId); else localStorage.removeItem(lastKey); } catch {}
+  }
+  async function selectChat(id) {
+    setBusy(true);
+    try {
+      const transcript = id ? (await api.get("chats/" + encodeURIComponent(id))).transcript : [];
+      chatId = id; remember(); picker.value = id ?? "";
+      fill(log); liveTools.clear(); liveText = null;
+      const pending = [];
+      for (const item of transcript) {
+        if (item.kind === "text" && ["user", "assistant"].includes(item.role)) say(item.role === "user" ? "user" : "agent", item.text);
+        if (item.kind === "tool_call") {
+          const [server, tool] = item.name.split(".");
+          const key = item.id ?? Symbol();
+          if (item.id == null) pending.push(key);
+          handle({ type: "tool_call", server, tool, id: key, args: item.args }, true);
+        }
+        if (item.kind === "tool_result") {
+          let result = item.text;
+          try { result = JSON.parse(item.text); } catch {}
+          handle({ type: "tool_result", id: item.id ?? pending.shift(), ok: !item.text.startsWith("Error:"),
+            result, error: item.text }, true);
+        }
+      }
+      for (const card of liveTools.values()) {
+        if (card.querySelector(".spinner")) card.querySelector(".res").textContent = "Interrupted";
+      }
+      if (!transcript.length) say("agent", SYSTEM_HINT);
+    } catch (e) { picker.value = chatId ?? ""; toastError("Could not open chat", e); }
+    finally { setBusy(false); }
+  }
+  picker.addEventListener("change", () => selectChat(picker.value || null));
+  async function restore() {
+    setBusy(true);
+    try {
+      const { chats } = await api.get("chats");
+      fill(picker, h("option", { value: "" }, "Recent chats"), ...chats.map(c => h("option", { value: c.id }, c.title || "Untitled chat")));
+      let last;
+      try { last = localStorage.getItem(lastKey); } catch {}
+      if (chats.some(c => c.id === last)) await selectChat(last);
+    } catch (e) { toastError("Could not load recent chats", e); }
+    finally { setBusy(false); }
+  }
+  restore();
 
   send.addEventListener("click", () => submit());
   input.addEventListener("keydown", (e) => {
@@ -298,5 +360,5 @@ export function mountAssistantWindow(host) {
   Object.assign(panel.el.style, { width: "100%", height: "100%", background: "transparent", borderLeft: "0", display: "flex", flexDirection: "column" });
   panel.el.querySelector(".panel-head")?.remove();
   fill(host, panel.el);
-  return () => {};
+  return panel.destroy;
 }

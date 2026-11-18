@@ -108,6 +108,11 @@ export function loadDriver(status = inspectRuntime()) {
   const real = req("playwright-core");
   const chromium = {
     launch: async (options) => {
+      // macOS headless previews only stream JPEGs. Software compositing avoids
+      // waiting on WindowServer's GPU path for each frame.
+      if (process.platform === "darwin" && options.headless) {
+        options = { ...options, args: [...(options.args ?? []), "--disable-gpu"] };
+      }
       let browser;
       try {
         browser = await real.chromium.launch(options);

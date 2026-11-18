@@ -288,7 +288,7 @@ onOs((kind) => {
       root.append(host);
       try {
         const { seeds } = await api.mcp("desktop", "setupSeeds", {});
-        await firstRun(host, { seeds, viewport: { w: window.innerWidth, h: window.innerHeight - 64 }, onDone: () => loadOs() });
+        await firstRun(host, { seeds, onDone: () => loadOs() });
       } catch (e) {
         toastError("The welcome screen could not load", e);
       }

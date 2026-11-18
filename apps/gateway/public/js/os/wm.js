@@ -594,7 +594,7 @@ export function createDesktop({ root, ctx = {} }) {
       if (!e.shiftKey) startDrag(e, g.id, "widget");
     });
     root.append(el);
-    return { el, stop, frame, kind: g.kind };
+    return { el, stop, frame, kind: g.kind, propsKey: JSON.stringify(g.props) };
   }
 
   function placeWidget(el, g, entry) {
@@ -785,7 +785,7 @@ export function createDesktop({ root, ctx = {} }) {
     }
     for (const g of d.widgets) {
       let entry = widgets.get(g.id);
-      if (!entry || entry.kind !== g.kind) {
+      if (!entry || entry.kind !== g.kind || (["clock", "calendar", "weather", "jobs", "audit"].includes(g.kind) && entry.propsKey !== JSON.stringify(g.props))) {
         entry?.stop?.(); entry?.el.remove();
         entry = buildWidget(g);
         widgets.set(g.id, entry);

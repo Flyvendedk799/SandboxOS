@@ -60,7 +60,7 @@ const facts = [
 // ── the stages ──────────────────────────────────────────────────────────────
 
 const stages = [
-  { key: "suite", label: "the suite", cmd: ["--test", "--no-warnings"], what: "every unit and integration test" },
+  { key: "suite", label: "the suite", cmd: ["scripts/run-suite.mjs"], what: "every unit and integration test" },
   { key: "bench", label: "the bench", cmd: ["scripts/bench.mjs"], what: "the T4.1 budgets, D of the acceptance suite" },
   { key: "smoke", label: "the smoke", cmd: ["scripts/browser-smoke.mjs"], what: "the OS and the Studio in a real browser", browser: true },
   { key: "day", label: "the day", cmd: ["scripts/day.mjs"], what: "A of the acceptance suite — ten acts, no console", browser: true },
@@ -90,10 +90,10 @@ const secs = (ms) => `${(ms / 1000).toFixed(1)}s`;
 /** The one line each stage is remembered by: counts, not scrollback. */
 function headline(key, out) {
   if (key === "suite") {
-    const pass = out.match(/^# pass (\d+)$/m)?.[1] ?? out.match(/ℹ pass (\d+)/)?.[1];
-    const fail = out.match(/^# fail (\d+)$/m)?.[1] ?? out.match(/ℹ fail (\d+)/)?.[1];
-    const skip = out.match(/ℹ skipped (\d+)/)?.[1];
-    return pass ? `${pass} passing, ${fail ?? "?"} failing${Number(skip) ? `, ${skip} skipped` : ""}` : "no counts reported";
+    const count = key => [...out.matchAll(new RegExp(`^(?:# |ℹ )${key} (\\d+)$`, "gm"))]
+      .reduce((sum, m) => sum + Number(m[1]), 0);
+    const pass = count("pass"), fail = count("fail"), skip = count("skipped");
+    return pass || fail || skip ? `${pass} passing, ${fail} failing${skip ? `, ${skip} skipped` : ""}` : "no counts reported";
   }
   if (key === "bench") {
     const n = (out.match(/^\s+[✓✗] /gm) ?? []).length;

@@ -185,7 +185,21 @@ function processTable() {
   }
   try {
     const r = spawnSync("ps", ["-A", "-o", "pid=,ppid=,sess="], { encoding: "utf8", timeout: 2000 });
-    for (const line of String(r.stdout ?? "").split("\n")) {
+    let rows = r.stdout ?? "";
+    if (process.platform === "darwin") {
+      // Darwin's ps redacts sess as zero. Ask getsid(2) for the actual
+      // session IDs, including jobs whose interactive shell already exited.
+      const lookup = spawnSync("/usr/bin/ruby", ["--disable-gems", "-e", `
+        STDIN.each_line do |line|
+          pid, ppid = line.split.map(&:to_i)
+          begin
+            puts "#{pid} #{ppid} #{Process.getsid(pid)}"
+          rescue Errno::ESRCH, Errno::EPERM
+          end
+        end`], { input: rows, encoding: "utf8", timeout: 2000 });
+      rows = lookup.stdout ?? "";
+    }
+    for (const line of rows.split("\n")) {
       const [pid, ppid, sid] = line.trim().split(/\s+/).map(Number);
       if (Number.isInteger(pid) && pid > 0) table.set(pid, { ppid, sid });
     }

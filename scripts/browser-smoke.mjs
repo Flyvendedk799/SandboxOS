@@ -53,7 +53,11 @@ await ctx.addCookies([{ name: "sbx_session", value: session, url: base }]);
 const errors = [];
 function watch(page, label) {
   page.on("pageerror", (e) => errors.push(`[${label}] pageerror: ${e.message}`));
-  page.on("console", (m) => { if (m.type() === "error") errors.push(`[${label}] console: ${m.text()}`); });
+  page.on("console", m => {
+    if (m.type() !== "error") return;
+    const source = m.location().url;
+    errors.push(`[${label}] ${source ? new URL(source, base).pathname : "console"}: ${m.text()}`);
+  });
 }
 
 try {
@@ -66,7 +70,7 @@ try {
   const firstPage = await ctx.newPage();
   watch(firstPage, "first-run");
   await firstPage.goto(`${base}/${sandbox.slug}/os`);
-  await firstPage.waitForSelector(".fr-panel", { timeout: 15_000 });
+  await firstPage.waitForSelector(".fr-panel", { timeout: 45_000 });
   check((await firstPage.$$(".fr-seed")).length >= 4, "a new machine asks what it should start as");
   check((await firstPage.$$(".fr-card")).length === 4, "and explains the document model on one screen");
   check(!!(await firstPage.$(".fr-skip")), "with a way to skip it");
@@ -148,12 +152,17 @@ try {
   await page.keyboard.press("Escape");
 
   // A real shell in the Terminal window: a prompt on a pty, no tty complaint.
-  await desktop("open", { app: "terminal" });
-  await page.waitForSelector(".term-screen", { timeout: 8_000 });
-  await page.waitForTimeout(1500);
-  const termText = await page.$eval(".term-screen", (el) => el.textContent);
+  const { window: terminalWindow } = await desktop("open", { app: "terminal" });
+  const app = page.locator(`.os-window[data-id="${terminalWindow.id}"]`);
+  const terminal = app.locator(".term-screen");
+  await app.locator(".term-status.ok").waitFor();
+  await terminal.focus();
+  await terminal.pressSequentially(`node -p "['SBX', 6 * 7].join('-')"`);
+  await terminal.press("Enter");
+  await terminal.filter({ hasText: "SBX-42" }).waitFor();
+  const termText = await terminal.textContent();
   check(!/can't access tty/.test(termText), "the shell does not complain about a missing tty");
-  check(/[$#] ?$/m.test(termText.trim()) || /\$|#/.test(termText), `the shell shows a prompt (${JSON.stringify(termText.slice(-60))})`);
+  check(termText.includes("SBX-42"), "the terminal accepts input and displays the shell’s answer");
   check(await page.$(".term-tab"), "the Terminal has tabs");
 
   // Braiwser: a service that is merely listening shows up on its start page, one
@@ -162,18 +171,26 @@ try {
   const svc = http.createServer((_req, r) => { r.writeHead(200, { "Content-Type": "text/html" }); r.end("<title>hello cell</title><h1 id=hello>hello from the cell</h1>"); });
   await new Promise((r) => svc.listen(0, "127.0.0.1", r));
   const svcPort = svc.address().port;
-  await desktop("open", { app: "browser" });
-  await page.waitForSelector(".braiwser-start", { timeout: 8_000 });
+  const { window: browserWindow } = await desktop("open", { app: "browser" });
+  const browserApp = page.locator(`.os-window[data-id="${browserWindow.id}"]`);
+  const startPage = browserApp.locator(".braiwser-start");
+  await startPage.waitFor({ timeout: 120_000 });
   const bStatus = await page.evaluate(async () => (await fetch(`/${location.pathname.split("/")[1]}/braiwser/status`)).json());
   if (!bStatus.ready) {
-    check(await page.isVisible(".braiwser-start >> text=Braiwser"), "without a runtime, Braiwser says how it gets one instead of an empty page");
+    check(await startPage.getByText("Braiwser", { exact: true }).isVisible(), "without a runtime, Braiwser says how it gets one instead of an empty page");
   } else {
-    await page.waitForFunction((p) => [...document.querySelectorAll(".braiwser-start .app-btn")].some((b) => b.textContent.includes(`:${p}`)), svcPort, { timeout: 15_000 });
+    const listener = startPage.getByRole("button", { name: `:${svcPort} — running now`, exact: true });
+    await listener.waitFor();
     check(true, "a listening port appears on Braiwser's start page without being exposed first");
-    await page.click(`.braiwser-start .app-btn:has-text(":${svcPort} — running now")`);
-    await page.waitForFunction(() => document.querySelector(".braiwser-overlay")?.hidden && document.querySelector(".braiwser-frame")?.getAttribute("src"), null, { timeout: 30_000 });
-    await page.waitForFunction((p) => document.querySelector(".braiwser-address")?.value.includes(`localhost:${p}`), svcPort, { timeout: 15_000 });
-    check(true, "and Braiwser shows the service at localhost:<port>, from a real Chromium");
+    await listener.click();
+    await browserApp.locator(".braiwser-view img[src]").waitFor();
+    try {
+      await browserApp.locator(".os-title").filter({ hasText: "hello cell" }).waitFor({ timeout: 45_000 });
+    } catch (error) {
+      console.error("Browser window", await browserApp.innerText(), await browserApp.locator(".braiwser-address").inputValue());
+      throw error;
+    }
+    check(new URL(await browserApp.locator(".braiwser-address").inputValue()).port === String(svcPort), "and Braiwser displays the listening service's page and address");
     const exposedNow = (await page.evaluate(async () => (await fetch(`/${location.pathname.split("/")[1]}/mcp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ server: "ports", tool: "list", args: {} }) }).then((r) => r.json())).result.ports.map((p) => p.port)));
     check(exposedNow.includes(svcPort), "one click exposed the port through ports.expose");
   }

@@ -778,6 +778,27 @@ export function createSandboxForTenant(tenantId, creatorPrincipalId, { slug, nam
   return sandbox;
 }
 
+const trialLifetime = 24 * 60 * 60 * 1000;
+export function createDesktopTrial(principal, options, origin) {
+  return withTransaction(() => {
+    const sb = createSandboxForTenant(principal.tenant_id, principal.id, options);
+    openDb().prepare("INSERT INTO desktop_trials VALUES (?,?,?,?)").run(sb.id, principal.id, origin, now() + trialLifetime);
+    return sb;
+  });
+}
+export function desktopTrial(id) {
+  return openDb().prepare("SELECT * FROM desktop_trials WHERE sandbox_id=?").get(id);
+}
+export function keepDesktopTrial(id) {
+  openDb().prepare("DELETE FROM desktop_trials WHERE sandbox_id=?").run(id);
+}
+export function extendDesktopTrial(id) {
+  openDb().prepare("UPDATE desktop_trials SET expires_at=? WHERE sandbox_id=?").run(now() + trialLifetime, id);
+}
+export function expiredDesktopTrials() {
+  return openDb().prepare("SELECT s.* FROM sandboxes s JOIN desktop_trials t ON s.id=t.sandbox_id WHERE t.expires_at<=?").all(now());
+}
+
 // ---- Phase-3 agents -------------------------------------------------------
 
 export function createAgent(sandboxId, { principalId, spawnedBy, name, patterns, cmd, kind = "shell", prompt = null, systemPrompt = null }) {
@@ -1050,6 +1071,8 @@ export function deleteSandbox(sandboxId) {
       return !other; // no grants elsewhere => safe to remove the principal
     });
 
+    db.prepare("DELETE FROM conversation_messages WHERE conversation_id IN (SELECT id FROM conversations WHERE sandbox_id=?)").run(sandboxId);
+    db.prepare("DELETE FROM conversations WHERE sandbox_id=?").run(sandboxId);
     db.prepare("DELETE FROM jobs WHERE sandbox_id=?").run(sandboxId);
     db.prepare("DELETE FROM agents WHERE sandbox_id=?").run(sandboxId);
     db.prepare("DELETE FROM secrets WHERE sandbox_id=?").run(sandboxId);

@@ -8,6 +8,7 @@ import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 
 import config, { buildInfo } from "../../../packages/config/src/config.js";
@@ -15,6 +16,7 @@ import {
   getSandboxBySlug, getPrincipal, grantsFor, resolveSession,
   createSession, revokeSession, ensureSeed, recentAudit, queryAudit,
   mintMachineToken, createSandboxForTenant,
+  listGallery, createDesktopTrial, desktopTrial, keepDesktopTrial, extendDesktopTrial, expiredDesktopTrials,
   createAccount, verifyAccount, getPrimarySandboxForTenant,
   createDistro, getDistro, getDistroByName, listDistros, deleteDistro, sandboxCountForTenant,
   createTenant, totalSandboxCount, tenantAgentStats, getAgent,
@@ -57,6 +59,7 @@ import {
 const maxSandboxes = () => Number(process.env.SANDBOXOS_MAX_SANDBOXES ?? 10);
 import { getKernel, _dropKernel } from "../../../packages/kernel/src/kernel.js";
 import { clearJobs as forgetJobs } from "../../../packages/kernel/src/servers/job-store.js";
+import { stopAllProcs } from "../../../packages/kernel/src/servers/proc.js";
 import { getCell } from "../../../packages/cell/src/cell.js";
 import { seedVolume } from "../../../packages/cell/src/seed.js";
 import { runCommand } from "../../../packages/command-central/src/console.js";
@@ -75,6 +78,33 @@ export const scheduler = new Scheduler({
   maxRunning: Number(process.env.SANDBOXOS_MAX_RUNNING ?? 4),
   idleMs: Number(process.env.SANDBOXOS_IDLE_MS ?? 10 * 60 * 1000),
 });
+
+const discardingTrials = new Map();
+function discardTrial(sb) {
+  if (discardingTrials.has(sb.id)) return discardingTrials.get(sb.id);
+  const discard = (async () => {
+    stopAllProcs(sb.id);
+    for (const session of braiwser.list(sb.id)) await braiwser.close(BraiwserSessions.key(sb.id, session.windowId));
+    braiwserOwners.delete(sb.id);
+    braiwserSandboxes.delete(sb.id);
+    await scheduler.hibernate(sb);
+    await getCell(sb).destroy();
+    destroyOs(sb);
+    forgetJobs(sb);
+    _dropKernel(sb.id);
+    deleteSandbox(sb.id);
+  })().finally(() => discardingTrials.delete(sb.id));
+  discardingTrials.set(sb.id, discard);
+  return discard;
+}
+export async function reapDesktopTrials() {
+  for (const sb of expiredDesktopTrials()) {
+    const pending = desktopTrial(sb.id);
+    if (!pending || pending.expires_at > Date.now()) continue;
+    if (sandboxCountForTenant(sb.tenant_id) === 1) keepDesktopTrial(sb.id);
+    else await discardTrial(sb);
+  }
+}
 
 // ── Braiwser ────────────────────────────────────────────────────────────────
 // The Browser app is Braiwser: a real Chromium per open window, running next to
@@ -1198,7 +1228,16 @@ async function handle(req, res) {
   if (top === "api" && segments[2] === "sandboxes" && req.method === "POST" && !segments[3]) {
     const principal = authenticate(req);
     if (!principal) return sendJson(res, 401, { ok: false, error: "not authenticated" });
-    const { slug: newSlug, name, distro: distroName, seed, vanityDomain, domain } = await readBody(req);
+    const { slug: requestedSlug, name, distro: distroName, seed, vanityDomain, domain, trial } = await readBody(req);
+    const newSlug = trial ? "try-" + crypto.randomUUID().slice(0, 12) : requestedSlug;
+    if (trial) {
+      const origin = getSandboxBySlug(trial.origin);
+      if (!origin || origin.tenant_id !== principal.tenant_id || !grantsFor(principal.id, origin.id).length)
+        return sendJson(res, 403, { ok: false, error: "Origin desktop unavailable" });
+      if (!builtinDistro(trial.distro) && !listGallery(principal.tenant_id, { principalId: principal.id }).some(d => d.id === trial.distro && d.has_os))
+        return sendJson(res, 404, { ok: false, error: "Desktop unavailable in the gallery" });
+      if (desktopTrial(origin.id)) return sendJson(res, 409, { ok: false, error: "Keep or leave this trial before starting another." });
+    }
     if (!SLUG_RE.test(newSlug ?? "") || RESERVED.has(newSlug)) return sendJson(res, 400, { ok: false, error: "invalid slug" });
     const targetDomain = vanityDomain || domain;
     if (targetDomain) {
@@ -1226,7 +1265,22 @@ async function handle(req, res) {
     if (sandboxCountForTenant(principal.tenant_id) >= effectiveMaxSb)
       return sendJson(res, 429, { ok: false, error: `sandbox quota exceeded (max ${effectiveMaxSb})` });
     try {
-      const sb = createSandboxForTenant(principal.tenant_id, principal.id, { slug: newSlug, name, cellBackend: cellBackend() });
+      const options = { slug: newSlug, name, cellBackend: cellBackend() };
+      if (trial) {
+        const sb = createDesktopTrial(principal, options, trial.origin);
+        try {
+          seedVolume(sb);
+          await scheduler.wake(sb, sbQuota);
+          const kernel = await getKernel(sb);
+          const asOwner = (tool, args) => kernel.call({ principalId: principal.id, heldPatterns: grantsFor(principal.id, sb.id), server: "desktop", tool, args });
+          const forked = await asOwner("distroFork", { id: trial.distro });
+          if (!forked.ok) throw new Error(forked.error);
+          const ready = await asOwner("setup", { skip: true });
+          if (!ready.ok) throw new Error(ready.error);
+          return sendJson(res, 201, { ok: true, slug: sb.slug });
+        } catch (e) { await discardTrial(sb); throw e; }
+      }
+      const sb = createSandboxForTenant(principal.tenant_id, principal.id, options);
       if (targetDomain) {
         try {
           const resDomain = setSandboxVanityDomain(sb.id, targetDomain);
@@ -1360,6 +1414,18 @@ async function handle(req, res) {
   const held = grantsFor(principal.id, sandbox.id);
   if (held.length === 0) return sendJson(res, 403, { ok: false, error: "not authorized for this sandbox" });
 
+  if (action === "trial" && req.method === "POST") {
+    const trial = desktopTrial(sandbox.id);
+    if (!trial || trial.owner_id !== principal.id) return sendJson(res, 404, { ok: false, error: "Trial unavailable" });
+    if (discardingTrials.has(sandbox.id)) return sendJson(res, 409, { ok: false, error: "Trial is closing" });
+    if (segments[3] === "keep") keepDesktopTrial(sandbox.id);
+    else if (segments[3] === "discard") {
+      if (sandboxCountForTenant(sandbox.tenant_id) <= 1) return sendJson(res, 409, { ok: false, error: "This is your last sandbox. Keep this desktop to continue." });
+      await discardTrial(sandbox);
+    } else return sendJson(res, 404, { ok: false, error: "Unknown trial action" });
+    return sendJson(res, 200, { ok: true, origin: trial.origin_slug });
+  }
+
   // GET /:slug — wake the Cell (through the Scheduler) and serve the desktop.
   if (!action && req.method === "GET") {
     scheduler.wake(sandbox, getQuota(principal.tenant_id)).catch(() => {});
@@ -1446,15 +1512,27 @@ async function handle(req, res) {
       return sendJson(res, 400, { ok: false, error: e.message });
     }
     scheduler.touch(sandbox.id);
-    const bytes = await new Promise((resolve, reject) => {
-      let written = 0;
-      const out = fs.createWriteStream(dest, { flags: "w", mode: 0o644 });
-      req.on("data", (c) => { written += c.length; });
-      req.pipe(out);
-      out.on("finish", () => resolve(written));
-      out.on("error", reject);
-    }).catch((e) => ({ error: e.message }));
-    if (typeof bytes === "object") return sendJson(res, 500, { ok: false, error: bytes.error });
+    // Publish an upload only after every byte reached disk. A dropped connection
+    // or a failed retry must leave the previous version of a file readable.
+    let temp, bytes;
+    try {
+      let mode = 0o644;
+      try {
+        dest = await canonicalContained(cell.root, target);
+        const previous = await fs.promises.stat(dest);
+        if (!previous.isFile()) throw new Error("Upload destination must be a file");
+        mode = previous.mode & 0o777;
+      } catch (e) { if (e.code !== "ENOENT") throw e; }
+      temp = path.join(path.dirname(dest), ".upload-" + crypto.randomUUID());
+      const out = fs.createWriteStream(temp, { flags: "wx", mode });
+      await pipeline(req, out);
+      bytes = out.bytesWritten;
+      await fs.promises.rename(temp, dest);
+    } catch (err) {
+      if (temp) await fs.promises.rm(temp, { force: true }).catch(() => {});
+      if (res.destroyed) return;
+      return sendJson(res, 400, { ok: false, error: err.message });
+    }
     // Mirror the audit trail of an equivalent fs.write so a streamed upload is not
     // invisible next to the MCP path.
     appendAudit({
@@ -1949,7 +2027,9 @@ async function handle(req, res) {
   // GET /:slug/os/doc — the document plus catalogs, in one round trip.
   if (action === "os" && segments[3] === "doc" && req.method === "GET") {
     const r = await kernel.call({ principalId: principal.id, heldPatterns: held, server: "desktop", tool: "get", args: {} });
-    return sendJson(res, r.ok ? 200 : 403, r.ok ? { ok: true, ...r.result } : { ok: false, error: r.error });
+    const trial = desktopTrial(sandbox.id);
+    if (trial?.owner_id === principal.id) extendDesktopTrial(sandbox.id);
+    return sendJson(res, r.ok ? 200 : 403, r.ok ? { ok: true, ...r.result, viewerId: principal.id, ...(trial?.owner_id === principal.id ? { trial: { origin: trial.origin_slug } } : {}) } : { ok: false, error: r.error });
   }
 
   // GET /:slug/os/manual        — the table of contents plus every heading
@@ -1986,7 +2066,13 @@ async function handle(req, res) {
     // until the next write. With a rev on every tick it lasts one ping, and the
     // client pulls without anybody noticing. It is twenty-odd bytes every 25
     // seconds against a desktop that would otherwise be quietly wrong.
+    const trialSession = desktopTrial(sandbox.id)?.owner_id === principal.id;
+    let lastRenewed = Date.now();
     const keepalive = setInterval(() => {
+      if (trialSession && Date.now() - lastRenewed > 3600000) {
+        extendDesktopTrial(sandbox.id);
+        lastRenewed = Date.now();
+      }
       try { res.write(`event: tick\ndata: ${JSON.stringify({ rev: loadOs(sandbox).rev })}\n\n`); }
       catch { /* the socket went; 'close' will clean up */ }
     }, 25_000);

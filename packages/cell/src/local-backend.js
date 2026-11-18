@@ -11,8 +11,9 @@
 // of returning an empty string and exit code 1.
 
 import fs from "node:fs";
+import os from "node:os";
 import { groupHandle } from "./handles.js";
-import { newMarker, ptyWrapper, resizeScript, cleanupScript } from "./pty.js";
+import { newMarker, markerPath, ptyWrapper, resizeScript, cleanupScript } from "./pty.js";
 import { safeSpawn, detachedSpawn, execFileSafe, killTree, sessionIdsOf, killSessions } from "./spawn.js";
 import { resolveShell, baseEnv, shellTmp, toShellPath, unsupportedHost } from "./shell.js";
 
@@ -133,7 +134,12 @@ export class LocalBackend {
     // pipes open long after the process we spawned is gone.
     const argv = sh.interactiveArgv(ptyWrapper(`"${interactive}" -i`, tmp), marker);
 
-    const proc = safeSpawn(sh.bin, argv, {
+    // Darwin's script(1) accepts a pipe, but rejects the socketpair Node uses
+    // for child stdin. Keep the wrapper PID and forward bytes through a pipe.
+    const darwinPty = process.platform === "darwin" && sh.pty;
+    const bin = darwinPty ? "/bin/bash" : sh.bin;
+    const args = darwinPty ? ["-c", 'exec "$@" < <(exec cat)', "pty", sh.bin, ...argv] : argv;
+    const proc = safeSpawn(bin, args, {
       cwd: this.root,
       env: fullEnv,
       stdio: ["pipe", "pipe", "pipe"],
@@ -143,6 +149,11 @@ export class LocalBackend {
     }, (err) => {
       onData(`\r\n\x1b[31msandboxos:\x1b[0m could not start ${sh.bin}: ${err.code ?? err.message}\r\n`);
       close();
+    });
+
+    // An input write can race shell exit. Stream errors arrive asynchronously.
+    proc.stdin?.on("error", err => {
+      if (!["EPIPE", "ECONNRESET", "ERR_STREAM_DESTROYED"].includes(err.code)) onData(`\r\nsandboxos: ${err.message}\r\n`);
     });
 
     if (!sh.pty) {
@@ -165,7 +176,6 @@ export class LocalBackend {
       if (!ready) {
         ready = true;
         clearTimeout(readyTimer);
-        noteSessions();
         for (const data of pending.splice(0)) {
           try { proc.stdin?.write(data); } catch { /* shell exiting */ }
         }
@@ -173,8 +183,16 @@ export class LocalBackend {
     };
     const readyTimer = sh.pty ? setTimeout(flushPending, 200) : null;
 
-    proc.stdout?.on("data", (d) => { flushPending(); onData(d); });
-    proc.stderr?.on("data", (d) => { flushPending(); onData(d); });
+    let heardShell = false;
+    const receive = (data) => {
+      // A fallback timer can fire before script has created the slave session.
+      // Record its identity on actual output, before releasing queued commands.
+      if (!heardShell) { heardShell = true; noteSessions(); }
+      flushPending();
+      onData(data);
+    };
+    proc.stdout?.on("data", receive);
+    proc.stderr?.on("data", receive);
 
     const resize = sh.pty
       ? (c, r) => detachedSpawn(sh.bin, sh.argv(resizeScript(marker, c, r, tmp)), { env: fullEnv })
@@ -182,25 +200,30 @@ export class LocalBackend {
     // The pty starts unsized (our stdin is a pipe): size it once the shell is up.
     const first = sh.pty ? setTimeout(() => resize(cols, rows), 250) : null;
     let cleaned = false;
-    const cleanup = () => {
+    const cleanup = (exited = false) => {
       if (cleaned) return;
       cleaned = true;
       clearTimeout(readyTimer);
+      proc.stdin?.destroy?.();
       // Nothing queued outlives the session, and nothing queues after it.
       ready = true;
       pending.length = 0;
       // The marker's pid is the cleanup script's to signal: it is written by the
       // Cell, so the Gateway does not read a number out of it and kill that.
-      if (sh.pty) detachedSpawn(sh.bin, sh.argv(cleanupScript(marker, tmp)), { detached: process.platform !== "win32" });
+      if (sh.pty) {
+        if (exited) fs.rm(markerPath(marker, os.tmpdir()), { force: true }, () => {});
+        else detachedSpawn(sh.bin, sh.argv(cleanupScript(marker, tmp)), { detached: process.platform !== "win32" });
+      }
       // Ending a session ends what it started — including what it disowned and
       // then walked away from by exiting on its own.
-      noteSessions();
+      if (!exited) noteSessions();
       killSessions(sessions);
-      killTree(proc.pid, "SIGKILL", proc);
+      if (!exited) killTree(proc.pid, "SIGKILL", proc);
     };
-    proc.on("exit", () => { clearTimeout(first); clearTimeout(readyTimer); cleanup(); close(); });
+    proc.on("exit", () => { clearTimeout(first); clearTimeout(readyTimer); cleanup(true); close(); });
     return {
       write(data) {
+        if (cleaned || closed || proc.stdin?.destroyed) return;
         if (!ready) {
           pending.push(data);
           return;
